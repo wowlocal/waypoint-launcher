@@ -69,11 +69,14 @@ case "install":
 case "logs":
     await logs(Array(args.dropFirst()))
 
+case "launch":
+    launch(Array(args.dropFirst()))
+
 case "diagnose":
     diagnose()
 
 default:
-    fail("usage: waypoint-cli [list | plan <uid> | check-tokens [GAMEKEY…] | check-updates | update <uid> [--verify] [--dry-run] | fetch <uid> <regex> <dir> | install <uid> <dir> [options] | logs [options] | diagnose]")
+    fail("usage: waypoint-cli [list | plan <uid> | check-tokens [GAMEKEY…] | check-updates | update <uid> [--verify] [--dry-run] | fetch <uid> <regex> <dir> | install <uid> <dir> [options] | launch <uid> [--state file] [--dry-run] | logs [options] | diagnose]")
 }
 
 Diagnostics.shared.flush()

@@ -78,3 +78,37 @@ func parseDuration(_ text: String) -> TimeInterval? {
     default: return nil
     }
 }
+
+/// `launch <uid> [--state file] [--dry-run]`: starts a game with the saved
+/// sign-in token (from the app or Battle.net). The terminal can't show the
+/// web login, so sign in once in the app if there's no token yet.
+func launch(_ args: [String]) {
+    let usage = "usage: waypoint-cli launch <uid> [--state file] [--dry-run]"
+    var positional: [String] = []
+    var state: String?
+    var i = 0
+    while i < args.count {
+        if args[i] == "--state", i + 1 < args.count { state = args[i + 1]; i += 2; continue }
+        if !args[i].hasPrefix("--") { positional.append(args[i]) }
+        i += 1
+    }
+    guard positional.count == 1 else { fail(usage) }
+    let store = state.map { InstallStateStore(file: URL(fileURLWithPath: $0)) } ?? InstallStateStore()
+    guard let game = GameLibrary(stateStore: store).games().first(where: { $0.install.uid == positional[0] }) else {
+        fail("no installed game with uid \(positional[0])")
+    }
+    do {
+        let plan = try GameLauncher.plan(for: game)
+        print("\(game.displayName) \(game.install.version ?? "?"): \(plan.executable.path) \(plan.arguments.joined(separator: " "))")
+        print("cwd \(plan.workingDirectory.path), Launch Options/\(plan.codename), region \(plan.region.rawValue)")
+        guard !args.contains("--dry-run") else { return }
+        guard let stored = try LaunchOptions(gameKey: plan.codename).storedToken(), let token = LoginToken(stored) else {
+            fail("no saved sign-in for \(plan.codename); sign in once in Waypoint (or Battle.net)")
+        }
+        Log.info(.auth, "token", nil, ["source": "stored", "codename": plan.codename, "via": "cli"])
+        let pid = try GameLauncher.launch(plan, token: token, gameName: game.displayName)
+        print("started, pid \(pid)")
+    } catch {
+        fail("\(error)")
+    }
+}
