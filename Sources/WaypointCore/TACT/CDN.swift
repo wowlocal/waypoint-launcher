@@ -8,6 +8,21 @@ public struct ProductVersion: Sendable, Equatable, Codable {
     public var buildID: Int
     /// Human-readable version, e.g. `36.6.3.253932.253216`.
     public var name: String
+    /// Hash of the product config JSON (layout, binaries, tags).
+    public var productConfig: String?
+    /// Key ring for encrypted content, when the product has one (WoW).
+    public var keyRing: String?
+
+    public init(region: String, buildConfig: String, cdnConfig: String, buildID: Int, name: String,
+                productConfig: String? = nil, keyRing: String? = nil) {
+        self.region = region
+        self.buildConfig = buildConfig
+        self.cdnConfig = cdnConfig
+        self.buildID = buildID
+        self.name = name
+        self.productConfig = productConfig
+        self.keyRing = keyRing
+    }
 }
 
 /// Blizzard's patch service: which build is live, and where the CDN is.
@@ -24,7 +39,9 @@ public struct VersionService: Sendable {
               let build = row["BuildConfig"], let cdn = row["CDNConfig"], let name = row["VersionsName"]
         else { throw TACTError.notFound("\(product) version for \(region.rawValue)") }
         return ProductVersion(region: row["Region"] ?? region.rawValue, buildConfig: build, cdnConfig: cdn,
-                              buildID: Int(row["BuildId"] ?? "") ?? 0, name: name)
+                              buildID: Int(row["BuildId"] ?? "") ?? 0, name: name,
+                              productConfig: row["ProductConfig"].flatMap { $0.isEmpty ? nil : $0 },
+                              keyRing: row["KeyRing"].flatMap { $0.isEmpty ? nil : $0 })
     }
 
     public func cdn(product: String, region: Region) async throws -> CDNClient {
@@ -44,7 +61,11 @@ public struct VersionService: Sendable {
             servers = (row["Hosts"] ?? "").split(separator: " ").compactMap { URL(string: "https://\($0)") }
         }
         guard !servers.isEmpty else { throw TACTError.notFound("HTTPS CDN for \(product)") }
-        return CDNClient(product: product, path: path, servers: servers, session: session)
+        var client = CDNClient(product: product, path: path, servers: servers, session: session)
+        client.configPath = row["ConfigPath"].flatMap { $0.isEmpty ? nil : $0 }
+        client.hosts = (row["Hosts"] ?? "").split(separator: " ").map(String.init)
+        client.serversField = row["Servers"] ?? ""
+        return client
     }
 
     private func table(product: String, file: String, region: Region) async throws -> BPSV {
@@ -67,6 +88,11 @@ public struct CDNClient: Sendable {
     public var servers: [URL]
     public var session: URLSession
     public var cacheDirectory: URL
+    /// Where product configs live (`tpr/configs/data`), from the cdns table.
+    public var configPath: String?
+    /// The cdns table's Hosts and Servers columns, verbatim, for `.build.info`.
+    public var hosts: [String] = []
+    public var serversField = ""
 
     public init(product: String, path: String, servers: [URL], session: URLSession = .shared,
                 cacheDirectory: URL = CDNClient.defaultCacheDirectory) {
@@ -82,11 +108,23 @@ public struct CDNClient: Sendable {
             .appendingPathComponent("dev.waypoint.launcher/tact", isDirectory: true)
     }
 
-    public enum Kind: String, Sendable { case config, data }
+    public enum Kind: String, Sendable {
+        case config, data
+        /// Directly under `path`, as product configs are.
+        case raw = ""
+    }
 
     func relativePath(_ kind: Kind, _ hash: String, suffix: String = "") -> String {
         let h = hash.lowercased()
-        return "\(path)/\(kind.rawValue)/\(h.prefix(2))/\(h.dropFirst(2).prefix(2))/\(h)\(suffix)"
+        let folder = kind == .raw ? path : "\(path)/\(kind.rawValue)"
+        return "\(folder)/\(h.prefix(2))/\(h.dropFirst(2).prefix(2))/\(h)\(suffix)"
+    }
+
+    /// A product config JSON: lives outside the product's own CDN path.
+    public func cachedConfigFile(_ hash: String, path configPath: String) async throws -> Data {
+        var mirror = self
+        mirror.path = configPath
+        return try await mirror.cached(.raw, hash)
     }
 
     /// Small files, kept in memory and cached on disk.
