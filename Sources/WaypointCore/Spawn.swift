@@ -49,10 +49,11 @@ enum Spawn {
         guard result == 0 else { throw Failure(errno: result) }
 
         // Reap the child when it exits so it doesn't linger as a zombie while we run.
+        let child = pid
         Thread.detachNewThread {
             var status: Int32 = 0
-            waitpid(pid, &status, 0)
+            waitpid(child, &status, 0)
         }
-        return pid
+        return child
     }
 }

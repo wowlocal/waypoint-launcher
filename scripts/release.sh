@@ -32,7 +32,7 @@ dmg="$dist/Waypoint-$version.dmg"
 # Preconditions first, so a missing credential doesn't cost a full build.
 [[ -z "$(git status --porcelain)" || -n "${ALLOW_DIRTY:-}" ]] \
     || fail "working tree has uncommitted changes (ALLOW_DIRTY=1 to build anyway)"
-identity="${SIGN_IDENTITY:-$(security find-identity -v -p codesigning | sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p' | head -1)}"
+identity="${SIGN_IDENTITY:-$(security find-identity -v -p codesigning | sed -n 's/.*"\(Developer ID Application:.*\)"/\1/p' | awk 'NR == 1')}"
 [[ -n "$identity" ]] || fail "no Developer ID Application identity in the keychain"
 if [[ -n "${NOTARY_KEY:-}" ]]; then
     [[ -n "${NOTARY_KEY_ID:-}" && -n "${NOTARY_ISSUER:-}" ]] || fail "NOTARY_KEY also needs NOTARY_KEY_ID and NOTARY_ISSUER"
@@ -57,7 +57,9 @@ xcrun swift test
 step "Building Waypoint $version"
 APP_PATH="$app" VERSION="$version" SIGN_IDENTITY="$identity" scripts/bundle.sh
 codesign --verify --deep --strict "$app"
-codesign -dvv "$app" 2>&1 | grep -q 'flags=.*runtime' || fail "hardened runtime is not enabled"
+# Capture first: `grep -q` exits early and pipefail would count codesign's SIGPIPE as failure.
+signature="$(codesign -dvv "$app" 2>&1)"
+[[ "$signature" == *"(runtime)"* ]] || fail "hardened runtime is not enabled"
 
 # notarize <file>: submit, wait, and on rejection print Apple's log.
 notarize() {
