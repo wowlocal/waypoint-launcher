@@ -63,8 +63,34 @@ enum WebSession {
         // Look like Safari; WKWebView's default user agent has no browser
         // token, which login and captcha pages may treat as unsupported.
         config.applicationNameForUserAgent = "Version/26.0 Safari/605.1.15"
+        config.userContentController.addUserScript(WKUserScript(source: launcherBackdrop, injectionTime: .atDocumentStart, forMainFrameOnly: true))
         return config
     }
+
+    /// The backdrop Blizzard's login pages expect: they're drawn for the
+    /// launcher's dark window (transparent, light text), so on WKWebView's
+    /// white the heading, logo and links were invisible. Pages with their
+    /// own background or dark text are left alone.
+    static let launcherBackdropColor = NSColor(red: 13 / 255, green: 15 / 255, blue: 20 / 255, alpha: 1)
+    private static let launcherBackdrop = #"""
+    (function () {
+      // Blizzard's login pages are drawn for the dark window of its launcher: a
+      // transparent page with light text. On WKWebView's white they vanish, so
+      // such a page gets the launcher's dark backdrop. Light pages are left alone.
+      function clear(color) { return color === 'transparent' || /rgba\(\d+, \d+, \d+, 0\)/.test(color); }
+      function fix() {
+        var html = document.documentElement, body = document.body;
+        if (!body || html.dataset.waypointBackdrop) return;
+        if (!clear(getComputedStyle(html).backgroundColor) || !clear(getComputedStyle(body).backgroundColor)) return;
+        var rgb = (getComputedStyle(body).color.match(/\d+(\.\d+)?/g) || []).map(Number);
+        if (rgb.length < 3 || (0.299 * rgb[0] + 0.587 * rgb[1] + 0.114 * rgb[2]) / 255 < 0.6) return;
+        html.dataset.waypointBackdrop = '1';
+        html.style.backgroundColor = '#0d0f14';
+      }
+      document.addEventListener('DOMContentLoaded', fix);
+      window.addEventListener('load', fix);
+    })();
+    """#
 
     @MainActor static func store(_ session: WebSessionID) -> WKWebsiteDataStore {
         switch session {
@@ -183,6 +209,7 @@ final class LoginWindow: NSObject, NSWindowDelegate {
 
             let webView = preparedWebView ?? WKWebView(frame: .zero, configuration: WebSession.makeConfiguration(session))
             webView.navigationDelegate = catcher
+            webView.underPageBackgroundColor = WebSession.launcherBackdropColor
             // It may have reached the token during the delegate hand-off.
             if let callback = webView.url, let token = BattleNetLogin.token(fromCallback: callback) {
                 self.continuation = nil
