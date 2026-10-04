@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="Resources/AppIcon.png" width="128" alt="Иконка Waypoint">
+
 # Waypoint
 
 **Крошечный нативный лаунчер для игр Blizzard на маках с Apple Silicon.**<br>
@@ -166,7 +168,7 @@ WAYPOINT_NETWORK_TESTS=1 xcrun swift test --filter liveUpdate  # настоящ�
 - [ ] Обновление World of Warcraft (его данные лежат в хранилище CASC)
 - [ ] Установка игр с нуля
 - [ ] Готовые подписанные релизы с нотаризацией
-- [ ] Иконка приложения
+- [x] Иконка приложения
 
 ## Дисклеймер
 

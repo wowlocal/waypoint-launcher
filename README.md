@@ -1,5 +1,7 @@
 <div align="center">
 
+<img src="Resources/AppIcon.png" width="128" alt="Waypoint icon">
+
 # Waypoint
 
 **A tiny native launcher for Blizzard games on Apple Silicon Macs.**<br>
@@ -166,7 +168,7 @@ WAYPOINT_NETWORK_TESTS=1 xcrun swift test --filter liveUpdate  # real update, 36
 - [ ] World of Warcraft updates (its data lives in CASC storage)
 - [ ] Install games from scratch
 - [ ] Prebuilt, notarized releases
-- [ ] App icon
+- [x] App icon
 
 ## Disclaimer
 
