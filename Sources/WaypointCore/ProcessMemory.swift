@@ -20,6 +20,11 @@ extension ProcessMemory {
     /// Hands memory that big jobs (install plans, updates) freed back to the
     /// system right away, so the app drops back to its idle footprint
     /// instead of keeping the freed pages around for reuse.
+    ///
+    /// This covers malloc's small and medium regions. Freed large blocks sit
+    /// in malloc's large cache, which this doesn't empty; the app's
+    /// Info.plist turns that cache off (`MallocLargeCache=0` in
+    /// LSEnvironment, see scripts/bundle.sh).
     public static func releaseFreed() {
         malloc_zone_pressure_relief(nil, 0)
     }

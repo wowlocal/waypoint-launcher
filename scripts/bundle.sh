@@ -72,6 +72,9 @@ cat > "$app/Contents/Info.plist" <<PLIST
     <key>LSMinimumSystemVersion</key><string>14.0</string>
     <key>LSApplicationCategoryType</key><string>public.app-category.games</string>
     <key>NSHighResolutionCapable</key><true/>
+    <!-- Installs and updates allocate big buffers; malloc's large cache would
+         keep them dirty after they're freed (80 MB vs 6 MB idle afterwards). -->
+    <key>LSEnvironment</key><dict><key>MallocLargeCache</key><string>0</string></dict>
 ${sparkle_keys}
 </dict>
 </plist>
