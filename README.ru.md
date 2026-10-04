@@ -77,7 +77,7 @@ open build/Waypoint.app
 
 `scripts/release.sh` прогоняет тесты, собирает приложение и подписывает его Developer ID (hardened runtime). Потом нотаризует приложение и делает staple, упаковывает его в DMG, подписывает, нотаризует и делает staple для DMG тоже. Проверяет результат через Gatekeeper, затем пишет `appcast.xml` для Sparkle и проверяет его подпись EdDSA.
 
-Установленные копии берут фид из `releases/latest/download/appcast.xml`, поэтому обновление уходит к пользователям в момент публикации релиза.
+С `--publish` скрипт делает то же, что snippets: DMG и `appcast.xml` уходят в S3 (`storage.yandexcloud.net/macos-releases/waypoint/`) — это фид обновлений, который читают установленные копии, а DMG дублируется в GitHub Releases. Ключи S3 берутся из `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` или из `scripts/release.env` (в .gitignore).
 
 ```sh
 # один раз: сохранить данные для нотаризации в Keychain (нужен app-specific пароль)

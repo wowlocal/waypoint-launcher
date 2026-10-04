@@ -7,9 +7,9 @@
 #   SIGN_IDENTITY  codesign identity (default: ad-hoc "-"). A real identity
 #                  also enables the hardened runtime and a secure timestamp,
 #                  which notarization requires.
-#   SPARKLE_FEED   appcast URL for self-updates. Defaults to the GitHub
-#                  release feed for signed builds; ad-hoc builds get none, so
-#                  development copies never replace themselves.
+#   SPARKLE_FEED   appcast URL for self-updates. Defaults to the release feed
+#                  on S3 for signed builds (see release.sh); ad-hoc builds get
+#                  none, so development copies never replace themselves.
 #   BUNDLE_ID      bundle identifier (default: dev.waypoint.launcher)
 #
 # Uses Xcode's toolchain: open-source toolchains may not match the installed SDK.
@@ -22,7 +22,7 @@ build_number="${BUILD_NUMBER:-$(git rev-list --count HEAD 2>/dev/null || echo 1)
 identity="${SIGN_IDENTITY:--}"
 bundle_id="${BUNDLE_ID:-dev.waypoint.launcher}"
 if [[ -z "${SPARKLE_FEED+set}" && "$identity" != "-" ]]; then
-    feed="https://github.com/wowlocal/waypoint-launcher/releases/latest/download/appcast.xml"
+    feed="https://storage.yandexcloud.net/macos-releases/waypoint/appcast.xml"
 else
     feed="${SPARKLE_FEED:-}"
 fi

@@ -1,12 +1,14 @@
 #!/bin/zsh
-# Builds a signed, notarized and stapled Waypoint DMG for GitHub Releases,
-# plus the Sparkle appcast that existing installs update from.
+# Builds a signed, notarized and stapled Waypoint DMG plus the Sparkle appcast
+# that installed copies update from, and publishes them like snippets does:
+# the DMG and appcast go to S3 (Yandex Object Storage), which is the live
+# update feed, and the DMG is mirrored as a GitHub release.
 #
-#   scripts/release.sh 0.1.0             # → dist/Waypoint-0.1.0.dmg (+ .sha256, appcast.xml)
-#   scripts/release.sh 0.1.0 --publish   # …and publish them as GitHub release v0.1.0
+#   scripts/release.sh 0.2.0             # → dist/Waypoint-0.2.0.dmg (+ .sha256, appcast.xml)
+#   scripts/release.sh 0.2.0 --publish   # …tag v0.2.0, upload to S3, create the GitHub release
 #
-# Installed copies read https://github.com/wowlocal/waypoint-launcher/releases/latest/download/appcast.xml,
-# so the newest release's appcast.xml is the live feed.
+# --publish needs S3 credentials in AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY,
+# or in scripts/release.env (gitignored, same format as snippets' Distribution/.env).
 #
 #   SIGN_IDENTITY   Developer ID Application identity (default: first one in the keychain)
 #   NOTARY_PROFILE  notarytool keychain profile (default: NotaryProfile). Create it once:
@@ -30,6 +32,22 @@ publish=0
 
 tag="v$version"
 repo_url="https://github.com/wowlocal/waypoint-launcher"
+# Where updates are served from. Fixed on purpose, not configurable: installed
+# copies have this feed baked in (scripts/bundle.sh), and the bucket is shared
+# with other apps, so a stray S3_PREFIX must never redirect an upload.
+s3_endpoint="https://storage.yandexcloud.net"
+s3_region="ru-central1"
+s3_bucket="macos-releases"
+s3_prefix="waypoint"
+public_base="$s3_endpoint/$s3_bucket/$s3_prefix"
+feed_url="$public_base/appcast.xml"
+s3() { aws s3 "$@" --endpoint-url "$s3_endpoint" --region "$s3_region" }
+
+if [[ -f scripts/release.env ]]; then
+    set -a
+    source scripts/release.env
+    set +a
+fi
 sparkle_bin=".build/artifacts/sparkle/Sparkle/bin"
 profile="${NOTARY_PROFILE:-NotaryProfile}"
 # Separate from build/Waypoint.app, which may be running.
@@ -63,6 +81,8 @@ if (( publish )); then
     git fetch -q origin
     git merge-base --is-ancestor HEAD origin/main || fail "HEAD is not on origin/main; push it first"
     gh auth status >/dev/null 2>&1 || fail "gh is not logged in"
+    command -v aws >/dev/null || fail "aws CLI not found (brew install awscli)"
+    s3 ls "s3://$s3_bucket/$s3_prefix/" >/dev/null || fail "can't reach s3://$s3_bucket/$s3_prefix/; check the S3 credentials"
 fi
 
 step "Testing"
@@ -71,6 +91,8 @@ xcrun swift test
 step "Building Waypoint $version"
 APP_PATH="$app" VERSION="$version" SIGN_IDENTITY="$identity" scripts/bundle.sh
 codesign --verify --deep --strict "$app"
+[[ "$(/usr/libexec/PlistBuddy -c 'Print SUFeedURL' "$app/Contents/Info.plist")" == "$feed_url" ]] \
+    || fail "the app's SUFeedURL doesn't match $feed_url"
 # Capture first: `grep -q` exits early and pipefail would count codesign's SIGPIPE as failure.
 signature="$(codesign -dvv "$app" 2>&1)"
 [[ "$signature" == *"(runtime)"* ]] || fail "hardened runtime is not enabled"
@@ -125,23 +147,34 @@ hdiutil detach -quiet "$mount"
 step "Generating appcast"
 feed_dir="$(mktemp -d)"
 cp "$dmg" "$feed_dir/"
-# One item per release: the feed always comes from the latest release, and a
-# ~2 MB app doesn't need delta updates.
+# One item per release (the newest), and no deltas: the app is ~2 MB.
 "$sparkle_bin/generate_appcast" --account waypoint --maximum-deltas 0 \
-    --download-url-prefix "$repo_url/releases/download/$tag/" --link "$repo_url" \
+    --download-url-prefix "$public_base/" --link "$repo_url" \
     -o "$dist/appcast.xml" "$feed_dir"
 rm -rf "$feed_dir"
 signature="$(sed -n 's/.*sparkle:edSignature="\([^"]*\)".*/\1/p' "$dist/appcast.xml" | awk 'NR == 1')"
 [[ -n "$signature" ]] || fail "appcast has no EdDSA signature"
 "$sparkle_bin/sign_update" --verify "$dmg" "$signature" || fail "appcast signature doesn't match the DMG"
-grep -q "url=\"$repo_url/releases/download/$tag/${dmg:t}\"" "$dist/appcast.xml" || fail "appcast points somewhere unexpected"
+grep -q "url=\"$public_base/${dmg:t}\"" "$dist/appcast.xml" || fail "appcast points somewhere unexpected"
 print -P "%F{green}Ready:%f $dmg"
 
 if (( publish )); then
     step "Publishing $tag"
     git tag -a "$tag" -m "Waypoint $version"
     git push origin "$tag"
+
+    # The DMG first and the appcast last, so the live feed never points at a
+    # file that isn't there yet.
+    step "Uploading to s3://$s3_bucket/$s3_prefix/"
+    s3 cp "$dmg" "s3://$s3_bucket/$s3_prefix/${dmg:t}" --content-type application/x-apple-diskimage
+    [[ "$(curl -fsI "$public_base/${dmg:t}" | awk 'tolower($1) == "content-length:" { print $2 + 0 }')" == "$(stat -f %z "$dmg")" ]] \
+        || fail "$public_base/${dmg:t} isn't publicly served at the right size"
+    s3 cp "$dist/appcast.xml" "s3://$s3_bucket/$s3_prefix/appcast.xml" --content-type application/xml --cache-control no-cache
+    curl -fs "$feed_url" | cmp -s - "$dist/appcast.xml" || fail "the public feed at $feed_url doesn't match the new appcast"
+    print -P "%F{green}Live:%f $feed_url"
+
+    step "Mirroring to GitHub Releases"
     notes=(--generate-notes)
     [[ -n "${NOTES_FILE:-}" ]] && notes=(--notes-file "$NOTES_FILE")
-    gh release create "$tag" "$dmg" "$dmg.sha256" "$dist/appcast.xml" --title "Waypoint $version" --verify-tag "${notes[@]}"
+    gh release create "$tag" "$dmg" "$dmg.sha256" --title "Waypoint $version" --verify-tag "${notes[@]}"
 fi

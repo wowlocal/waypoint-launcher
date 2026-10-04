@@ -77,7 +77,7 @@ Move `Waypoint.app` to `/Applications` if you want to keep it.
 
 `scripts/release.sh` runs the tests, then builds the app and signs it with your Developer ID (hardened runtime). It notarizes and staples the app, then packs it into a DMG and signs, notarizes and staples that too. It checks the result with Gatekeeper, then writes the Sparkle `appcast.xml` and verifies its EdDSA signature.
 
-Installed copies read their feed from `releases/latest/download/appcast.xml`, so publishing a release is what ships the update.
+With `--publish` it does what snippets does: the DMG and `appcast.xml` go to S3 (`storage.yandexcloud.net/macos-releases/waypoint/`), which is the update feed installed copies read, and the DMG is mirrored as a GitHub release. S3 credentials come from `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` or a gitignored `scripts/release.env`.
 
 ```sh
 # once: store notary credentials in the keychain (use an app-specific password)
