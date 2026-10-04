@@ -138,10 +138,14 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
         }
         show(rows)
 
-        installMenu.items = installMenuItems.isEmpty ? [] : [.sectionHeader(title: "Install a Game")] + installMenuItems
+        // NSMenuToolbarItem shows its menu as a pull-down button does: the
+        // first item is the button's own and never appears. Without a
+        // placeholder, a signed-out account menu's lone "Sign In…" did
+        // nothing, and the account list lost its first row.
+        installMenu.items = installMenuItems.isEmpty ? [] : [.pullDownPlaceholder(), .sectionHeader(title: "Install a Game")] + installMenuItems
         installItem?.isEnabled = !installMenuItems.isEmpty
 
-        accountMenu.items = AccountMenu.items(model: model)
+        accountMenu.items = [.pullDownPlaceholder()] + AccountMenu.items(model: model)
         subtitle = model.activeAccount?.displayName ?? "Not signed in"
         view.window?.subtitle = subtitle
         accountItem?.toolTip = model.activeAccount.map { "Signed in as \($0.displayName)" } ?? "Sign in to Battle.net"
@@ -246,4 +250,9 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
 private extension NSToolbarItem.Identifier {
     static let install = Self("install")
     static let account = Self("account")
+}
+
+extension NSMenuItem {
+    /// The hidden first item a pull-down menu (NSMenuToolbarItem's) needs.
+    static func pullDownPlaceholder() -> NSMenuItem { NSMenuItem(title: "", action: nil, keyEquivalent: "") }
 }
