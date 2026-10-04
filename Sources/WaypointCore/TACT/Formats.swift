@@ -239,6 +239,67 @@ public struct InstallManifest: Sendable {
     }
 }
 
+// MARK: - Download manifest (every encoded file a game keeps in local storage)
+
+public struct DownloadManifest: Sendable {
+    public struct Entry: Sendable, Equatable {
+        public var encodedKey: Data
+        public var size: UInt64
+        /// Lower downloads first; games can start before low-priority data arrives.
+        public var priority: Int8
+    }
+
+    public var entries: [Entry]
+    var tags: [InstallManifest.Tag]
+
+    /// Layout: `DL`, version, key size, has-checksum, entry count (u32),
+    /// tag count (u16); v2 adds a flag-byte count, v3 a base priority and 3
+    /// reserved bytes. Entries: key, 40-bit size, priority, optional u32
+    /// checksum, flag bytes. Then tags, as in the install manifest.
+    public init(_ data: Data) throws {
+        var r = ByteReader(data)
+        guard try r.bytes(2) == Data("DL".utf8) else { throw TACTError.malformed("download manifest header") }
+        let version = try r.u8()
+        guard (1...3).contains(version) else { throw TACTError.unsupported("download manifest v\(version)") }
+        let keySize = Int(try r.u8())
+        let hasChecksum = try r.u8() != 0
+        let entryCount = Int(try r.uintBE(4))
+        let tagCount = Int(try r.uintBE(2))
+        var flagBytes = 0
+        if version >= 2 { flagBytes = Int(try r.u8()) }
+        if version >= 3 { _ = try r.bytes(4) }
+
+        var entries: [Entry] = []
+        entries.reserveCapacity(entryCount)
+        for _ in 0..<entryCount {
+            let key = try r.bytes(keySize)
+            let size = try r.uintBE(5)
+            let priority = Int8(bitPattern: try r.u8())
+            if hasChecksum { _ = try r.uintBE(4) }
+            if flagBytes > 0 { _ = try r.bytes(flagBytes) }
+            entries.append(Entry(encodedKey: key, size: size, priority: priority))
+        }
+        let maskSize = (entryCount + 7) / 8
+        var tags: [InstallManifest.Tag] = []
+        for _ in 0..<tagCount {
+            let name = try r.cString()
+            let type = UInt16(try r.uintBE(2))
+            tags.append(InstallManifest.Tag(name: name, type: type, mask: try r.bytes(maskSize)))
+        }
+        self.entries = entries
+        self.tags = tags
+    }
+
+    /// Same selection rule as `InstallManifest.select(tagString:)`.
+    public func select(tagString: String) -> [Entry] {
+        let words = Set(tagString.split(whereSeparator: { $0 == " " || $0 == ":" }).map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "?")) })
+        let byType = Dictionary(grouping: tags.filter { words.contains($0.name) }, by: \.type)
+        return entries.indices.filter { index in
+            byType.values.allSatisfy { group in group.contains { $0.contains(index) } }
+        }.map { entries[$0] }
+    }
+}
+
 // MARK: - CDN archive index (where an encoded file sits inside an archive)
 
 public struct ArchiveLocation: Sendable, Equatable {
