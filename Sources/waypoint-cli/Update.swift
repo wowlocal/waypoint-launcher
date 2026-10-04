@@ -72,7 +72,8 @@ func cleanup(_ args: [String]) async {
         let result = try await CASCInstaller(product: product, install: install, config: config, store: store)
             .cleanStorage(dryRun: args.contains("--dry-run"), log: log)
         print("\(args.contains("--dry-run") ? "would remove" : "removed") \(result.removedFiles) files (\(byteString(result.removedBytes)))"
-              + (args.contains("--dry-run") ? "" : ", gave back \(byteString(result.reclaimedBytes)) of disk"))
+              + (args.contains("--dry-run") ? "" : ", gave back \(byteString(result.reclaimedBytes)) of disk")
+              + "; old CDN indexes: \(byteString(result.removedIndexBytes))")
     } catch {
         fail("\(error)")
     }

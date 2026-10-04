@@ -278,6 +278,22 @@ public struct CASCInstaller: Sendable {
                 Log.warning(.install, "index_unavailable", nil, ["uid": install.uid, "index": hash, "kind": kind.rawValue, "error": error])
             }
         }
+        // The group indexes the Agent builds from those (not on the CDN).
+        // The game would otherwise merge them itself at startup, so a failure
+        // here is logged, not fatal.
+        for (list, group) in [("archives", "archive-group"), ("patch-archives", "patch-archive-group")] {
+            guard let name = cdnConfig[group].first else { continue }
+            let files = cdnConfig[list].map { indexDir.appendingPathComponent("\($0).index") }
+            guard !files.isEmpty, files.allSatisfy({ fm.fileExists(atPath: $0.path) }) else { continue }
+            do {
+                let started = Date()
+                let built = try ArchiveGroup.build(indexFiles: files, expected: name, in: indexDir)
+                Log.info(.install, built ? "archive_group_built" : "archive_group_mismatch", nil,
+                         ["uid": install.uid, "group": group, "archives": files.count, "duration_ms": Int(Date().timeIntervalSince(started) * 1000)])
+            } catch {
+                Log.warning(.install, "archive_group_failed", nil, ["uid": install.uid, "group": group, "error": error])
+            }
+        }
 
         // Local storage: a new one, or new files appended to the existing one
         // (an update, or another product sharing the folder).
@@ -355,11 +371,40 @@ public struct CASCInstaller: Sendable {
                 log("\(product) build \(buildKey.prefix(8)): checked")
             }
         }
-        let result = try CASCStorageCleaner.clean(storageDir, dryRun: dryRun) { key in
+        var result = try CASCStorageCleaner.clean(storageDir, dryRun: dryRun) { key in
             stored.position(of: key).map { live[key.bucket][$0] } ?? false
         }
-        log("\(dryRun ? "Would remove" : "Removed") \(result.removedFiles) files no installed build uses (\(result.removedBytes) bytes); \(result.reclaimedBytes) bytes of disk given back")
+        result.removedIndexBytes = try await removeStaleIndexes(rows, dryRun: dryRun)
+        log("\(dryRun ? "Would remove" : "Removed") \(result.removedFiles) files no installed build uses (\(result.removedBytes) bytes); \(result.reclaimedBytes) bytes of disk given back; \(result.removedIndexBytes) bytes of old CDN indexes")
         return result
+    }
+
+    /// CDN indexes in `Data/indices` that none of the installed builds' CDN
+    /// configs names any more (every CDN config change brings new archives
+    /// and a new group index, 130 MB for WoW). Kept unless every config loads.
+    private func removeStaleIndexes(_ rows: [[String: String]], dryRun: Bool) async throws -> UInt64 {
+        let fm = FileManager.default
+        let indexDir = dataRoot.appendingPathComponent("indices", isDirectory: true)
+        var referenced = Set<String>()
+        for row in rows {
+            guard let product = row["Product"], let cdnKey = row["CDN Key"], cdnKey.count == 32 else {
+                throw TACTError.malformed(".build.info row without a CDN config")
+            }
+            let rowRegion = row["Branch"].flatMap { Region(rawValue: $0.lowercased()) } ?? region
+            let cdn = try await versions.cdn(product: product, region: rowRegion)
+            let config = String(decoding: try await cdn.cached(.config, cdnKey, localCopy: configURL(cdnKey)), as: UTF8.self)
+            for word in config.split(whereSeparator: { $0 == " " || $0.isNewline }) where word.count == 32 {
+                referenced.insert(word.lowercased())
+            }
+        }
+        var removed: UInt64 = 0
+        for file in (try? fm.contentsOfDirectory(atPath: indexDir.path)) ?? [] {
+            guard file.hasSuffix(".index"), file.count == 38, !referenced.contains(String(file.prefix(32)).lowercased()) else { continue }
+            let url = indexDir.appendingPathComponent(file)
+            removed += (try? fm.attributesOfItem(atPath: url.path)[.size] as? UInt64) ?? 0
+            if !dryRun { try? fm.removeItem(at: url) }
+        }
+        return removed
     }
 
     /// The decoded encoding table on disk (downloading and decoding it if needed).

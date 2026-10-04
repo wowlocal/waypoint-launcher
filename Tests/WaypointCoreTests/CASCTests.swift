@@ -487,3 +487,99 @@ private func allocated(_ url: URL) -> UInt64 {
     let after = try fm.attributesOfItem(atPath: dir.appendingPathComponent("data.000").path)[.size] as! UInt64
     #expect(after == size + 1030)
 }
+
+// MARK: - Archive-group indexes
+
+/// A minimal archive index: 24-byte entries in 4 KB pages, then the TOC and
+/// footer fields the group builder reads.
+private func archiveIndex(_ entries: [(key: Data, size: UInt32, offset: UInt32)]) -> Data {
+    var pages = Data()
+    var page = Data()
+    for e in entries.sorted(by: { $0.key.lexicographicallyPrecedes($1.key) }) {
+        page += e.key + be(UInt64(e.size), 4) + be(UInt64(e.offset), 4)
+        if page.count + 24 > 4096 { pages += page + Data(count: 4096 - page.count); page = Data() }
+    }
+    if !page.isEmpty { pages += page + Data(count: 4096 - page.count) }
+    let pageCount = pages.count / 4096
+    return pages + Data(count: pageCount * 24) + Data(count: 8) + Data([1, 0, 0, 4, 4, 4, 16, 8])
+        + Data(CASC.le32(UInt32(entries.count))) + Data(count: 8)
+}
+
+@Test func archiveGroupMergesSortsAndKeepsTheFirstArchive() throws {
+    let fm = FileManager.default
+    let dir = fm.temporaryDirectory.appendingPathComponent("waypoint-group-\(UUID().uuidString)")
+    try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: dir) }
+    // Never all zeros: an index reads a zero key as the end of a page.
+    func k(_ i: Int) -> Data { Data([0xA5]) + Data((1..<16).map { UInt8(truncatingIfNeeded: i >> (8 * (15 - $0) % 64)) }) }
+    // 400 keys over three archives; keys 100..<110 are in archives 0 and 2.
+    var lists: [[(key: Data, size: UInt32, offset: UInt32)]] = [[], [], []]
+    for i in 0..<400 { lists[i % 3].append((k(i * 7919 % 100_003), UInt32(i), UInt32(i * 10))) }
+    for i in 0..<10 { lists[2].append((lists[0][i].key, 999, 999)) }
+    let files = try lists.enumerated().map { n, list in
+        let url = dir.appendingPathComponent("archive\(n).index")
+        try archiveIndex(list).write(to: url)
+        return url
+    }
+    let output = dir.appendingPathComponent("group.bin")
+    fm.createFile(atPath: output.path, contents: nil)
+    let handle = try FileHandle(forWritingTo: output)
+    let name = try ArchiveGroup.write(files, to: handle)
+    try handle.close()
+    let group = try Data(contentsOf: output)
+    #expect(Data(Insecure.MD5.hash(data: group.suffix(28))).hex == name)
+    let footer = [UInt8](group.suffix(28))
+    #expect(Array(footer[8..<16]) == [1, 0, 0, 4, 5, 4, 16, 8]) // 1-byte archive position
+    #expect(Array(footer[16..<20]) == CASC.le32(400))
+
+    // Read it back like any index: sorted, one entry per key, the first archive wins.
+    var seen: [(Data, UInt64, UInt64)] = []
+    try ArchiveIndex.scan(group, archive: "group") { key, _, size, offset in
+        seen.append((Data(UnsafeRawBufferPointer(start: key, count: 16)), size, offset))
+        return true
+    }
+    #expect(seen.count == 400)
+    #expect(zip(seen, seen.dropFirst()).allSatisfy { $0.0.lexicographicallyPrecedes($1.0) })
+    for (n, list) in lists.enumerated() {
+        for e in list where e.size != 999 {
+            let hit = try #require(seen.first { $0.0 == e.key })
+            #expect(hit.1 == UInt64(e.size) && hit.2 == UInt64(n) << 32 | UInt64(e.offset))
+        }
+    }
+
+    // Built into a folder under the expected name; a wrong name leaves nothing.
+    #expect(try ArchiveGroup.build(indexFiles: files, expected: name, in: dir))
+    #expect(try Data(contentsOf: dir.appendingPathComponent("\(name).index")) == group)
+    #expect(try !ArchiveGroup.build(indexFiles: files, expected: String(repeating: "0", count: 32), in: dir))
+    #expect(try fm.contentsOfDirectory(atPath: dir.path).filter { $0.hasSuffix(".part") || $0.hasPrefix("0000") }.isEmpty)
+}
+
+/// Rebuilds Battle.net's own group indexes from a Warcraft III install's
+/// archive indexes (read-only) and compares them byte for byte.
+/// Run with `WAYPOINT_CASC_REFERENCE=1 xcrun swift test --filter archiveGroupMatches`.
+@Test(.enabled(if: ProcessInfo.processInfo.environment["WAYPOINT_CASC_REFERENCE"] == "1"))
+func archiveGroupMatchesAgentBuiltOnes() throws {
+    let root = URL(fileURLWithPath: "/Applications/Warcraft III/Data")
+    let fm = FileManager.default
+    let out = fm.temporaryDirectory.appendingPathComponent("waypoint-group-\(UUID().uuidString)")
+    try fm.createDirectory(at: out, withIntermediateDirectories: true)
+    defer { try? fm.removeItem(at: out) }
+    var compared = 0
+    for prefix in try fm.contentsOfDirectory(atPath: root.appendingPathComponent("config").path) {
+        for sub in try fm.contentsOfDirectory(atPath: root.appendingPathComponent("config/\(prefix)").path) {
+            for hash in try fm.contentsOfDirectory(atPath: root.appendingPathComponent("config/\(prefix)/\(sub)").path) {
+                let config = TACTConfig(try String(contentsOf: root.appendingPathComponent("config/\(prefix)/\(sub)/\(hash)"), encoding: .utf8))
+                for (list, group) in [("archives", "archive-group"), ("patch-archives", "patch-archive-group")] {
+                    guard let name = config[group].first else { continue }
+                    let real = root.appendingPathComponent("indices/\(name).index")
+                    let files = config[list].map { root.appendingPathComponent("indices/\($0).index") }
+                    guard fm.fileExists(atPath: real.path), files.allSatisfy({ fm.fileExists(atPath: $0.path) }) else { continue }
+                    #expect(try ArchiveGroup.build(indexFiles: files, expected: name, in: out), "\(group) \(name)")
+                    #expect(try Data(contentsOf: out.appendingPathComponent("\(name).index")) == Data(contentsOf: real), "\(group) \(name)")
+                    compared += 1
+                }
+            }
+        }
+    }
+    #expect(compared >= 2)
+}

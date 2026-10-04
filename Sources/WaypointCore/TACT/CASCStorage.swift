@@ -657,6 +657,8 @@ public enum CASCStorageCleaner {
         public var removedBytes: UInt64 = 0
         /// Disk space actually given back (allocated size before minus after).
         public var reclaimedBytes: UInt64 = 0
+        /// CDN indexes of old CDN configs removed from `Data/indices`.
+        public var removedIndexBytes: UInt64 = 0
     }
 
     /// `isLive` says whether some installed build still needs a key; archive
