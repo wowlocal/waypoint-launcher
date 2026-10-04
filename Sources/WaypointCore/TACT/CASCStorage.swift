@@ -124,7 +124,10 @@ public enum CASC {
 
     /// `shmem` v5: index versions and the free-space table. Nil when the path
     /// doesn't fit its fixed 256-byte field (the game rebuilds it then).
-    static func shmem(storagePath: String, indexVersions: [UInt32], archiveSizes: [UInt64]) -> Data? {
+    /// `holes`: free gaps inside archives, as (size, storage offset), listed
+    /// after cleaning so the Agent and the game could reuse them.
+    static func shmem(storagePath: String, indexVersions: [UInt32], archiveSizes: [UInt64],
+                      holes: [(size: UInt64, offset: UInt64)] = []) -> Data? {
         var d = [UInt8](repeating: 0, count: 0x5000)
         let path = Array((storagePath.hasSuffix("/") ? String(storagePath.dropLast()) : storagePath).utf8) + Array("/index".utf8)
         guard path.count < 0x100 else { return nil }
@@ -147,6 +150,11 @@ public enum CASC {
         for archive in archiveSizes.count..<maxArchives {
             spans.append((archiveSize, UInt64(archive) << UInt64(offsetBits)))
         }
+        // The table holds 1,090 spans: archive tails and unused archives
+        // first, then the biggest holes.
+        let room = max(0, freeSpanCapacity - spans.count)
+        spans += holes.filter { $0.size > 0x40 }.sorted { $0.size > $1.size }.prefix(room)
+        spans.sort { $0.offset < $1.offset }
         spans = Array(spans.prefix(freeSpanCapacity))
         put32LE(&d, 0x1000, 1)
         put32LE(&d, 0x1004, UInt32(spans.count))
@@ -490,6 +498,17 @@ public struct StoredKeys: Sendable {
 
     public var count: Int { buckets.reduce(0) { $0 + $1.count } }
     public func contains(_ key: Key9) -> Bool { buckets[key.bucket].sortedContains(key) }
+
+    /// Position of a key within its bucket, for per-key flags.
+    func position(of key: Key9) -> Int? {
+        let keys = buckets[key.bucket]
+        var low = 0, high = keys.count
+        while low < high {
+            let mid = (low + high) / 2
+            if keys[mid] < key { low = mid + 1 } else { high = mid }
+        }
+        return low < keys.count && keys[low] == key ? low : nil
+    }
     public func contains(_ key: Key16) -> Bool { contains(key.prefix9) }
 
     /// Nil when the folder holds no storage.
@@ -618,5 +637,134 @@ extension CASC {
             if let head = try? handle.read(upToCount: 16), head.count == 16 { state.baseKey = Data(head.reversed()) }
         }
         return state
+    }
+}
+
+/// Removes what no installed build needs any more from a local storage, and
+/// gives the space back to the disk. Updates only ever add files, so
+/// without this a storage grows with every patch.
+///
+/// The index files lose the unneeded entries (written as their next
+/// version, then shmem, then the old versions go, as when writing). Then
+/// the archives shrink in place: a dead tail is cut off, and dead ranges
+/// inside are punched out (APFS frees the blocks; the file keeps its
+/// size). No data is moved, so it's quick and an interruption is harmless:
+/// running it again finishes the job.
+public enum CASCStorageCleaner {
+    public struct Result: Sendable, Equatable {
+        public var removedFiles = 0
+        /// Bytes the removed entries took in the archives.
+        public var removedBytes: UInt64 = 0
+        /// Disk space actually given back (allocated size before minus after).
+        public var reclaimedBytes: UInt64 = 0
+    }
+
+    /// `isLive` says whether some installed build still needs a key; archive
+    /// segment headers always stay. With `dryRun`, only counts.
+    public static func clean(_ directory: URL, dryRun: Bool = false, isLive: (Key9) -> Bool) throws -> Result {
+        let fm = FileManager.default
+        guard !fm.fileExists(atPath: directory.appendingPathComponent(CASCStorageWriter.journalName).path) else {
+            throw TACTError.unsupported("cleaning a storage with an unfinished install or update")
+        }
+        guard let state = try CASC.scanStorage(directory) else { return Result() }
+        func keeps(_ entry: CASC.IndexEntry) -> Bool {
+            let isSegmentHeader = entry.size == UInt32(CASC.headerSize) && entry.offset < UInt64(CASC.segmentHeadersSize)
+                && entry.offset % UInt64(CASC.headerSize) == 0
+            return isSegmentHeader || Key9(entry.key).map(isLive) == true
+        }
+
+        // Pass 1: what goes, and where what stays sits (for finding gaps).
+        var result = Result()
+        var ranges = [[(start: UInt32, end: UInt32)]](repeating: [], count: state.archiveSizes.count)
+        struct Location: Hashable { var archive: Int; var offset: UInt64 }
+        var removedAt = Set<Location>()
+        for bucket in 0..<16 {
+            for entry in try CASC.loadBucket(directory, bucket: bucket, version: state.versions[bucket]) {
+                if keeps(entry) {
+                    if entry.archive < ranges.count {
+                        ranges[entry.archive].append((UInt32(entry.offset), UInt32(entry.offset + UInt64(entry.size))))
+                    }
+                } else {
+                    result.removedFiles += 1
+                    if removedAt.insert(Location(archive: entry.archive, offset: entry.offset)).inserted { result.removedBytes += UInt64(entry.size) }
+                }
+            }
+        }
+        removedAt = []
+        guard !dryRun else { return result }
+
+        // Pass 2: the index files without them, as their next version.
+        var versions = state.versions
+        if result.removedFiles > 0 {
+            versions = state.versions.map { $0 + 1 }
+            for bucket in 0..<16 {
+                let entries = try CASC.loadBucket(directory, bucket: bucket, version: state.versions[bucket]).filter(keeps)
+                try CASC.indexFile(bucket: bucket, entries: entries)
+                    .write(to: directory.appendingPathComponent(CASC.indexFileName(bucket: bucket, version: versions[bucket])), options: .atomic)
+            }
+        }
+
+        // Where the archives are dead: past the last live entry, and between entries.
+        var holes: [(size: UInt64, offset: UInt64)] = []
+        var liveEnds = [UInt64](repeating: 0, count: ranges.count)
+        for archive in ranges.indices {
+            ranges[archive].sort { $0.start < $1.start }
+            var covered: UInt32 = 0
+            for range in ranges[archive] {
+                if range.start > covered {
+                    holes.append((UInt64(range.start - covered), UInt64(archive) << UInt64(CASC.offsetBits) | UInt64(covered)))
+                }
+                covered = max(covered, range.end)
+            }
+            liveEnds[archive] = UInt64(covered)
+        }
+        ranges = []
+        var sizes = state.archiveSizes
+        for archive in sizes.indices where liveEnds[archive] > 0 { sizes[archive] = min(sizes[archive], liveEnds[archive]) }
+        if result.removedFiles > 0 || !holes.isEmpty || sizes != state.archiveSizes,
+           let shmem = CASC.shmem(storagePath: directory.path, indexVersions: versions, archiveSizes: sizes, holes: holes) {
+            try shmem.write(to: directory.appendingPathComponent("shmem"), options: .atomic)
+        }
+        if result.removedFiles > 0 {
+            let current = Set((0..<16).map { CASC.indexFileName(bucket: $0, version: versions[$0]) })
+            for file in (try? fm.contentsOfDirectory(atPath: directory.path)) ?? [] where file.hasSuffix(".idx") && !current.contains(file) {
+                try? fm.removeItem(at: directory.appendingPathComponent(file))
+            }
+        }
+
+        // Only now, with no index pointing there, give the dead bytes back.
+        for archive in liveEnds.indices where liveEnds[archive] > 0 {
+            let url = directory.appendingPathComponent(String(format: "data.%03d", archive))
+            let before = allocatedSize(url)
+            let fd = open(url.path, O_RDWR)
+            guard fd >= 0 else { continue }
+            if UInt64(lseek(fd, 0, SEEK_END)) > liveEnds[archive] { ftruncate(fd, off_t(liveEnds[archive])) }
+            for hole in holes where hole.offset >> UInt64(CASC.offsetBits) == UInt64(archive) {
+                punch(fd, from: hole.offset & ((1 << UInt64(CASC.offsetBits)) - 1), length: hole.size)
+            }
+            close(fd)
+            let after = allocatedSize(url)
+            if before > after { result.reclaimedBytes += before - after }
+        }
+        Log.notice(.install, "storage_cleaned", nil, ["path": directory.path, "removed_files": result.removedFiles,
+                                                    "removed_bytes": result.removedBytes, "reclaimed_bytes": result.reclaimedBytes])
+        return result
+    }
+
+    /// Frees the whole filesystem blocks inside a range (APFS; elsewhere it
+    /// does nothing and the space stays used).
+    private static func punch(_ fd: Int32, from offset: UInt64, length: UInt64) {
+        let block: UInt64 = 4096
+        let start = (offset + block - 1) / block * block
+        let end = (offset + length) / block * block
+        guard end > start else { return }
+        var args = fpunchhole_t(fp_flags: 0, reserved: 0, fp_offset: off_t(start), fp_length: off_t(end - start))
+        _ = fcntl(fd, F_PUNCHHOLE, &args)
+    }
+
+    private static func allocatedSize(_ url: URL) -> UInt64 {
+        var info = stat()
+        guard stat(url.path, &info) == 0 else { return 0 }
+        return UInt64(info.st_blocks) * 512
     }
 }

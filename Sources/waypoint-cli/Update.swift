@@ -36,9 +36,9 @@ func stateStore(_ args: [String]) -> InstallStateStore {
     option("--state", in: args).map { InstallStateStore(file: URL(fileURLWithPath: $0)) } ?? InstallStateStore()
 }
 
-/// `update <uid> [--path root] [--state file] [--verify] [--dry-run]`
-func update(_ args: [String]) async {
-    let usage = "usage: waypoint-cli update <uid> [--path install-root] [--state file] [--verify] [--dry-run]"
+/// The install a command names: `<uid>`, optionally `--path` for a specific
+/// copy (e.g. a test install next to Battle.net's own) and `--state`.
+func resolveInstall(_ args: [String], usage: String) -> (ProductInstall, InstallStateStore) {
     var positional: [String] = []
     var i = 0
     while i < args.count {
@@ -49,18 +49,38 @@ func update(_ args: [String]) async {
     guard positional.count == 1 else { fail(usage) }
     let store = stateStore(args)
     let games = GameLibrary(stateStore: store).games().filter { $0.install.uid == positional[0] }
-    let install: ProductInstall
     if let path = option("--path", in: args) {
-        // A specific install, e.g. a test copy next to Battle.net's own.
         func resolved(_ p: String) -> String { URL(fileURLWithPath: p).standardizedFileURL.resolvingSymlinksInPath().path }
         let recorded = store.load()[positional[0]].flatMap { $0.install(uid: positional[0]) }
         guard let match = ([recorded].compactMap { $0 } + games.map(\.install)).first(where: { resolved($0.installPath) == resolved(path) })
         else { fail("no \(positional[0]) install at \(path)") }
-        install = store.apply(to: match)
-    } else {
-        guard let game = games.first else { fail("no game with uid \(positional[0])") }
-        install = game.install
+        return (store.apply(to: match), store)
     }
+    guard let game = games.first else { fail("no game with uid \(positional[0])") }
+    return (game.install, store)
+}
+
+/// `cleanup <uid> [--path root] [--state file] [--dry-run]`: removes from the
+/// game's storage what no installed build needs, and gives the space back.
+func cleanup(_ args: [String]) async {
+    let (install, store) = resolveInstall(args, usage: "usage: waypoint-cli cleanup <uid> [--path install-root] [--state file] [--dry-run]")
+    guard let product = InstallableProduct.forProduct(install.productCode) else { fail("\(install.productCode) has no local storage Waypoint knows") }
+    let region = install.region.flatMap(Region.init(rawValue:)) ?? .us
+    do {
+        let config = try await VersionService().productConfig(product: install.productCode, region: region)
+        guard !config.isContainerless else { fail("\(product.displayName) keeps no local storage") }
+        let result = try await CASCInstaller(product: product, install: install, config: config, store: store)
+            .cleanStorage(dryRun: args.contains("--dry-run"), log: log)
+        print("\(args.contains("--dry-run") ? "would remove" : "removed") \(result.removedFiles) files (\(byteString(result.removedBytes)))"
+              + (args.contains("--dry-run") ? "" : ", gave back \(byteString(result.reclaimedBytes)) of disk"))
+    } catch {
+        fail("\(error)")
+    }
+}
+
+/// `update <uid> [--path root] [--state file] [--verify] [--dry-run]`
+func update(_ args: [String]) async {
+    let (install, store) = resolveInstall(args, usage: "usage: waypoint-cli update <uid> [--path install-root] [--state file] [--verify] [--dry-run]")
     let updater = GameUpdate(install: install, store: store)
     do {
         let plan = try await updater.plan(verify: args.contains("--verify"), log: log)

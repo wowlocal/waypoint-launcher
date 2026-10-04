@@ -404,3 +404,86 @@ private func expectStoredIndexesOnly(_ dir: URL, version: UInt32) throws {
     // Nothing of Battle.net's runs while the tests do (or this says so).
     #expect(BattleNet.running().isEmpty || (try? BattleNet.ensureNotRunning()) == nil)
 }
+
+// MARK: - Cleaning (what no build needs any more)
+
+private func allocated(_ url: URL) -> UInt64 {
+    var info = stat()
+    return stat(url.path, &info) == 0 ? UInt64(info.st_blocks) * 512 : 0
+}
+
+@Test func cleaningRemovesUnneededFilesAndGivesSpaceBack() throws {
+    let fm = FileManager.default
+    let dir = fm.temporaryDirectory.appendingPathComponent("waypoint-casc-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: dir) }
+    // 40 blobs of ~64 KB: 0..<20 an "old build", 20..<40 the current one,
+    // interleaved so the dead ones leave holes and a dead tail.
+    func blob(_ i: Int) -> Data { Data(repeating: UInt8(truncatingIfNeeded: i), count: 64 * 1024 + i) }
+    let writer = try CASCStorageWriter(directory: dir)
+    for i in 0..<40 { try writer.append(encodedKey: storageKey(i), blob: blob(i), fullKey: false) }
+    try writer.finish()
+    let archive = dir.appendingPathComponent("data.000")
+    let sizeBefore = try fm.attributesOfItem(atPath: archive.path)[.size] as! UInt64
+    let allocatedBefore = allocated(archive)
+    let live = Set((0..<40).filter { $0 % 2 == 0 || $0 >= 30 }.map { storageKey($0).prefix(9) }) // dead: odd ones below 30
+    let isLive: (Key9) -> Bool = { live.contains($0.data) }
+
+    let preview = try CASCStorageCleaner.clean(dir, dryRun: true, isLive: isLive)
+    #expect(preview.removedFiles == 15 && preview.reclaimedBytes == 0)
+    #expect(try fm.contentsOfDirectory(atPath: dir.path).filter { $0.hasSuffix(".idx") }.allSatisfy { $0.hasSuffix("00000001.idx") })
+
+    let result = try CASCStorageCleaner.clean(dir, isLive: isLive)
+    #expect(result.removedFiles == 15)
+    #expect(result.removedBytes == (0..<30).filter { $0 % 2 == 1 }.reduce(UInt64(0)) { $0 + 30 + UInt64(blob($1).count) })
+    #expect(result.reclaimedBytes >= 15 * 60 * 1024) // the whole 4 KB blocks inside each hole
+    #expect(allocated(archive) < allocatedBefore)
+    #expect(try fm.attributesOfItem(atPath: archive.path)[.size] as! UInt64 == sizeBefore) // no dead tail: 39 is live
+
+    // The live files read back from the new index (version 2); the rest is gone.
+    var found = 0
+    for bucket in 0..<16 {
+        let names = try fm.contentsOfDirectory(atPath: dir.path).filter { $0.hasPrefix(String(format: "%02x", bucket)) && $0.hasSuffix(".idx") }
+        #expect(names == [CASC.indexFileName(bucket: bucket, version: 2)])
+        for entry in parseIndex(try Data(contentsOf: dir.appendingPathComponent(names[0]))) where entry.size != 30 {
+            let i = try #require((0..<40).first { storageKey($0).prefix(9) == entry.key })
+            #expect(live.contains(entry.key))
+            let handle = try FileHandle(forReadingFrom: archive)
+            try handle.seek(toOffset: entry.offset + 30)
+            #expect(try handle.read(upToCount: blob(i).count) == blob(i))
+            try handle.close()
+            found += 1
+        }
+    }
+    #expect(found == 25)
+    let shmem = try Data(contentsOf: dir.appendingPathComponent("shmem"))
+    #expect(shmem[0x110] == 2)
+    let spans = Int(shmem[0x1004]) | Int(shmem[0x1005]) << 8
+    #expect(spans == 0x3FF + 15) // data.000's tail and 1,022 unused archives, plus the 15 holes
+
+    // Cleaning again finds nothing; a later update still appends fine.
+    #expect(try CASCStorageCleaner.clean(dir, isLive: isLive).removedFiles == 0)
+    let update = try CASCStorageWriter(directory: dir, allowExisting: true)
+    try update.append(encodedKey: storageKey(100), blob: blob(100), fullKey: false)
+    try update.finish()
+    #expect(try StoredKeys.load(dir)!.contains(Key16(storageKey(100))!))
+}
+
+@Test func cleaningCutsADeadTail() throws {
+    let fm = FileManager.default
+    let dir = fm.temporaryDirectory.appendingPathComponent("waypoint-casc-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: dir) }
+    let writer = try CASCStorageWriter(directory: dir)
+    for i in 0..<10 { try writer.append(encodedKey: storageKey(i), blob: Data(repeating: 1, count: 100_000), fullKey: false) }
+    try writer.finish()
+    let live = Set((0..<4).map { storageKey($0).prefix(9) })
+    let result = try CASCStorageCleaner.clean(dir) { live.contains($0.data) }
+    #expect(result.removedFiles == 6)
+    let size = try fm.attributesOfItem(atPath: dir.appendingPathComponent("data.000").path)[.size] as! UInt64
+    #expect(size == UInt64(CASC.segmentHeadersSize + 4 * (30 + 100_000)))
+    // New blobs go right after the cut.
+    let update = try CASCStorageWriter(directory: dir, allowExisting: true)
+    try update.append(encodedKey: storageKey(50), blob: Data(repeating: 2, count: 1000), fullKey: false)
+    try update.finish()
+    let after = try fm.attributesOfItem(atPath: dir.appendingPathComponent("data.000").path)[.size] as! UInt64
+    #expect(after == size + 1030)
+}

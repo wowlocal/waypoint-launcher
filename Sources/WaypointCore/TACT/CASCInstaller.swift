@@ -241,6 +241,9 @@ public struct CASCInstaller: Sendable {
         guard RunningProcesses.inside(root).isEmpty else { throw UpdateError.gameRunning }
         try BattleNet.ensureNotRunning()
         let storageDir = dataRoot.appendingPathComponent("data", isDirectory: true)
+        // An update (or another product joining a shared storage): afterwards,
+        // drop what no installed build needs any more.
+        let storageExisted = (try? CASC.scanStorage(storageDir)) != nil
 
         let total = plan.downloadSize
         let available = (try? root.deletingLastPathComponent().resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
@@ -302,8 +305,67 @@ public struct CASCInstaller: Sendable {
         var record = install
         record.tagString = install.tagString ?? config.tagString(region: region, language: install.textLanguage ?? "enUS")
         try store.record(uid: install.uid, InstalledBuild(buildConfig: plan.target.buildConfig, version: plan.target.name, install: record))
+        if storageExisted {
+            // Best effort: the update itself is done either way.
+            do {
+                _ = try await cleanStorage()
+            } catch {
+                Log.warning(.install, "storage_clean_skipped", nil, ["uid": install.uid, "error": error])
+            }
+        }
         Log.notice(.install, "casc_apply_finished", nil, ["uid": install.uid, "version": plan.target.name,
                                                           "duration_ms": Int(Date().timeIntervalSince(started) * 1000)])
+    }
+
+    /// Removes from the storage what none of the builds in `.build.info`
+    /// needs (old builds' files) and gives the space back; see
+    /// `CASCStorageCleaner`. A key stays if any listed build's encoding table
+    /// or build config names it, which covers every file of those builds
+    /// whatever their tags. Nothing is removed unless every build loads.
+    public func cleanStorage(dryRun: Bool = false, log: @Sendable (String) -> Void = { _ in }) async throws -> CASCStorageCleaner.Result {
+        guard RunningProcesses.inside(root).isEmpty else { throw UpdateError.gameRunning }
+        try BattleNet.ensureNotRunning()
+        let storageDir = dataRoot.appendingPathComponent("data", isDirectory: true)
+        guard let stored = try StoredKeys.load(storageDir) else { return .init() }
+        let buildInfo = try String(contentsOf: root.appendingPathComponent(".build.info"), encoding: .utf8)
+        let rows = BPSV(buildInfo).rows
+        guard !rows.isEmpty else { throw TACTError.malformed(".build.info") }
+
+        var live = stored.buckets.map { [Bool](repeating: false, count: $0.count) }
+        func mark(_ key: Key16) {
+            let key9 = key.prefix9
+            if let i = stored.position(of: key9) { live[key9.bucket][i] = true }
+        }
+        for row in rows {
+            guard let product = row["Product"], !product.isEmpty else { throw TACTError.malformed(".build.info row without a product") }
+            let rowRegion = row["Branch"].flatMap { Region(rawValue: $0.lowercased()) } ?? region
+            let cdn = try await versions.cdn(product: product, region: rowRegion)
+            // The installed build, and one the Agent may be downloading ahead.
+            for buildKey in [row["Build Key"], row["BGDL Key"]].compactMap({ $0 }).filter({ $0.count == 32 }) {
+                let configData = try await cdn.cached(.config, buildKey, localCopy: configURL(buildKey))
+                let config = String(decoding: configData, as: UTF8.self)
+                for word in config.split(whereSeparator: { $0 == " " || $0.isNewline }) where word.count == 32 {
+                    if let key = Data(hex: String(word)).flatMap(Key16.init) { mark(key) }
+                }
+                guard let encodingKey = TACTConfig(config).encodedKey("encoding") else { throw TACTError.malformed("build config \(buildKey)") }
+                let encodingFile = try await cdnDecodedPath(cdn, encodingKey)
+                try autoreleasepool {
+                    try EncodingTable.forEachEncodedKey(try Data(contentsOf: encodingFile, options: .alwaysMapped), mark)
+                }
+                log("\(product) build \(buildKey.prefix(8)): checked")
+            }
+        }
+        let result = try CASCStorageCleaner.clean(storageDir, dryRun: dryRun) { key in
+            stored.position(of: key).map { live[key.bucket][$0] } ?? false
+        }
+        log("\(dryRun ? "Would remove" : "Removed") \(result.removedFiles) files no installed build uses (\(result.removedBytes) bytes); \(result.reclaimedBytes) bytes of disk given back")
+        return result
+    }
+
+    /// The decoded encoding table on disk (downloading and decoding it if needed).
+    private func cdnDecodedPath(_ cdn: CDNClient, _ key: String) async throws -> URL {
+        _ = try await cdn.decoded(key)
+        return cdn.cacheDirectory.appendingPathComponent(cdn.relativePath(.data, key, suffix: ".decoded"))
     }
 
     private func writeStorage(_ plan: CASCInstallPlan, to storageDir: URL, counter: ByteCounter,

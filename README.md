@@ -190,7 +190,7 @@ Downloads are staged in `.waypoint-staging` inside the game folder, so an interr
 
 **Installs.** Hearthstone keeps its files loose, so installing it is an update into an empty folder. Every other game keeps its data in local CASC storage (`Data/data`), which the game reads itself. Waypoint downloads the files the build's download manifest lists for your platform and language, and writes the `data.###` archives, the 16 `.idx` index files and `shmem` byte for byte the way the Battle.net Agent does. The app and the other files from the install manifest go loose into the game folder, next to `.build.info`, `Data/config` and `Data/indices`. A Warcraft III install made by Waypoint holds exactly the same 73,972 files as Battle.net's own install of that build, and the game launches from it.
 
-**Updates of these games** add the new build's files to the same storage, whoever wrote it. Nothing already there is moved or rewritten: new files go after the end of the last archive, then into new ones; the 16 index files are written as their next version, then `shmem`, and only then are the old index files removed, so the game always finds a complete set. An interrupted update resumes from its journal. Loose files are updated like Hearthstone's.
+**Updates of these games** add the new build's files to the same storage, whoever wrote it. Nothing already there is moved or rewritten: new files go after the end of the last archive, then into new ones; the 16 index files are written as their next version, then `shmem`, and only then are the old index files removed, so the game always finds a complete set. An interrupted update resumes from its journal. Loose files are updated like Hearthstone's. Afterwards, files no installed build uses any more (an old build's) are removed from the storage and their disk space is given back: a dead end of an archive is cut off, and dead ranges inside are punched out, which APFS frees in place without moving any data. `waypoint-cli cleanup <uid>` does the same on demand.
 
 **Finding games.** The list comes from `/Users/Shared/Battle.net/Agent/product.db` (protobuf), or from the `.product.db` inside each game folder, plus the games Waypoint installed itself.
 
@@ -205,6 +205,7 @@ xcrun swift run waypoint-cli check-tokens    # verify the cipher on tokens Battl
 xcrun swift run waypoint-cli check-updates   # installed vs. live version
 xcrun swift run waypoint-cli update hs_beta --dry-run           # what an update would download
 xcrun swift run waypoint-cli update w3 --dry-run                # the same for a game stored in CASC
+xcrun swift run waypoint-cli cleanup w3 --dry-run               # what cleaning its storage would remove
 xcrun swift run waypoint-cli update hs_beta --verify --dry-run  # hash-check the whole install
 xcrun swift run waypoint-cli fetch hs_beta '^Strings/' /tmp/hs  # download files into another folder
 xcrun swift run waypoint-cli install w3 /Applications/Warcraft\ III --dry-run  # what installing a game would download

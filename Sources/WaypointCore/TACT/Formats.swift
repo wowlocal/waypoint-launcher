@@ -187,6 +187,42 @@ public struct EncodingTable: Sendable {
     }
 }
 
+extension EncodingTable {
+    /// Calls `body` with every encoded key the table lists (all files of the
+    /// build), reading the table in place.
+    static func forEachEncodedKey(_ data: Data, _ body: (Key16) -> Void) throws {
+        var r = ByteReader(data)
+        guard try r.bytes(2) == Data("EN".utf8) else { throw TACTError.malformed("encoding header") }
+        _ = try r.u8()
+        let ckeySize = Int(try r.u8())
+        let ekeySize = Int(try r.u8())
+        let pageSize = Int(try r.uintBE(2)) * 1024
+        _ = try r.uintBE(2)
+        let pageCount = Int(try r.uintBE(4))
+        _ = try r.uintBE(4)
+        _ = try r.u8()
+        let especSize = Int(try r.uintBE(4))
+        let pagesStart = r.offset + especSize + pageCount * (ckeySize + 16)
+        guard ekeySize >= 16, pageSize > 0 else { throw TACTError.unsupported("encoding table key sizes \(ckeySize)/\(ekeySize)") }
+        data.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else { return }
+            for page in 0..<pageCount {
+                var p = pagesStart + page * pageSize
+                let pageEnd = min(p + pageSize, raw.count)
+                while p + 6 + ckeySize + ekeySize <= pageEnd {
+                    let keyCount = Int(raw[p])
+                    if keyCount == 0 { break }
+                    let first = p + 6 + ckeySize
+                    for k in 0..<keyCount where first + (k + 1) * ekeySize <= pageEnd {
+                        body(Key16(base + first + k * ekeySize))
+                    }
+                    p += 6 + ckeySize + keyCount * ekeySize
+                }
+            }
+        }
+    }
+}
+
 // MARK: - Install manifest (loose files placed in the game folder)
 
 public struct InstallManifest: Sendable {
