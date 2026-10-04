@@ -194,10 +194,42 @@ final class SilentTokenFetcher {
 
 /// The interactive login, shown in its own small window.
 @MainActor
-final class LoginWindow: NSObject, NSWindowDelegate {
+final class LoginWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler {
     private var window: NSWindow?
     private var continuation: CheckedContinuation<LoginToken?, Never>?
     private var catcher: TokenCatcher?
+    private weak var webView: WKWebView?
+    /// What was typed into the login form's "Email or Phone" field during the
+    /// last `run`, to name the account by: Blizzard's account page doesn't
+    /// see this login's session, so it can't say the BattleTag or email.
+    private(set) var typedAccountName: String?
+
+    private static let accountNameHandler = "waypointAccountName"
+    /// Reports the login form's account name (`#accountName`) when it's
+    /// submitted, however the page submits it.
+    private static let accountNameScript = #"""
+        (function () {
+          if (window.__waypointAccountName) return;
+          window.__waypointAccountName = true;
+          function send() {
+            var field = document.getElementById('accountName');
+            var value = field && field.value && field.value.trim();
+            if (value) window.webkit.messageHandlers.waypointAccountName.postMessage(value);
+          }
+          document.addEventListener('submit', send, true);
+          document.addEventListener('change', function (e) { if (e.target && e.target.id === 'accountName') send(); }, true);
+          document.addEventListener('keydown', function (e) { if (e.key === 'Enter') send(); }, true);
+          document.addEventListener('click', function (e) {
+            if (e.target && e.target.closest && e.target.closest('button, [type=submit]')) send();
+          }, true);
+        })();
+        """#
+
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+        guard message.name == Self.accountNameHandler, let name = message.body as? String else { return }
+        let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
+        if !trimmed.isEmpty, trimmed.count <= 254 { typedAccountName = trimmed }
+    }
 
     func run(_ url: URL, title: String, session: WebSessionID,
              preparedWebView: WKWebView? = nil, notice: String? = nil) async -> LoginToken? {
@@ -210,6 +242,13 @@ final class LoginWindow: NSObject, NSWindowDelegate {
             let webView = preparedWebView ?? WKWebView(frame: .zero, configuration: WebSession.makeConfiguration(session))
             webView.navigationDelegate = catcher
             webView.underPageBackgroundColor = WebSession.launcherBackdropColor
+            typedAccountName = nil
+            let controller = webView.configuration.userContentController
+            controller.removeScriptMessageHandler(forName: Self.accountNameHandler)
+            controller.add(WeakMessageHandler(self), name: Self.accountNameHandler)
+            controller.addUserScript(WKUserScript(source: Self.accountNameScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
+            if preparedWebView != nil { webView.evaluateJavaScript(Self.accountNameScript) } // the page it's already on
+            self.webView = webView
             // It may have reached the token during the delegate hand-off.
             if let callback = webView.url, let token = BattleNetLogin.token(fromCallback: callback) {
                 self.continuation = nil
@@ -256,6 +295,8 @@ final class LoginWindow: NSObject, NSWindowDelegate {
     private func finish(_ token: LoginToken?) {
         guard let continuation else { return }
         self.continuation = nil
+        webView?.configuration.userContentController.removeScriptMessageHandler(forName: Self.accountNameHandler)
+        webView = nil
         window?.delegate = nil
         window?.close()
         window = nil
@@ -265,5 +306,15 @@ final class LoginWindow: NSObject, NSWindowDelegate {
 
     func windowWillClose(_ notification: Notification) {
         finish(nil)
+    }
+}
+
+/// WKUserContentController keeps its message handlers strongly; this keeps
+/// the login window from living as long as the web view.
+private final class WeakMessageHandler: NSObject, WKScriptMessageHandler {
+    weak var target: WKScriptMessageHandler?
+    init(_ target: WKScriptMessageHandler) { self.target = target }
+    func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
+        target?.userContentController(controller, didReceive: message)
     }
 }

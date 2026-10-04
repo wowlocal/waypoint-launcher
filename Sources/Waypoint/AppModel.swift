@@ -313,7 +313,7 @@ final class AppModel {
             return
         }
         Log.info(.auth, "token", nil, ["source": "login_window", "codename": target.codename])
-        await adopt(token, codename: target.codename, session: session)
+        await adopt(token, codename: target.codename, session: session, typedName: loginWindow.typedAccountName)
     }
 
     /// Signs the active account out: its web session and saved tokens are
@@ -371,10 +371,14 @@ final class AppModel {
     /// Remembers who signed in where: that account, new or saved, becomes
     /// active and keeps the token for next time. A session it no longer uses
     /// is deleted.
-    private func adopt(_ token: LoginToken, codename: String, session: WebSessionID) async {
+    /// `typedName`: the email or phone typed into the login form, which names
+    /// the account until (and unless) Blizzard's account page tells the
+    /// BattleTag and email.
+    private func adopt(_ token: LoginToken, codename: String, session: WebSessionID, typedName: String? = nil) async {
         let id = token.accountID
         let isNew = accountList[id] == nil
         let unused = accountList.signedIn(id, session: session)
+        if let typedName, accountList[id]?.email == nil { accountList.setProfile(id, battleTag: nil, email: typedName) }
         do {
             try tokenVault.save(token, codename: codename)
         } catch {
@@ -482,7 +486,7 @@ final class AppModel {
                 }
                 // Manual sign-in may have used another password: only an
                 // explicit Update Saved Login re-enables these credentials.
-                await adopt(token, codename: plan.codename, session: session)
+                await adopt(token, codename: plan.codename, session: session, typedName: loginWindow.typedAccountName)
                 return token
             case .failed:
                 state.failedTemporarily()
@@ -518,7 +522,7 @@ final class AppModel {
             return nil
         }
         Log.info(.auth, "token", nil, ["source": "login_window", "codename": plan.codename])
-        await adopt(token, codename: plan.codename, session: session)
+        await adopt(token, codename: plan.codename, session: session, typedName: loginWindow.typedAccountName)
         return token
     }
 
