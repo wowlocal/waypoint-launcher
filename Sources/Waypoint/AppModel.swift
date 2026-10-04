@@ -409,8 +409,8 @@ final class AppModel {
     }
 
     /// Refreshes cookies first, then (when opted in) signs in once with the
-    /// saved password. Network failures may still use the cached game token;
-    /// a rejected saved login goes to the interactive window instead.
+    /// saved password. Otherwise the account's last token from the keychain is
+    /// used; a rejected saved login goes to the interactive window instead.
     private func token(for plan: LaunchPlan, gameName: String, forceSignIn: Bool) async -> LoginToken? {
         // Only where the token came from is logged, never the token.
         let url = BattleNetLogin.url(codename: plan.codename, region: plan.region)
@@ -431,11 +431,15 @@ final class AppModel {
                     }
                     sessionExpired = true
                     Log.warning(.auth, "web_session_other_account")
-                case .signedOut: sessionExpired = true
-                case .failed: break // Offline is not evidence of an expired password.
+                case .signedOut:
+                    sessionExpired = true
+                    Log.info(.auth, "web_session_signed_out", nil, ["duration_ms": Int(Date().timeIntervalSince(started) * 1000)])
+                case .failed: // Offline is not evidence of an expired password.
+                    Log.info(.auth, "web_session_failed", nil, ["duration_ms": Int(Date().timeIntervalSince(started) * 1000)])
                 }
             } else {
                 sessionExpired = true
+                Log.info(.auth, "web_session_empty")
             }
         }
 
@@ -497,22 +501,13 @@ final class AppModel {
         }
 
         let savedLoginNeedsAttention = account.flatMap { autoLoginStates[$0.id] }?.isPaused == true
-        if !forceSignIn, !(sessionExpired && savedLoginNeedsAttention) {
-            let stored = (try? LaunchOptions(gameKey: plan.codename).storedToken()).flatMap { LoginToken($0) }
-            if let account {
-                if let token = tokenVault.token(account: account.id, codename: plan.codename) {
-                    Log.info(.auth, "token", nil, ["source": "keychain", "codename": plan.codename])
-                    return token
-                }
-                if let stored, stored.accountID == account.id {
-                    Log.info(.auth, "token", nil, ["source": "stored", "codename": plan.codename])
-                    return stored
-                }
-            } else if let stored {
-                Log.info(.auth, "token", nil, ["source": "stored", "codename": plan.codename])
-                await adopt(stored, codename: plan.codename, session: .shared)
-                return stored
-            }
+        // Only tokens Waypoint got itself. The one Battle.net leaves in the
+        // game's Launch Options can be long expired: the game then shows
+        // "Closed" and Waypoint can't tell, so it would keep handing it over.
+        if !forceSignIn, !(sessionExpired && savedLoginNeedsAttention), let account,
+           let token = tokenVault.token(account: account.id, codename: plan.codename) {
+            Log.info(.auth, "token", nil, ["source": "keychain", "codename": plan.codename])
+            return token
         }
         let session = WebSessionID.fresh()
         Log.notice(.auth, "login_window_shown", nil, ["codename": plan.codename, "region": plan.region.rawValue, "forced": forceSignIn])
