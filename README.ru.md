@@ -13,7 +13,7 @@
 [![Swift 6](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)](#сборка)
 [![Unofficial](https://img.shields.io/badge/Blizzard-unofficial-8a8a8a)](#дисклеймер)
 
-<img src="docs/screenshot.png" width="600" alt="Окно Waypoint со списком игр: Hearthstone и Warcraft III">
+<img src="docs/screenshot.png" width="600" alt="Библиотека Waypoint: Hearthstone, Warcraft III и переключение аккаунта">
 
 [English](README.md) · **Русский**
 
@@ -127,6 +127,33 @@ scripts/test-self-update.sh          # сквозной тест: старая �
 
 > [!NOTE]
 > Пока запущен Battle.net или его фоновый Agent, Waypoint не устанавливает и не обновляет игры, чтобы они никогда не писали в одни и те же файлы одновременно. Закрой Battle.net и попробуй снова: уже начатая загрузка продолжится с того же места.
+
+<details>
+<summary><b>Скриншоты: установка и обновления</b></summary>
+
+На скриншотах — вымышленный аккаунт и тестовые данные загрузок и обновлений.
+
+**Установка игры:** выбор папки, языка и региона с размером загрузки.
+
+<img src="docs/screenshot-install.png" width="480" alt="Установка World of Warcraft: папка, язык, регион и размер загрузки">
+
+**Для игры есть обновление:** вместо Play появляется кнопка Update.
+
+<img src="docs/screenshot-update-available.png" width="600" alt="Для Hearthstone доступно обновление: кнопка Update">
+
+**Загрузка обновления игры:** прогресс и объём скачанного видны в строке игры.
+
+<img src="docs/screenshot-game-update.png" width="600" alt="Обновление Hearthstone: 42 процента, скачано 1,26 ГБ из 3 ГБ">
+
+**Загрузка новой версии Waypoint:** статус внизу окна.
+
+<img src="docs/screenshot-waypoint-download.png" width="600" alt="Waypoint загружает собственное обновление: статус внизу окна">
+
+**Обновление Waypoint готово:** можно перезапустить сейчас или установить его при выходе.
+
+<img src="docs/screenshot-waypoint-update.png" width="600" alt="Обновление Waypoint готово: кнопка Restart to Update">
+
+</details>
 
 
 ## Как это работает

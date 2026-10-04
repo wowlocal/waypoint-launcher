@@ -13,7 +13,7 @@ Install, update and launch Blizzard games without the Battle.net app. No Rosetta
 [![Swift 6](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)](#build)
 [![Unofficial](https://img.shields.io/badge/Blizzard-unofficial-8a8a8a)](#disclaimer)
 
-<img src="docs/screenshot.png" width="600" alt="Waypoint window listing Hearthstone and Warcraft III">
+<img src="docs/screenshot.png" width="600" alt="Waypoint library with Hearthstone, Warcraft III and the account switcher">
 
 **English** · [Русский](README.ru.md)
 
@@ -127,6 +127,33 @@ Right-click the button for more:
 
 > [!NOTE]
 > Waypoint doesn't install or update games while Battle.net or its background Agent is running, so the two never write to the same files at once. Quit Battle.net and try again; a download that was already under way picks up where it stopped.
+
+<details>
+<summary><b>Screenshots: installs and updates</b></summary>
+
+The screenshots use a demo account and sample download and update data.
+
+**Installing a game:** choose the folder, language and region, and see the download size.
+
+<img src="docs/screenshot-install.png" width="480" alt="World of Warcraft installation sheet with location, language, region and download size">
+
+**Game update available:** the launch button becomes Update.
+
+<img src="docs/screenshot-update-available.png" width="600" alt="Hearthstone update available with an Update button">
+
+**Downloading a game update:** progress and downloaded bytes appear in the game's row.
+
+<img src="docs/screenshot-game-update.png" width="600" alt="Hearthstone update at 42 percent, with 1.26 GB of 3 GB downloaded">
+
+**Downloading Waypoint itself:** a quiet status line appears at the bottom.
+
+<img src="docs/screenshot-waypoint-download.png" width="600" alt="Waypoint downloading its own update in the window footer">
+
+**Waypoint update ready:** restart now, or let it install when you quit.
+
+<img src="docs/screenshot-waypoint-update.png" width="600" alt="Waypoint update ready with a Restart to Update button">
+
+</details>
 
 
 ## How it works
