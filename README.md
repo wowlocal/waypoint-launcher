@@ -51,6 +51,12 @@ The only thing you really need a launcher for is logging the game in. Waypoint d
 | World of Warcraft: Retail, Classic, Classic Era | 🧪 Implemented, not yet tested on macOS | Through Battle.net for now |
 | Warcraft III: Reforged | ❌ The game itself is Intel-only, so Rosetta is unavoidable | — |
 
+## Download
+
+Get **Waypoint-x.y.z.dmg** from [Releases](https://github.com/wowlocal/waypoint-launcher/releases/latest), open it, and drag Waypoint to Applications. Releases are signed with a Developer ID and notarized by Apple, so the app opens without warnings.
+
+Requires an Apple Silicon Mac with macOS 14 or later.
+
 ## Build
 
 Requires macOS 14+ and Xcode with Swift 6.
@@ -63,6 +69,21 @@ open build/Waypoint.app
 ```
 
 Move `Waypoint.app` to `/Applications` if you want to keep it.
+
+<details>
+<summary><b>Making a release</b></summary>
+
+`scripts/release.sh` runs the tests, then builds the app and signs it with your Developer ID (hardened runtime). It notarizes and staples the app, then packs it into a DMG and signs, notarizes and staples that too. Finally it checks the result with Gatekeeper.
+
+```sh
+# once: store notary credentials in the keychain (use an app-specific password)
+xcrun notarytool store-credentials NotaryProfile --apple-id <apple id> --team-id <team id>
+
+scripts/release.sh 0.1.0             # → dist/Waypoint-0.1.0.dmg + .sha256
+scripts/release.sh 0.1.0 --publish   # also tags v0.1.0 and creates the GitHub release
+```
+
+</details>
 
 ## Usage
 

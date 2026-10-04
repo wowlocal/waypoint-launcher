@@ -51,6 +51,12 @@ Battle.net для Mac до сих пор собран только под Intel.
 | World of Warcraft: Retail, Classic, Classic Era | 🧪 Реализовано, на macOS ещё не проверено | Пока через Battle.net |
 | Warcraft III: Reforged | ❌ Сама игра только под Intel, без Rosetta не обойтись | — |
 
+## Скачать
+
+Скачай **Waypoint-x.y.z.dmg** из [Releases](https://github.com/wowlocal/waypoint-launcher/releases/latest), открой и перетащи Waypoint в «Программы». Релизы подписаны Developer ID и нотаризованы Apple, поэтому приложение открывается без предупреждений.
+
+Нужен Mac на Apple Silicon и macOS 14 или новее.
+
 ## Сборка
 
 Нужны macOS 14+ и Xcode со Swift 6.
@@ -63,6 +69,21 @@ open build/Waypoint.app
 ```
 
 Если хочешь оставить приложение насовсем, перенеси `Waypoint.app` в `/Applications`.
+
+<details>
+<summary><b>Как выпустить релиз</b></summary>
+
+`scripts/release.sh` прогоняет тесты, собирает приложение и подписывает его Developer ID (hardened runtime). Потом нотаризует приложение и делает staple, упаковывает его в DMG, подписывает, нотаризует и делает staple для DMG тоже. В конце проверяет результат через Gatekeeper.
+
+```sh
+# один раз: сохранить данные для нотаризации в Keychain (нужен app-specific пароль)
+xcrun notarytool store-credentials NotaryProfile --apple-id <apple id> --team-id <team id>
+
+scripts/release.sh 0.1.0             # → dist/Waypoint-0.1.0.dmg + .sha256
+scripts/release.sh 0.1.0 --publish   # плюс тег v0.1.0 и GitHub Release
+```
+
+</details>
 
 ## Как пользоваться
 
