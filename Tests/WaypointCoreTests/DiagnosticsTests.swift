@@ -138,3 +138,8 @@ private func tempDir() throws -> URL {
     #expect(Region.preferred(games: [game("hs_beta", "eu"), game("w3", "eu"), game("wow", "us")]) == .eu)
     #expect(Region.preferred(games: []) == Region.default())
 }
+
+@Test func testRunsDontLogIntoTheUsersLogs() {
+    #expect(Diagnostics.shared.directory != Diagnostics.defaultDirectory)
+    #expect(Diagnostics.shared.directory.path.hasPrefix(FileManager.default.temporaryDirectory.path))
+}

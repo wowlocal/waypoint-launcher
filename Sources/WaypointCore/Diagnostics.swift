@@ -39,7 +39,19 @@ public final class Diagnostics: @unchecked Sendable {
         case app, library, auth, launch, gameUpdate = "game_update", install, cdn, selfUpdate = "self_update", cli
     }
 
-    public static let shared = Diagnostics()
+    public static let shared = Diagnostics(directory: directoryForThisProcess)
+
+    /// `WAYPOINT_LOG_DIR` wins; test runs log to a temp folder so they don't
+    /// fill the user's logs (and `waypoint-cli logs`) with test fixtures.
+    static var directoryForThisProcess: URL {
+        let env = ProcessInfo.processInfo.environment
+        if let dir = env["WAYPOINT_LOG_DIR"], !dir.isEmpty { return URL(fileURLWithPath: dir, isDirectory: true) }
+        let testRunners: Set = ["swiftpm-testing-helper", "xctest"]
+        if testRunners.contains(ProcessInfo.processInfo.processName) || env["XCTestConfigurationFilePath"] != nil {
+            return FileManager.default.temporaryDirectory.appendingPathComponent("waypoint-test-logs", isDirectory: true)
+        }
+        return defaultDirectory
+    }
     public static let subsystem = "dev.waypoint.launcher"
 
     public static var defaultDirectory: URL {
