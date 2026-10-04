@@ -136,9 +136,20 @@ public struct CASCInstaller: Sendable {
         log("Locating \(storage.count + looseFiles.count) files in \(archives.count) CDN archives")
         let indexes = try await ArchiveIndexes.fetch(archives, cdn: cdn, localDirectory: dataRoot.appendingPathComponent("indices"))
         let locations = try ArchiveIndexes.locate(Set(storage.map(\.encodedKey)).union(looseKeys), in: indexes)
+        // Files outside archives: the CDN's file index knows their sizes.
+        let unlocated = Set(storage.map(\.encodedKey)).subtracting(locations.keys)
+        var looseSizes: [Data: UInt64] = [:]
+        if let fileIndex = cdnConfig["file-index"].first, !unlocated.isEmpty,
+           let data = try? await cdn.cached(.data, fileIndex, suffix: ".index") {
+            looseSizes = (try? ArchiveIndex.locate(unlocated, in: data, archive: fileIndex))?.mapValues(\.size) ?? [:]
+        }
         for i in storage.indices {
             storage[i].location = locations[storage[i].encodedKey]
-            if let location = storage[i].location { storage[i].size = location.size }
+            if let location = storage[i].location {
+                storage[i].size = location.size
+            } else if let size = looseSizes[storage[i].encodedKey] {
+                storage[i].size = size
+            }
         }
         for i in looseFiles.indices { looseFiles[i].location = locations[looseFiles[i].encodedKey] }
 
@@ -185,6 +196,23 @@ public struct CASCInstaller: Sendable {
             let destination = indexDir.appendingPathComponent("\(archive).index")
             if fm.fileExists(atPath: destination.path) { continue }
             try write(try await plan.cdn.cached(.data, archive, suffix: ".index"), to: destination)
+        }
+        // The CDN config's other indexes, as the Agent keeps them. The game
+        // can fetch these itself, so a missing one is logged, not fatal.
+        // (archive-group and patch-archive-group aren't on the CDN; the Agent
+        // builds them locally from the archive indexes. Not written yet.)
+        let cdnConfig = TACTConfig(String(decoding: plan.cdnConfig, as: UTF8.self))
+        var extraIndexes: [(CDNClient.Kind, String)] = cdnConfig["patch-archives"].map { (.patch, $0) }
+        if let fileIndex = cdnConfig["file-index"].first { extraIndexes.append((.data, fileIndex)) }
+        if let patchFileIndex = cdnConfig["patch-file-index"].first { extraIndexes.append((.patch, patchFileIndex)) }
+        for (kind, hash) in extraIndexes {
+            let destination = indexDir.appendingPathComponent("\(hash).index")
+            if fm.fileExists(atPath: destination.path) { continue }
+            do {
+                try write(try await plan.cdn.cached(kind, hash, suffix: ".index"), to: destination)
+            } catch {
+                Log.warning(.install, "index_unavailable", nil, ["uid": install.uid, "index": hash, "kind": kind.rawValue, "error": error])
+            }
         }
 
         // Local storage.
