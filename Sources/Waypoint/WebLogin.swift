@@ -98,6 +98,7 @@ final class SilentTokenFetcher {
             view.load(URLRequest(url: url))
             Task { @MainActor in
                 try? await Task.sleep(for: timeout)
+                if !resumed { Log.info(.auth, "web_session_timeout", nil, ["seconds": Int(timeout.components.seconds)]) }
                 finish(nil)
             }
         }

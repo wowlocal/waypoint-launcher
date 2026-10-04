@@ -101,6 +101,7 @@ public struct GameUpdater: Sendable {
         guard GameUpdater.canUpdate(GameCatalog.family(for: install.productCode)) else {
             throw UpdateError.unsupported(install.productCode)
         }
+        let started = Date()
         let target: ProductVersion
         if let given = requested {
             target = given
@@ -115,6 +116,8 @@ public struct GameUpdater: Sendable {
         let wanted = try await installManifest(buildConfig, cdn).select(tagString: tags)
             .filter { only?($0.path) ?? true }
         log("Build \(target.name): \(wanted.count) files for this install")
+        Log.info(.gameUpdate, "plan_started", nil, ["uid": install.uid, "path": install.installPath, "from": install.version ?? "none",
+                                                     "to": target.name, "verify": verify, "files": wanted.count, "filtered": only != nil])
 
         // What the installed build had, so unchanged files can be skipped without hashing.
         var previous: [String: Data]?
@@ -128,6 +131,7 @@ public struct GameUpdater: Sendable {
                                       uniquingKeysWith: { a, _ in a })
             } else {
                 log("Installed build's manifest is gone from the CDN; checking files by hash")
+                Log.warning(.gameUpdate, "old_manifest_missing", "falling back to hashing local files", ["uid": install.uid, "build_config": installed])
             }
         }
 
@@ -145,6 +149,8 @@ public struct GameUpdater: Sendable {
             })
 
         guard !changed.isEmpty else {
+            Log.info(.gameUpdate, "plan_ready", "nothing to download", ["uid": install.uid, "to": target.name, "deletions": deletions.count,
+                                                                       "duration_ms": Int(Date().timeIntervalSince(started) * 1000)])
             return UpdatePlan(install: install, target: target, cdn: cdn, files: [], deletions: deletions)
         }
 
@@ -160,24 +166,37 @@ public struct GameUpdater: Sendable {
 
         let locations = try await locate(Set(files.map(\.encodedKey)), archives: cdnConfig["archives"], cdn)
         for i in files.indices { files[i].location = locations[files[i].encodedKey] }
-        return UpdatePlan(install: install, target: target, cdn: cdn, files: files, deletions: deletions)
+        let plan = UpdatePlan(install: install, target: target, cdn: cdn, files: files, deletions: deletions)
+        Log.info(.gameUpdate, "plan_ready", nil, ["uid": install.uid, "to": target.name, "files": files.count, "bytes": plan.downloadSize,
+                                                 "in_archives": locations.count, "deletions": deletions.count,
+                                                 "duration_ms": Int(Date().timeIntervalSince(started) * 1000)])
+        return plan
     }
 
     /// Downloads and installs a plan. Nothing in the game folder changes until
     /// every file has been downloaded and verified; interrupted runs resume.
     public func apply(_ plan: UpdatePlan, progress: @escaping @Sendable (UpdateProgress) -> Void = { _ in }) async throws {
-        guard RunningProcesses.inside(root).isEmpty else { throw UpdateError.gameRunning }
+        let started = Date()
+        guard RunningProcesses.inside(root).isEmpty else {
+            Log.warning(.gameUpdate, "apply_refused", "game is running", ["uid": install.uid])
+            throw UpdateError.gameRunning
+        }
         let fm = FileManager.default
         try fm.createDirectory(at: stagingDirectory, withIntermediateDirectories: true)
+        Log.info(.gameUpdate, "apply_started", nil, ["uid": install.uid, "to": plan.target.name, "files": plan.files.count,
+                                                    "bytes": plan.downloadSize, "deletions": plan.deletions.count])
 
         // Several paths can share one content key; download it once.
         let unique = Dictionary(plan.files.map { ($0.contentKey, $0) }, uniquingKeysWith: { a, _ in a })
         let total = unique.values.reduce(UInt64(0)) { $0 + $1.size }
         let available = (try? root.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
             .volumeAvailableCapacityForImportantUsage).flatMap { $0 }.map { UInt64($0) } ?? .max
-        guard available > total + 512 * 1024 * 1024 else { throw UpdateError.notEnoughSpace(needed: total, available: available) }
+        guard available > total + 512 * 1024 * 1024 else {
+            Log.error(.gameUpdate, "not_enough_space", nil, ["uid": install.uid, "needed": total, "available": available])
+            throw UpdateError.notEnoughSpace(needed: total, available: available)
+        }
 
-        let counter = ProgressCounter(total: total, files: unique.count, report: progress)
+        let counter = ProgressCounter(total: total, files: unique.count, uid: install.uid, report: progress)
         counter.report()
         try await withThrowingTaskGroup(of: Void.self) { group in
             var pending = unique.values.makeIterator()
@@ -218,8 +237,11 @@ public struct GameUpdater: Sendable {
         for path in plan.deletions {
             try? fm.removeItem(at: try safeURL(path))
         }
-        try store.record(uid: install.uid, InstalledBuild(buildConfig: plan.target.buildConfig, version: plan.target.name))
+        try store.record(uid: install.uid, InstalledBuild(buildConfig: plan.target.buildConfig, version: plan.target.name,
+                                                          install: plan.install))
         try? fm.removeItem(at: stagingDirectory)
+        Log.notice(.gameUpdate, "apply_finished", nil, ["uid": install.uid, "version": plan.target.name, "files": plan.files.count,
+                                                       "deletions": plan.deletions.count, "duration_ms": Int(Date().timeIntervalSince(started) * 1000)])
     }
 
     /// Decides what to download and what to delete.
@@ -286,6 +308,8 @@ public struct GameUpdater: Sendable {
         }
         guard md5 == file.contentKey else {
             try? fm.removeItem(at: partial)
+            Log.error(.gameUpdate, "checksum_mismatch", nil, ["path": file.path, "expected": file.contentKey.hex, "got": md5.hex,
+                                                             "archive": file.location?.archive ?? "loose"])
             throw TACTError.checksumMismatch(file.path)
         }
         _ = try? fm.removeItem(at: staged)
@@ -385,13 +409,16 @@ private final class ProgressCounter: @unchecked Sendable {
     private let lock = NSLock()
     private var bytes: UInt64 = 0
     private var files = 0
+    private var loggedDecile = 0
     private let total: UInt64
     private let totalFiles: Int
+    private let uid: String
     private let callback: @Sendable (UpdateProgress) -> Void
 
-    init(total: UInt64, files: Int, report: @escaping @Sendable (UpdateProgress) -> Void) {
+    init(total: UInt64, files: Int, uid: String, report: @escaping @Sendable (UpdateProgress) -> Void) {
         self.total = total
         self.totalFiles = files
+        self.uid = uid
         self.callback = report
     }
 
@@ -399,7 +426,15 @@ private final class ProgressCounter: @unchecked Sendable {
         lock.lock()
         bytes += size
         files += 1
+        // Log every 10%, not every file.
+        let decile = total == 0 ? 10 : Int(bytes * 10 / total)
+        let logDecile = decile > loggedDecile
+        if logDecile { loggedDecile = decile }
+        let (doneBytes, doneFiles) = (bytes, files)
         lock.unlock()
+        if logDecile {
+            Log.info(.gameUpdate, "progress", nil, ["uid": uid, "percent": decile * 10, "bytes": doneBytes, "files": doneFiles])
+        }
         report()
     }
 
@@ -428,10 +463,34 @@ public enum RunningProcesses {
 }
 
 /// Waypoint's own record of builds it installed. Battle.net's product.db is
-/// left alone; this overrides it when newer.
+/// left alone; this overrides it when newer. For games Waypoint installed
+/// itself it's the only record, so it also keeps where and how.
 public struct InstalledBuild: Codable, Sendable, Equatable {
     public var buildConfig: String
     public var version: String
+    public var productCode: String?
+    public var installPath: String?
+    public var region: String?
+    public var textLanguage: String?
+    public var tagString: String?
+
+    public init(buildConfig: String, version: String, install: ProductInstall? = nil) {
+        self.buildConfig = buildConfig
+        self.version = version
+        productCode = install?.productCode
+        installPath = install?.installPath
+        region = install?.region
+        textLanguage = install?.textLanguage
+        tagString = install?.tagString
+    }
+
+    /// The install this record describes, if it has enough to stand alone.
+    func install(uid: String) -> ProductInstall? {
+        guard let productCode, let installPath else { return nil }
+        return ProductInstall(uid: uid, productCode: productCode, installPath: installPath, region: region,
+                              textLanguage: textLanguage, version: version, buildConfig: buildConfig,
+                              tagString: tagString)
+    }
 }
 
 public struct InstallStateStore: Sendable {
@@ -454,6 +513,11 @@ public struct InstallStateStore: Sendable {
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.prettyPrinted, .sortedKeys]
         try encoder.encode(all).write(to: file, options: .atomic)
+    }
+
+    /// Games Waypoint installed itself, which Battle.net doesn't know about.
+    public func standaloneInstalls() -> [ProductInstall] {
+        load().sorted { $0.key < $1.key }.compactMap { uid, build in build.install(uid: uid) }
     }
 
     /// Applies what Waypoint installed on top of what Battle.net recorded,

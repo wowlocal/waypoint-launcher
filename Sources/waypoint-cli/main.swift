@@ -2,8 +2,13 @@ import Foundation
 import WaypointCore
 
 let args = Array(CommandLine.arguments.dropFirst())
+if args.first != "logs" {
+    Log.info(.cli, "command", nil, ["args": args.joined(separator: " ")])
+}
 
 func fail(_ message: String) -> Never {
+    Log.error(.cli, "failed", message)
+    Diagnostics.shared.flush()
     FileHandle.standardError.write(Data((message + "\n").utf8))
     exit(1)
 }
@@ -58,6 +63,17 @@ case "update":
 case "fetch":
     await fetch(Array(args.dropFirst()))
 
+case "install":
+    await install(Array(args.dropFirst()))
+
+case "logs":
+    await logs(Array(args.dropFirst()))
+
+case "diagnose":
+    diagnose()
+
 default:
-    fail("usage: waypoint-cli [list | plan <uid> | check-tokens [GAMEKEY…] | check-updates | update <uid> [--verify] [--dry-run] | fetch <uid> <regex> <dir>]")
+    fail("usage: waypoint-cli [list | plan <uid> | check-tokens [GAMEKEY…] | check-updates | update <uid> [--verify] [--dry-run] | fetch <uid> <regex> <dir> | install <uid> <dir> [options] | logs [options] | diagnose]")
 }
+
+Diagnostics.shared.flush()

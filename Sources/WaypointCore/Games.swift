@@ -170,6 +170,11 @@ public struct GameLibrary {
                 add(install)
             }
         }
+        // Games Waypoint installed, as long as their folder is still there.
+        for install in stateStore.standaloneInstalls()
+        where fileManager.fileExists(atPath: install.installPath) {
+            add(install)
+        }
         return order.compactMap { byUID[$0] }.map(stateStore.apply(to:))
     }
 

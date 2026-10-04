@@ -137,14 +137,18 @@ public struct CDNClient: Sendable {
                 do {
                     return try await body(request)
                 } catch let error as TACTError {
+                    Log.warning(.cdn, "request_failed", nil, ["url": request.url?.absoluteString ?? "?", "attempt": attempt + 1,
+                                                              "range": range.map { "\($0.lowerBound)-\($0.upperBound)" } ?? "", "error": error])
                     if case .notFound = error { lastError = error; break } // try the next mirror
                     lastError = error
                 } catch {
+                    Log.warning(.cdn, "request_failed", nil, ["url": request.url?.absoluteString ?? "?", "attempt": attempt + 1, "error": error])
                     lastError = error
                 }
                 if attempt == 0 { try await Task.sleep(for: .seconds(1)) }
             }
         }
+        Log.error(.cdn, "all_mirrors_failed", nil, ["path": relativePath(kind, hash, suffix: suffix), "error": lastError])
         throw lastError
     }
 

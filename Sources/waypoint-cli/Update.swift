@@ -68,3 +68,52 @@ func fetch(_ args: [String]) async {
         fail("\(error)")
     }
 }
+
+/// `install <uid> <dir> [--language xxXX] [--region eu] [--only regex] [--dry-run] [--state file]`:
+/// installs a game from scratch into `<dir>` (the game's own folder).
+func install(_ args: [String]) async {
+    let usage = "usage: waypoint-cli install <uid> <dir> [--language enUS] [--region eu|us|kr|cn] [--only regex] [--dry-run] [--state file]"
+    var positional: [String] = []
+    var options: [String: String] = [:]
+    var flags: Set<String> = []
+    var i = 0
+    while i < args.count {
+        if ["--language", "--region", "--only", "--state"].contains(args[i]), i + 1 < args.count {
+            options[args[i]] = args[i + 1]
+            i += 2
+            continue
+        }
+        if args[i].hasPrefix("--") { flags.insert(args[i]) } else { positional.append(args[i]) }
+        i += 1
+    }
+    guard positional.count == 2,
+          let product = InstallableProduct.all.first(where: { $0.uid == positional[0] || $0.productCode == positional[0] })
+    else { fail(usage) }
+    guard let region = options["--region"].map({ Region(rawValue: $0) }) ?? Region.default() else { fail(usage) }
+    let language = options["--language"] ?? product.defaultLanguage()
+    guard product.languages.contains(language) else { fail("\(product.displayName) has no \(language); pick one of \(product.languages.joined(separator: " "))") }
+    let pattern = options["--only"]
+    if let pattern, (try? NSRegularExpression(pattern: pattern)) == nil { fail("bad regex") }
+
+    let install = product.install(at: URL(fileURLWithPath: positional[1]), region: region, language: language)
+    let store = options["--state"].map { InstallStateStore(file: URL(fileURLWithPath: $0)) } ?? InstallStateStore()
+    let updater = GameUpdater(install: install, store: store)
+    print("\(product.displayName) → \(install.installPath) (\(region.displayName), \(language))")
+    do {
+        try FileManager.default.createDirectory(atPath: install.installPath, withIntermediateDirectories: true)
+        var only: (@Sendable (String) -> Bool)?
+        if let pattern {
+            only = { path in path.range(of: pattern, options: .regularExpression) != nil }
+        }
+        let plan = try await updater.plan(only: only, log: log)
+        print("download: \(plan.files.count) files, \(byteString(plan.downloadSize))")
+        guard !flags.contains("--dry-run"), !plan.isEmpty else { return }
+        try await updater.apply(plan) { p in
+            log(String(format: "%.1f%%  %@ / %@  (%d/%d files)", p.fraction * 100,
+                       byteString(p.completedBytes), byteString(p.totalBytes), p.completedFiles, p.totalFiles))
+        }
+        print("installed \(plan.target.name)")
+    } catch {
+        fail("\(error)")
+    }
+}

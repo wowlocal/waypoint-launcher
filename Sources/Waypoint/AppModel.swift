@@ -40,6 +40,18 @@ final class AppModel {
     private var observers: [NSObjectProtocol] = []
 
     init() {
+        let info = Bundle.main.infoDictionary ?? [:]
+        Log.notice(.app, "started", nil, [
+            "version": info["CFBundleShortVersionString"] as? String ?? "dev",
+            "build": info["CFBundleVersion"] as? String ?? "dev",
+            "path": Bundle.main.bundlePath,
+            "macos": ProcessInfo.processInfo.operatingSystemVersionString,
+        ])
+        observers.append(NotificationCenter.default.addObserver(
+            forName: NSApplication.willTerminateNotification, object: nil, queue: .main) { _ in
+            Log.notice(.app, "quitting")
+            Diagnostics.shared.flush()
+        })
         regionOverride = UserDefaults.standard.string(forKey: "regionOverride").flatMap(Region.init(rawValue:))
         reload()
         let center = NSWorkspace.shared.notificationCenter
@@ -58,6 +70,7 @@ final class AppModel {
     func reload() {
         games = library.games()
         refreshRunning()
+        Log.info(.library, "scanned", nil, ["games": games.map { "\($0.install.uid)@\($0.install.version ?? "?")" }.joined(separator: ",")])
     }
 
     // MARK: Updates
@@ -77,8 +90,13 @@ final class AppModel {
         if !force, let last = lastUpdateCheck, Date().timeIntervalSince(last) < 15 * 60 { return }
         lastUpdateCheck = Date()
         for game in games where game.family != .other && game.appURL != nil {
-            if let check = try? await GameUpdater(install: game.install).check() {
+            do {
+                let check = try await GameUpdater(install: game.install).check()
                 updates[game.id] = check
+                Log.info(.gameUpdate, "checked", nil, ["uid": game.id, "installed": game.install.version ?? "?",
+                                                       "latest": check.latest.name, "update_available": check.isUpdateAvailable])
+            } catch {
+                Log.warning(.gameUpdate, "check_failed", nil, ["uid": game.id, "error": error])
             }
         }
     }
@@ -87,6 +105,7 @@ final class AppModel {
     /// every file and repairs what's broken.
     func update(_ game: Game, verify: Bool = false) async {
         guard canUpdate(game) else { return }
+        Log.info(.gameUpdate, "requested", nil, ["uid": game.id, "verify": verify])
         phases[game.id] = .updating(nil)
         do {
             let updater = GameUpdater(install: game.install)
@@ -102,6 +121,7 @@ final class AppModel {
             await checkForUpdates(force: true)
             phases[game.id] = .idle
         } catch {
+            Log.error(.gameUpdate, "failed", nil, ["uid": game.id, "error": error])
             phases[game.id] = .failed(String(describing: error))
         }
     }
@@ -127,10 +147,12 @@ final class AppModel {
     /// rejects them or the user wants another account.
     func play(_ game: Game, forceSignIn: Bool = false) async {
         guard canPlay(game) else { return }
+        Log.info(.launch, "requested", nil, ["uid": game.id, "version": game.install.version ?? "?", "force_sign_in": forceSignIn])
         do {
             let plan = try GameLauncher.plan(for: game, region: regionOverride)
             phases[game.id] = .signingIn
             guard let token = await token(for: plan, gameName: game.displayName, forceSignIn: forceSignIn) else {
+                Log.notice(.auth, "sign_in_cancelled", nil, ["uid": game.id])
                 phases[game.id] = .idle
                 return
             }
@@ -139,13 +161,16 @@ final class AppModel {
             // Keep "launching" until the game shows up in the running list.
             try? await Task.sleep(for: .seconds(4))
             refreshRunning()
+            Log.info(.launch, "running_check", nil, ["uid": game.id, "running": running.contains(game.id)])
             phases[game.id] = .idle
         } catch {
+            Log.error(.launch, "failed", nil, ["uid": game.id, "error": error])
             phases[game.id] = .failed(String(describing: error))
         }
     }
 
     func signOut() async {
+        Log.notice(.auth, "signed_out")
         await WebSession.signOut()
         for codename in ["WTCG", "WoW"] {
             LaunchOptions(gameKey: codename).clearToken()
@@ -158,15 +183,25 @@ final class AppModel {
     /// `net.battle`, where Battle.net keeps it too, and lasts for months).
     /// Only if neither works do we show the login window.
     private func token(for plan: LaunchPlan, gameName: String, forceSignIn: Bool) async -> LoginToken? {
+        // Only where the token came from is logged, never the token.
         let url = BattleNetLogin.url(codename: plan.codename, region: plan.region)
         if !forceSignIn {
-            if let token = await silentFetcher.fetch(url) { return token }
+            let started = Date()
+            if let token = await silentFetcher.fetch(url) {
+                Log.info(.auth, "token", nil, ["source": "web_session", "codename": plan.codename,
+                                               "duration_ms": Int(Date().timeIntervalSince(started) * 1000)])
+                return token
+            }
             if let stored = try? LaunchOptions(gameKey: plan.codename).storedToken(),
                let token = LoginToken(stored) {
+                Log.info(.auth, "token", nil, ["source": "stored", "codename": plan.codename])
                 return token
             }
         }
-        return await loginWindow.run(url, title: "Sign in to play \(gameName)")
+        Log.notice(.auth, "login_window_shown", nil, ["codename": plan.codename, "region": plan.region.rawValue, "forced": forceSignIn])
+        let token = await loginWindow.run(url, title: "Sign in to play \(gameName)")
+        if token != nil { Log.info(.auth, "token", nil, ["source": "login_window", "codename": plan.codename]) }
+        return token
     }
 
     private func refreshRunning() {

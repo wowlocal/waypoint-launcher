@@ -81,11 +81,16 @@ public enum GameLauncher {
     @discardableResult
     public static func launch(_ plan: LaunchPlan, token: LoginToken, gameName: String) throws -> Int32 {
         try LaunchOptions(gameKey: plan.codename).write(token: token.value, region: plan.region, locale: plan.locale)
+        Log.info(.launch, "launch_options_written", nil, ["codename": plan.codename, "region": plan.region.rawValue, "locale": plan.locale ?? "-"])
 
         do {
-            return try Spawn.detached(executable: plan.executable, arguments: plan.arguments,
-                                      workingDirectory: plan.workingDirectory)
+            let pid = try Spawn.detached(executable: plan.executable, arguments: plan.arguments,
+                                         workingDirectory: plan.workingDirectory)
+            Log.notice(.launch, "spawned", nil, ["game": gameName, "pid": pid, "executable": plan.executable.path,
+                                                "args": plan.arguments.joined(separator: " "), "cwd": plan.workingDirectory.path])
+            return pid
         } catch {
+            Log.error(.launch, "spawn_failed", nil, ["game": gameName, "executable": plan.executable.path, "error": error])
             throw LaunchError.spawnFailed(gameName, error)
         }
     }

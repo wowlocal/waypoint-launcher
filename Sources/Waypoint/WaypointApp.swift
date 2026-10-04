@@ -29,6 +29,12 @@ struct WaypointApp: App {
                 Divider()
                 Button("Sign Out of Battle.net") { Task { await model.signOut() } }
             }
+            CommandGroup(after: .help) {
+                Button("Export Diagnostics…") { exportDiagnostics() }
+                Button("Show Logs in Finder") {
+                    NSWorkspace.shared.activateFileViewerSelecting([Diagnostics.shared.directory])
+                }
+            }
         }
 
         MenuBarExtra("Waypoint", systemImage: "gamecontroller") {
@@ -52,6 +58,23 @@ struct WaypointApp: App {
             Button("Check for Updates") { checkForUpdates() }
             Button("Rescan Games") { model.reload() }
             Button("Quit Waypoint") { NSApp.terminate(nil) }.keyboardShortcut("q")
+        }
+    }
+
+    /// Saves a diagnostics snapshot plus the last week of logs as one JSONL
+    /// file, for bug reports.
+    private func exportDiagnostics() {
+        let panel = NSSavePanel()
+        let stamp = Diagnostics.timestampString(Date()).prefix(19).replacingOccurrences(of: ":", with: "-")
+        panel.nameFieldStringValue = "Waypoint-Diagnostics-\(stamp).jsonl"
+        panel.directoryURL = FileManager.default.urls(for: .desktopDirectory, in: .userDomainMask).first
+        guard panel.runModal() == .OK, let url = panel.url else { return }
+        do {
+            try DiagnosticsReport.export(to: url)
+            NSWorkspace.shared.activateFileViewerSelecting([url])
+        } catch {
+            Log.error(.app, "diagnostics_export_failed", nil, ["error": error])
+            NSAlert(error: error).runModal()
         }
     }
 

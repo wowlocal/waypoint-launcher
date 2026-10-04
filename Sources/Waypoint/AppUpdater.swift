@@ -1,6 +1,7 @@
 import AppKit
 import Observation
 import Sparkle
+import WaypointCore
 
 /// Keeps Waypoint itself up to date with Sparkle, quietly: updates are found
 /// and downloaded in the background and installed when Waypoint quits.
@@ -29,7 +30,11 @@ final class AppUpdater: NSObject {
 
     override init() {
         super.init()
-        guard Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") != nil else { return }
+        guard let feed = Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") as? String else {
+            Log.info(.selfUpdate, "disabled", "no feed in this build")
+            return
+        }
+        Log.info(.selfUpdate, "enabled", nil, ["feed": feed])
         let controller = SPUStandardUpdaterController(startingUpdater: true, updaterDelegate: self, userDriverDelegate: nil)
         controller.updater.automaticallyDownloadsUpdates = true
         self.controller = controller
@@ -46,6 +51,7 @@ final class AppUpdater: NSObject {
         }
         guard controller.updater.canCheckForUpdates else { return }
         userInitiated = true
+        Log.info(.selfUpdate, "check_requested")
         show("Checking for Waypoint updates…", busy: true)
         controller.updater.checkForUpdatesInBackground()
     }
@@ -54,6 +60,7 @@ final class AppUpdater: NSObject {
     /// Games keep running, they don't depend on Waypoint.
     func restartToUpdate() {
         guard let installNow else { return }
+        Log.notice(.selfUpdate, "restart_to_update", nil, ["version": readyVersion ?? "?"])
         show("Installing update…", busy: true)
         installNow()
     }
@@ -80,11 +87,13 @@ final class AppUpdater: NSObject {
 extension AppUpdater: SPUUpdaterDelegate {
     nonisolated func updater(_ updater: SPUUpdater, didFindValidUpdate item: SUAppcastItem) {
         let version = Self.version(of: item)
+        Log.notice(.selfUpdate, "found", nil, ["version": version, "build": item.versionString])
         MainActor.assumeIsolated { show("Downloading Waypoint \(version)…", busy: true) }
     }
 
     nonisolated func updater(_ updater: SPUUpdater, failedToDownloadUpdate item: SUAppcastItem, error: Error) {
         let message = error.localizedDescription
+        Log.error(.selfUpdate, "download_failed", nil, ["version": item.displayVersionString, "error": message])
         MainActor.assumeIsolated { show("Update download failed: \(message)", clearAfter: 8) }
     }
 
@@ -94,6 +103,7 @@ extension AppUpdater: SPUUpdaterDelegate {
     nonisolated func updater(_ updater: SPUUpdater, willInstallUpdateOnQuit item: SUAppcastItem,
                              immediateInstallationBlock immediateInstallHandler: @escaping () -> Void) -> Bool {
         let version = Self.version(of: item)
+        Log.notice(.selfUpdate, "ready", "installs on quit", ["version": version])
         // Sparkle hands this over on the main thread, where it's also called.
         nonisolated(unsafe) let handler = immediateInstallHandler
         MainActor.assumeIsolated {
@@ -105,6 +115,7 @@ extension AppUpdater: SPUUpdaterDelegate {
     }
 
     nonisolated func updaterDidNotFindUpdate(_ updater: SPUUpdater) {
+        Log.info(.selfUpdate, "up_to_date")
         MainActor.assumeIsolated {
             if userInitiated { show("Waypoint is up to date.", clearAfter: 4) }
         }
@@ -112,6 +123,9 @@ extension AppUpdater: SPUUpdaterDelegate {
 
     nonisolated func updater(_ updater: SPUUpdater, didAbortWithError error: Error) {
         let error = error as NSError
+        if error.code != Int(SUError.noUpdateError.rawValue) {
+            Log.warning(.selfUpdate, "aborted", nil, ["code": error.code, "domain": error.domain, "error": error.localizedDescription])
+        }
         MainActor.assumeIsolated {
             switch error.code {
             case Int(SUError.noUpdateError.rawValue):
