@@ -203,10 +203,35 @@ final class LoginWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler {
     /// last `run`, to name the account by: Blizzard's account page doesn't
     /// see this login's session, so it can't say the BattleTag or email.
     private(set) var typedAccountName: String?
+    /// Covers the page while the known email or phone goes in, until the
+    /// password step shows; it also takes the clicks meant for the page.
+    private var loadingOverlay: NSView?
+    /// The email or phone this `run` filled in, which nobody typed.
+    private var filledAccountName: String?
 
     /// WebKit lets only browsers and the site's own apps use passkeys, so
     /// Blizzard's passkey sign-in can't finish in this window.
     private static let passkeyNotice = "Passkeys don’t work in Waypoint. If Battle.net asks for one, sign in with your password instead."
+    /// Hides the page's buttons that start a passkey sign-in ("Use passkey"
+    /// next to the password), which can only fail here. Only those: a "can't
+    /// use your passkey?" link may be the way back to the password. The page
+    /// swaps its steps in place, so it keeps watching. It's always the English
+    /// one (`/login/en/`).
+    private static let hidePasskeyScript = #"""
+        (function () {
+          if (window.__waypointNoPasskey) return;
+          window.__waypointNoPasskey = true;
+          function hide() {
+            document.querySelectorAll('button, a, [role="button"], input[type="submit"], input[type="button"]').forEach(function (e) {
+              var text = (e.textContent || e.value || '').replace(/\s+/g, ' ').trim();
+              if (/^(use|sign in with|log in with|continue with)( a| your)? passkeys?$/i.test(text))
+                e.style.setProperty('display', 'none', 'important');
+            });
+          }
+          hide();
+          new MutationObserver(hide).observe(document.documentElement, { childList: true, subtree: true });
+        })();
+        """#
 
     private static let accountNameHandler = "waypointAccountName"
     /// Reports the login form's account name (`#accountName`) when it's
@@ -232,26 +257,36 @@ final class LoginWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler {
     func userContentController(_ controller: WKUserContentController, didReceive message: WKScriptMessage) {
         guard message.name == Self.accountNameHandler, let name = message.body as? String else { return }
         let trimmed = name.trimmingCharacters(in: .whitespacesAndNewlines)
-        if !trimmed.isEmpty, trimmed.count <= 254 { typedAccountName = trimmed }
+        if !trimmed.isEmpty, trimmed.count <= 254, trimmed != filledAccountName { typedAccountName = trimmed }
     }
 
-    func run(_ url: URL, title: String, session: WebSessionID,
+    /// `accountName`: the email or phone of the account being signed in to.
+    /// It's filled into the form's first step, which is submitted once; the
+    /// page shows once it's at the password.
+    func run(_ url: URL, title: String, session: WebSessionID, accountName: String? = nil,
              preparedWebView: WKWebView? = nil, notice: String? = nil) async -> LoginToken? {
         await withCheckedContinuation { continuation in
             self.continuation = continuation
             let catcher = TokenCatcher()
             self.catcher = catcher
             catcher.onToken = { [weak self] token in self?.finish(token) }
+            catcher.onFailure = { [weak self] in self?.reveal() }
+            catcher.onHTTPError = { [weak self] _ in self?.reveal() }
 
             let webView = preparedWebView ?? WKWebView(frame: .zero, configuration: WebSession.makeConfiguration(session))
             webView.navigationDelegate = catcher
             webView.underPageBackgroundColor = WebSession.launcherBackdropColor
             typedAccountName = nil
+            filledAccountName = nil
             let controller = webView.configuration.userContentController
             controller.removeScriptMessageHandler(forName: Self.accountNameHandler)
             controller.add(WeakMessageHandler(self), name: Self.accountNameHandler)
             controller.addUserScript(WKUserScript(source: Self.accountNameScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
-            if preparedWebView != nil { webView.evaluateJavaScript(Self.accountNameScript) } // the page it's already on
+            controller.addUserScript(WKUserScript(source: Self.hidePasskeyScript, injectionTime: .atDocumentEnd, forMainFrameOnly: true))
+            if preparedWebView != nil { // the page it's already on
+                webView.evaluateJavaScript(Self.accountNameScript)
+                webView.evaluateJavaScript(Self.hidePasskeyScript)
+            }
             self.webView = webView
             // It may have reached the token during the delegate hand-off.
             if let callback = webView.url, let token = BattleNetLogin.token(fromCallback: callback) {
@@ -282,6 +317,40 @@ final class LoginWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler {
                 webView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
                 webView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
             ])
+            if let accountName, preparedWebView == nil, let host = url.host {
+                // Transparent, not hidden: WebKit throttles pages it thinks are
+                // hidden. The page's own dark backdrop shows meanwhile.
+                webView.alphaValue = 0
+                let backdrop = NSView()
+                backdrop.wantsLayer = true
+                backdrop.layer?.backgroundColor = WebSession.launcherBackdropColor.cgColor
+                // Above the page: AppKit's hit-testing ignores alpha, so it
+                // would take clicks while invisible.
+                let overlay = NSView()
+                let spinner = NSProgressIndicator()
+                spinner.style = .spinning
+                spinner.appearance = NSAppearance(named: .darkAqua)
+                for view in [backdrop, overlay, spinner] { view.translatesAutoresizingMaskIntoConstraints = false }
+                container.addSubview(backdrop, positioned: .below, relativeTo: webView)
+                container.addSubview(overlay, positioned: .above, relativeTo: webView)
+                overlay.addSubview(spinner)
+                for view in [backdrop, overlay] {
+                    NSLayoutConstraint.activate([
+                        view.topAnchor.constraint(equalTo: webView.topAnchor),
+                        view.bottomAnchor.constraint(equalTo: webView.bottomAnchor),
+                        view.leadingAnchor.constraint(equalTo: webView.leadingAnchor),
+                        view.trailingAnchor.constraint(equalTo: webView.trailingAnchor),
+                    ])
+                }
+                NSLayoutConstraint.activate([
+                    spinner.centerXAnchor.constraint(equalTo: overlay.centerXAnchor),
+                    spinner.centerYAnchor.constraint(equalTo: overlay.centerYAnchor),
+                ])
+                spinner.startAnimation(nil)
+                loadingOverlay = overlay
+                filledAccountName = accountName
+                Task { await signIn(as: accountName, expectedHost: host, in: webView) }
+            }
             window.contentView = container
             window.isReleasedWhenClosed = false
             window.delegate = self
@@ -292,11 +361,61 @@ final class LoginWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler {
         }
     }
 
+    /// Fills the known email or phone into the first step and submits it,
+    /// then shows the page at the password step, or as soon as it wants
+    /// something else (an error, a CAPTCHA, another page); at the latest
+    /// after 8 s. Uses the saved login's form logic (`LoginForm`): it checks
+    /// the page is Blizzard's login form and gets the value as an argument,
+    /// never as script source.
+    private func signIn(as accountName: String, expectedHost: String, in view: WKWebView) async {
+        defer { reveal(view) }
+        let deadline = ContinuousClock.now + .seconds(8)
+        var submitted = false
+        // Once shown (a failed load, an HTTP error), the page is the user's.
+        var waiting: Bool { webView === view && loadingOverlay != nil }
+        while ContinuousClock.now < deadline, waiting, continuation != nil {
+            try? await Task.sleep(for: .milliseconds(200))
+            guard !view.isLoading, let pageURL = view.url else { continue }
+            guard LoginForm.isTrusted(pageURL, expectedHost: expectedHost) else { return }
+            var arguments: [String: Any] = ["expectedHost": expectedHost, "username": accountName, "password": "",
+                                            "allowUsername": !submitted, "allowPassword": true, "submit": false]
+            let step = try? await view.callAsyncJavaScript(LoginForm.script, arguments: arguments, contentWorld: .defaultClient)
+            guard waiting else { return }
+            switch step as? String {
+            case "username":
+                submitted = true
+                arguments["allowPassword"] = false
+                arguments["submit"] = true
+                // nil: the submission already took the page elsewhere.
+                let submission = try? await view.callAsyncJavaScript(LoginForm.script, arguments: arguments,
+                                                                     contentWorld: .defaultClient) as? String
+                guard submission == "username" || submission == nil else { return }
+                Log.info(.auth, "account_name_filled")
+            case "waiting", nil:
+                continue // still loading, or the page swapping steps
+            default:
+                return // the password step, or something only the user can answer
+            }
+        }
+    }
+
+    /// `view`: only if it's still this window's page, not a later sign-in's.
+    private func reveal(_ view: WKWebView? = nil) {
+        guard let overlay = loadingOverlay, view == nil || view === webView else { return }
+        loadingOverlay = nil
+        overlay.removeFromSuperview()
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0.15
+            webView?.animator().alphaValue = 1
+        }
+    }
+
     private func finish(_ token: LoginToken?) {
         guard let continuation else { return }
         self.continuation = nil
         webView?.configuration.userContentController.removeScriptMessageHandler(forName: Self.accountNameHandler)
         webView = nil
+        loadingOverlay = nil
         window?.delegate = nil
         window?.close()
         window = nil

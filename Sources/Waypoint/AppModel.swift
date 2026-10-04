@@ -318,11 +318,13 @@ final class AppModel {
     /// its next launch.
     func signInAgain() async {
         guard let account = activeAccount else { return }
-        await signIn(title: "Sign In to \(account.displayName) Again", reason: "sign_in_again", replacing: account.id)
+        await signIn(title: "Sign In to \(account.displayName) Again", reason: "sign_in_again", replacing: account.id,
+                     accountName: account.email)
     }
 
-    /// `replacing`: the account whose saved tokens a sign-in to it replaces.
-    private func signIn(title: String, reason: String, replacing: String? = nil) async {
+    /// `replacing`: the account whose saved tokens a sign-in to it replaces;
+    /// `accountName`: its email or phone, filled in for the user.
+    private func signIn(title: String, reason: String, replacing: String? = nil, accountName: String? = nil) async {
         guard !isSigningIn else { return }
         isAddingAccount = true
         defer { isAddingAccount = false }
@@ -330,7 +332,7 @@ final class AppModel {
         let session = WebSessionID.fresh()
         Log.notice(.auth, "login_window_shown", nil, ["codename": target.codename, "region": target.region.rawValue, "reason": reason])
         guard let token = await loginWindow.run(BattleNetLogin.url(codename: target.codename, region: target.region),
-                                                title: title, session: session)
+                                                title: title, session: session, accountName: accountName)
         else {
             Log.notice(.auth, "sign_in_cancelled", nil, ["reason": reason])
             await WebSession.delete(session)
@@ -547,7 +549,7 @@ final class AppModel {
         }
         let session = WebSessionID.fresh()
         Log.notice(.auth, "login_window_shown", nil, ["codename": plan.codename, "region": plan.region.rawValue, "forced": forceSignIn])
-        guard let token = await loginWindow.run(url, title: title, session: session,
+        guard let token = await loginWindow.run(url, title: title, session: session, accountName: account?.email,
                                                notice: notices.isEmpty ? nil : notices.joined(separator: "\n\n")) else {
             await WebSession.delete(session)
             return nil
