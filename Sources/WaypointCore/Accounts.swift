@@ -13,6 +13,11 @@ public enum WebSessionID: Codable, Hashable, Sendable {
     public static func fresh() -> Self { .own(UUID()) }
 }
 
+/// A color that tells accounts apart at a glance, in the toolbar and menus.
+public enum AccountTint: String, Codable, CaseIterable, Sendable {
+    case blue, orange, green, pink, purple, teal, yellow, red, indigo, brown
+}
+
 /// A Battle.net account Waypoint has signed in to.
 public struct Account: Codable, Equatable, Sendable, Identifiable {
     /// The Battle.net account id: the numeric suffix of its login tokens.
@@ -20,12 +25,14 @@ public struct Account: Codable, Equatable, Sendable, Identifiable {
     public var battleTag: String?
     public var email: String?
     public var session: WebSessionID
+    public var tint: AccountTint
 
-    public init(id: String, battleTag: String? = nil, email: String? = nil, session: WebSessionID) {
+    public init(id: String, battleTag: String? = nil, email: String? = nil, session: WebSessionID, tint: AccountTint = .blue) {
         self.id = id
         self.battleTag = battleTag
         self.email = email
         self.session = session
+        self.tint = tint
     }
 
     /// The BattleTag once Blizzard's account page has told us; until then
@@ -61,12 +68,20 @@ public struct AccountList: Codable, Equatable, Sendable {
         }
         activeID = id
         guard let i = accounts.firstIndex(where: { $0.id == id }) else {
-            accounts.append(Account(id: id, session: session))
+            accounts.append(Account(id: id, session: session, tint: unusedTint))
             return nil
         }
         let old = accounts[i].session
         accounts[i].session = session
         return old == session ? nil : old
+    }
+
+    /// The first tint no saved account has, so each one looks different
+    /// while there are enough colors.
+    private var unusedTint: AccountTint {
+        let used = Set(accounts.map(\.tint))
+        return AccountTint.allCases.first { !used.contains($0) }
+            ?? AccountTint.allCases[accounts.count % AccountTint.allCases.count]
     }
 
     /// Fills in what Blizzard's account page says about a saved account.

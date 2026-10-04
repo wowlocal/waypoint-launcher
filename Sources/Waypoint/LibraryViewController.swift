@@ -145,6 +145,7 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
         subtitle = model.activeAccount?.displayName ?? "Not signed in"
         view.window?.subtitle = subtitle
         accountItem?.toolTip = model.activeAccount.map { "Signed in as \($0.displayName)" } ?? "Sign in to Battle.net"
+        accountItem?.image = .account(model.activeAccount)
 
         let ready = appUpdater.readyVersion != nil
         updateBar.isHidden = appUpdater.status == nil && !ready
@@ -196,7 +197,7 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
                  willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
         if identifier == .account {
             let item = NSMenuToolbarItem(itemIdentifier: identifier)
-            item.image = .symbol("person.crop.circle")
+            item.image = .account(model.activeAccount)
             item.label = "Account"
             item.toolTip = model.activeAccount.map { "Signed in as \($0.displayName)" } ?? "Sign in to Battle.net"
             item.showsIndicator = false

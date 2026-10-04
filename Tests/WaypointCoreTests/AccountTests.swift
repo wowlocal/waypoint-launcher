@@ -50,6 +50,19 @@ import Testing
     #expect(list.active == nil && list.accounts.isEmpty)
 }
 
+@Test func accountsGetDistinctTints() {
+    var list = AccountList()
+    for id in 1...AccountTint.allCases.count { list.signedIn("\(id)", session: .fresh()) }
+    #expect(list.accounts.map(\.tint) == AccountTint.allCases)
+    // A freed tint goes to the next new account.
+    let freed = list.remove("3")?.tint
+    list.signedIn("new", session: .fresh())
+    #expect(list["new"]?.tint == freed)
+    // Signing in again keeps the tint.
+    list.signedIn("1", session: .fresh())
+    #expect(list["1"]?.tint == .blue)
+}
+
 @Test func accountNamesFallBackToEmailThenID() {
     var list = AccountList()
     list.signedIn("42", session: .shared)
