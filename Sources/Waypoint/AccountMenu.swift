@@ -20,6 +20,15 @@ enum AccountMenu {
             Task { await model.addAccount() }
         })
         if let active = model.activeAccount {
+            items.append(ActionItem(model.hasSavedLogin ? "Update Saved Login…" : "Save Login in Keychain…", enabled: enabled) {
+                model.editSavedLogin()
+            })
+            if model.hasSavedLogin {
+                items.append(ActionItem("Forget Saved Login", enabled: enabled) { model.removeSavedLogin() })
+                let status = NSMenuItem(title: model.savedLoginStatus, action: nil, keyEquivalent: "")
+                status.isEnabled = false
+                items.append(status)
+            }
             items.append(ActionItem("Sign Out of \(active.displayName)", enabled: enabled) {
                 Task { await model.signOut() }
             })

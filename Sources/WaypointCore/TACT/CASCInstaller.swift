@@ -239,6 +239,7 @@ public struct CASCInstaller: Sendable {
         let started = Date()
         let fm = FileManager.default
         guard RunningProcesses.inside(root).isEmpty else { throw UpdateError.gameRunning }
+        try BattleNet.ensureNotRunning()
         let storageDir = dataRoot.appendingPathComponent("data", isDirectory: true)
 
         let total = plan.downloadSize
@@ -338,6 +339,9 @@ public struct CASCInstaller: Sendable {
                 next()
             }
         }
+        // Battle.net may have started during a long download: leave the index
+        // files alone then; the journal keeps what was downloaded for next time.
+        try BattleNet.ensureNotRunning()
         try writer.finish()
         Log.info(.install, "storage_written", nil, ["uid": install.uid, "files": writer.count, "update": writer.isUpdate])
     }

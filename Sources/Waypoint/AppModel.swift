@@ -44,6 +44,10 @@ final class AppModel {
     var activeAccount: Account? { accountList.active }
     /// The login window is open to add an account.
     private(set) var isAddingAccount = false
+    private(set) var isManagingSavedLogin = false
+    private var autoLoginStates = AutoLoginState.load() {
+        didSet { AutoLoginState.save(autoLoginStates) }
+    }
     private var profileFetches: Set<String> = []
 
     private let library = GameLibrary()
@@ -52,6 +56,7 @@ final class AppModel {
     /// Per bundle id, like the web sessions, so test builds never share
     /// keychain items with the installed app.
     private let tokenVault = TokenVault(service: "\(Bundle.main.bundleIdentifier ?? "Waypoint"): Battle.net login tokens")
+    private let credentialVault = CredentialVault(service: "\(Bundle.main.bundleIdentifier ?? "Waypoint"): Battle.net passwords")
     private var observers: [NSObjectProtocol] = []
 
     init() {
@@ -130,6 +135,7 @@ final class AppModel {
         Log.info(.gameUpdate, "requested", nil, ["uid": game.id, "verify": verify])
         phases[game.id] = .updating(nil)
         do {
+            try BattleNet.ensureNotRunning() // ask before downloading anything
             let updater = GameUpdate(install: game.install)
             let plan = try await updater.plan(target: updates[game.id]?.latest, verify: verify)
             // A CASC game's new build can need no new files and still have to
@@ -171,6 +177,7 @@ final class AppModel {
         Log.notice(.install, "requested", nil, ["uid": product.uid, "path": folder.path, "region": region.rawValue, "language": language])
         phases[product.uid] = .updating(nil)
         do {
+            try BattleNet.ensureNotRunning() // ask before downloading anything
             let installer = GameInstaller(product: product, folder: folder, region: region, language: language)
             let plan = try await installer.plan()
             try await installer.apply(plan) { [weak self] progress in
@@ -206,7 +213,7 @@ final class AppModel {
 
     /// Only one sign-in at a time: the login window and the hidden web view
     /// each serve a single request.
-    var isSigningIn: Bool { isAddingAccount || phases.values.contains(.signingIn) }
+    var isSigningIn: Bool { isAddingAccount || isManagingSavedLogin || phases.values.contains(.signingIn) }
 
     func canPlay(_ game: Game) -> Bool {
         game.isSupported && !running.contains(game.id) && !isBusy(game) && !isSigningIn
@@ -240,6 +247,47 @@ final class AppModel {
 
     // MARK: Accounts
 
+    var hasSavedLogin: Bool { activeAccount.map { autoLoginStates[$0.id] != nil } ?? false }
+
+    var savedLoginStatus: String {
+        guard let account = activeAccount else { return "Sign in to save a Battle.net login." }
+        guard let state = autoLoginStates[account.id] else { return "Automatic login is off. Save a login to enable it." }
+        if state.isPaused {
+            return "Automatic login is paused. Update the saved login to enable it again."
+        }
+        if let retry = state.retryAfter, retry > Date() {
+            return "Automatic login will be available after \(retry.formatted(date: .omitted, time: .shortened))."
+        }
+        return "Login saved in Keychain. Automatic login is on."
+    }
+
+    func editSavedLogin() {
+        guard !isSigningIn, let account = activeAccount else { return }
+        isManagingSavedLogin = true
+        defer { isManagingSavedLogin = false }
+        do {
+            let old = try credentialVault.credentials(account: account.id, allowInteraction: true)
+            guard let credentials = CredentialEditor.run(account: account, username: old?.username,
+                                                          replacing: hasSavedLogin) else { return }
+            try credentialVault.save(credentials, account: account.id)
+            autoLoginStates[account.id] = AutoLoginState()
+            Log.notice(.auth, "saved_login_updated")
+        } catch {
+            NSAlert(error: error).runModal()
+        }
+    }
+
+    func removeSavedLogin() {
+        guard !isSigningIn, let account = activeAccount else { return }
+        do {
+            try credentialVault.remove(account: account.id)
+            autoLoginStates.removeValue(forKey: account.id)
+            Log.notice(.auth, "saved_login_removed")
+        } catch {
+            NSAlert(error: error).runModal()
+        }
+    }
+
     /// Makes another saved account the one games launch with. Nothing is
     /// fetched: its own web session and tokens are already here.
     func switchAccount(to id: String) {
@@ -271,7 +319,14 @@ final class AppModel {
     /// Signs the active account out: its web session and saved tokens are
     /// deleted, and the next saved account, if any, becomes active.
     func signOut() async {
-        guard let account = activeAccount else { return }
+        guard !isSigningIn, let account = activeAccount else { return }
+        // If deletion fails, keep the account and report it rather than
+        // silently leaving a password behind after Sign Out.
+        do { try credentialVault.remove(account: account.id) } catch {
+            NSAlert(error: error).runModal()
+            return
+        }
+        autoLoginStates.removeValue(forKey: account.id)
         accountList.remove(account.id)
         tokenVault.removeAll(account: account.id)
         for codename in Set(InstallableProduct.all.map(\.codename)) {
@@ -298,10 +353,10 @@ final class AppModel {
         UserDefaults.standard.set(true, forKey: adoptedKey)
         guard await WebSession.hasCookies(.shared) else { return }
         let target = loginTarget()
-        let token = await SilentTokenFetcher().fetch(BattleNetLogin.url(codename: target.codename, region: target.region),
-                                                     session: .shared)
+        let result = await SilentTokenFetcher().fetch(BattleNetLogin.url(codename: target.codename, region: target.region),
+                                                      session: .shared)
         // Someone may have signed in meanwhile.
-        guard let token, accounts.isEmpty else { return }
+        guard case .token(let token) = result, accounts.isEmpty else { return }
         Log.info(.auth, "token", nil, ["source": "web_session", "codename": target.codename, "reason": "adopt"])
         await adopt(token, codename: target.codename, session: .shared)
     }
@@ -336,7 +391,10 @@ final class AppModel {
         defer { profileFetches.remove(id) }
         switch await ProfileFetcher().fetch(session: account.session) {
         case .signedIn(let profile):
-            if let other = profile.accountID, other != id { Log.warning(.auth, "profile_other_account") }
+            if let other = profile.accountID, other != id {
+                Log.warning(.auth, "profile_other_account")
+                return
+            }
             accountList.setProfile(id, battleTag: profile.battleTag, email: profile.email)
             Log.info(.auth, "profile", nil, ["battletag": profile.battleTag != nil, "email": profile.email != nil])
         case .signedOut:
@@ -346,26 +404,96 @@ final class AppModel {
         }
     }
 
-    /// Prefers a fresh token, like Battle.net: silently from the active
-    /// account's web session. Battle.net's session cookie doesn't always
-    /// survive a restart, so next we reuse the account's token from its last
-    /// launch (tokens last for months), kept in the keychain, or the one
-    /// Battle.net left in `net.battle`. Only if none of that works do we show
-    /// the login window, and whoever signs in there becomes the active account.
+    /// Refreshes cookies first, then (when opted in) signs in once with the
+    /// saved password. Network failures may still use the cached game token;
+    /// a rejected saved login goes to the interactive window instead.
     private func token(for plan: LaunchPlan, gameName: String, forceSignIn: Bool) async -> LoginToken? {
         // Only where the token came from is logged, never the token.
         let url = BattleNetLogin.url(codename: plan.codename, region: plan.region)
+        let account = activeAccount
+        var sessionExpired = false
         if !forceSignIn {
-            let account = activeAccount
             // With no accounts yet, try the session from before there were any.
             let session = account?.session ?? .shared
             let started = Date()
-            if await WebSession.hasCookies(session), let token = await silentFetcher.fetch(url, session: session) {
-                Log.info(.auth, "token", nil, ["source": "web_session", "codename": plan.codename,
-                                               "duration_ms": Int(Date().timeIntervalSince(started) * 1000)])
+            if await WebSession.hasCookies(session) {
+                switch await silentFetcher.fetch(url, session: session) {
+                case .token(let token):
+                    if account == nil || token.accountID == account?.id {
+                        Log.info(.auth, "token", nil, ["source": "web_session", "codename": plan.codename,
+                                                       "duration_ms": Int(Date().timeIntervalSince(started) * 1000)])
+                        await adopt(token, codename: plan.codename, session: session)
+                        return token
+                    }
+                    sessionExpired = true
+                    Log.warning(.auth, "web_session_other_account")
+                case .signedOut: sessionExpired = true
+                case .failed: break // Offline is not evidence of an expired password.
+                }
+            } else {
+                sessionExpired = true
+            }
+        }
+
+        if let account, forceSignIn || sessionExpired, var state = autoLoginStates[account.id], state.begin() {
+            autoLoginStates[account.id] = state // Persist before reading/submitting the password.
+            let session = forceSignIn ? WebSessionID.fresh() : account.session
+            let result: CredentialTokenFetcher.Result
+            do {
+                if let credentials = try credentialVault.credentials(account: account.id) {
+                    Log.info(.auth, "automatic_login_started")
+                    result = await CredentialTokenFetcher().fetch(url, session: session, credentials: credentials)
+                } else {
+                    state.requiresSignIn()
+                    result = .failed
+                }
+            } catch {
+                // A locked/unavailable Keychain counts as a temporary failure.
+                result = .failed
+            }
+            switch result {
+            case .token(let token):
+                guard token.accountID == account.id else {
+                    state.requiresSignIn()
+                    autoLoginStates[account.id] = state
+                    if session != account.session { await WebSession.delete(session) }
+                    showWrongSavedAccount()
+                    return nil
+                }
+                state.succeeded()
+                autoLoginStates[account.id] = state
+                Log.info(.auth, "token", nil, ["source": "saved_login", "codename": plan.codename])
                 await adopt(token, codename: plan.codename, session: session)
                 return token
+            case .interaction(let view):
+                state.requiresSignIn()
+                autoLoginStates[account.id] = state
+                Log.notice(.auth, "automatic_login_paused")
+                let notice = "Automatic login is paused. Complete sign-in below. If your password changed, use Update Saved Login in the account menu or Settings."
+                guard let token = await loginWindow.run(url, title: "Sign in to play \(gameName)", session: session,
+                                                       preparedWebView: view, notice: notice) else {
+                    if session != account.session { await WebSession.delete(session) }
+                    return nil
+                }
+                guard token.accountID == account.id else {
+                    if session != account.session { await WebSession.delete(session) }
+                    showWrongSavedAccount()
+                    return nil
+                }
+                // Manual sign-in may have used another password: only an
+                // explicit Update Saved Login re-enables these credentials.
+                await adopt(token, codename: plan.codename, session: session)
+                return token
+            case .failed:
+                state.failedTemporarily()
+                autoLoginStates[account.id] = state
+                if session != account.session { await WebSession.delete(session) }
+                Log.notice(.auth, "automatic_login_failed", nil, ["attempts": state.attempts, "paused": state.isPaused])
             }
+        }
+
+        let savedLoginNeedsAttention = account.flatMap { autoLoginStates[$0.id] }?.isPaused == true
+        if !forceSignIn, !(sessionExpired && savedLoginNeedsAttention) {
             let stored = (try? LaunchOptions(gameKey: plan.codename).storedToken()).flatMap { LoginToken($0) }
             if let account {
                 if let token = tokenVault.token(account: account.id, codename: plan.codename) {
@@ -384,13 +512,22 @@ final class AppModel {
         }
         let session = WebSessionID.fresh()
         Log.notice(.auth, "login_window_shown", nil, ["codename": plan.codename, "region": plan.region.rawValue, "forced": forceSignIn])
-        guard let token = await loginWindow.run(url, title: "Sign in to play \(gameName)", session: session) else {
+        let notice = savedLoginNeedsAttention ? "Automatic login is paused. Sign in here, then use Update Saved Login in the account menu or Settings to replace the saved password." : nil
+        guard let token = await loginWindow.run(url, title: "Sign in to play \(gameName)", session: session, notice: notice) else {
             await WebSession.delete(session)
             return nil
         }
         Log.info(.auth, "token", nil, ["source": "login_window", "codename": plan.codename])
         await adopt(token, codename: plan.codename, session: session)
         return token
+    }
+
+    private func showWrongSavedAccount() {
+        Log.warning(.auth, "saved_login_other_account")
+        let alert = NSAlert()
+        alert.messageText = "The saved login belongs to a different account"
+        alert.informativeText = "Automatic login is paused. Use Update Saved Login in the account menu or Settings to enter this account’s login and password."
+        alert.runModal()
     }
 
     private func refreshRunning() {

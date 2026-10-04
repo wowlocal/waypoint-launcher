@@ -8,6 +8,8 @@ import WebKit
 final class TokenCatcher: NSObject, WKNavigationDelegate {
     var onToken: ((LoginToken) -> Void)?
     var onPageLoaded: (() -> Void)?
+    var onFailure: (() -> Void)?
+    var onHTTPError: ((Int) -> Void)?
     private var done = false
 
     private func check(_ url: URL?) -> Bool {
@@ -33,7 +35,21 @@ final class TokenCatcher: NSObject, WKNavigationDelegate {
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         // A redirect to localhost:0 can fail before we see it as a navigation
         // action; the failing URL still carries the token.
-        _ = check((error as NSError).userInfo[NSURLErrorFailingURLErrorKey] as? URL)
+        if !check((error as NSError).userInfo[NSURLErrorFailingURLErrorKey] as? URL), !done,
+           (error as NSError).code != NSURLErrorCancelled { onFailure?() }
+    }
+
+    func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
+        if !done, (error as NSError).code != NSURLErrorCancelled { onFailure?() }
+    }
+
+    func webView(_ webView: WKWebView, decidePolicyFor navigationResponse: WKNavigationResponse,
+                 decisionHandler: @escaping @MainActor (WKNavigationResponsePolicy) -> Void) {
+        decisionHandler(.allow)
+        if navigationResponse.isForMainFrame,
+           let response = navigationResponse.response as? HTTPURLResponse, response.statusCode >= 400 {
+            onHTTPError?(response.statusCode)
+        }
     }
 }
 
@@ -102,30 +118,38 @@ enum WebSession {
 /// Tries to get a token without showing anything, using the saved session.
 @MainActor
 final class SilentTokenFetcher {
+    enum Result {
+        case token(LoginToken)
+        case signedOut
+        case failed
+    }
     private var webView: WKWebView?
     /// Fresh per attempt; the web view only holds its delegate weakly.
     private var catcher: TokenCatcher?
 
-    func fetch(_ url: URL, session: WebSessionID, timeout: Duration = .seconds(12)) async -> LoginToken? {
-        await withCheckedContinuation { (continuation: CheckedContinuation<LoginToken?, Never>) in
+    func fetch(_ url: URL, session: WebSessionID, timeout: Duration = .seconds(12)) async -> Result {
+        await withCheckedContinuation { (continuation: CheckedContinuation<Result, Never>) in
             var resumed = false
-            let finish: (LoginToken?) -> Void = { [weak self] token in
+            let finish: (Result) -> Void = { [weak self] result in
                 guard !resumed else { return }
                 resumed = true
                 self?.webView?.stopLoading()
                 self?.webView = nil
                 self?.catcher = nil
-                continuation.resume(returning: token)
+                continuation.resume(returning: result)
             }
             let catcher = TokenCatcher()
             self.catcher = catcher
-            catcher.onToken = finish
+            catcher.onToken = { finish(.token($0)) }
+            catcher.onFailure = { finish(.failed) }
+            catcher.onHTTPError = { _ in finish(.failed) }
             // With a saved session the page redirects to the token right away.
             // If it settles on the login form instead, give up quickly.
-            catcher.onPageLoaded = {
+            catcher.onPageLoaded = { [weak self] in
                 Task { @MainActor in
                     try? await Task.sleep(for: .seconds(2))
-                    finish(nil)
+                    guard !resumed, let view = self?.webView, !view.isLoading else { return }
+                    finish(LoginForm.isTrusted(view.url, expectedHost: url.host!) ? .signedOut : .failed)
                 }
             }
             let view = WKWebView(frame: NSRect(x: 0, y: 0, width: 800, height: 700),
@@ -136,7 +160,7 @@ final class SilentTokenFetcher {
             Task { @MainActor in
                 try? await Task.sleep(for: timeout)
                 if !resumed { Log.info(.auth, "web_session_timeout", nil, ["seconds": Int(timeout.components.seconds)]) }
-                finish(nil)
+                finish(.failed)
             }
         }
     }
@@ -149,21 +173,50 @@ final class LoginWindow: NSObject, NSWindowDelegate {
     private var continuation: CheckedContinuation<LoginToken?, Never>?
     private var catcher: TokenCatcher?
 
-    func run(_ url: URL, title: String, session: WebSessionID) async -> LoginToken? {
+    func run(_ url: URL, title: String, session: WebSessionID,
+             preparedWebView: WKWebView? = nil, notice: String? = nil) async -> LoginToken? {
         await withCheckedContinuation { continuation in
             self.continuation = continuation
             let catcher = TokenCatcher()
             self.catcher = catcher
             catcher.onToken = { [weak self] token in self?.finish(token) }
 
-            let webView = WKWebView(frame: .zero, configuration: WebSession.makeConfiguration(session))
+            let webView = preparedWebView ?? WKWebView(frame: .zero, configuration: WebSession.makeConfiguration(session))
             webView.navigationDelegate = catcher
-            webView.load(URLRequest(url: url))
+            // It may have reached the token during the delegate hand-off.
+            if let callback = webView.url, let token = BattleNetLogin.token(fromCallback: callback) {
+                self.continuation = nil
+                self.catcher = nil
+                continuation.resume(returning: token)
+                return
+            }
+            if preparedWebView == nil { webView.load(URLRequest(url: url)) }
 
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 640),
                                   styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
             window.title = title
-            window.contentView = webView
+            if let notice {
+                let label = NSTextField(wrappingLabelWithString: notice)
+                label.textColor = .secondaryLabelColor
+                label.font = .preferredFont(forTextStyle: .subheadline)
+                let container = NSView()
+                for view in [label, webView] {
+                    view.translatesAutoresizingMaskIntoConstraints = false
+                    container.addSubview(view)
+                }
+                NSLayoutConstraint.activate([
+                    label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+                    label.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
+                    label.topAnchor.constraint(equalTo: container.topAnchor, constant: 12),
+                    webView.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 12),
+                    webView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+                    webView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+                    webView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+                ])
+                window.contentView = container
+            } else {
+                window.contentView = webView
+            }
             window.isReleasedWhenClosed = false
             window.delegate = self
             window.center()

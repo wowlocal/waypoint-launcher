@@ -45,6 +45,8 @@ public struct UpdateProgress: Sendable {
 
 public enum UpdateError: Error, CustomStringConvertible {
     case gameRunning
+    /// Battle.net (or, with `agentOnly`, just its background Agent) is running.
+    case battleNetRunning(agentOnly: Bool)
     case unsupported(String)
     case notEnoughSpace(needed: UInt64, available: UInt64)
     case unsafePath(String)
@@ -52,6 +54,10 @@ public enum UpdateError: Error, CustomStringConvertible {
     public var description: String {
         switch self {
         case .gameRunning: "Quit the game before updating"
+        case .battleNetRunning(agentOnly: false):
+            "Quit Battle.net first, so the two don't write to the same game files at the same time"
+        case .battleNetRunning(agentOnly: true):
+            "Battle.net's Agent is still running in the background. Try again once it has quit (Activity Monitor shows it as “Agent”)"
         case .unsupported(let name): "Updating \(name) is not supported yet"
         case .notEnoughSpace(let needed, let available):
             "Not enough disk space: need \(ByteCountFormatter.string(fromByteCount: Int64(needed), countStyle: .file)), have \(ByteCountFormatter.string(fromByteCount: Int64(available), countStyle: .file))"
@@ -183,6 +189,7 @@ public struct GameUpdater: Sendable {
             Log.warning(.gameUpdate, "apply_refused", "game is running", ["uid": install.uid])
             throw UpdateError.gameRunning
         }
+        try BattleNet.ensureNotRunning()
         let fm = FileManager.default
         try fm.createDirectory(at: stagingDirectory, withIntermediateDirectories: true)
         Log.info(.gameUpdate, "apply_started", nil, ["uid": install.uid, "to": plan.target.name, "files": plan.files.count,
@@ -213,8 +220,10 @@ public struct GameUpdater: Sendable {
             }
         }
 
-        // Everything is verified; swap it in.
+        // Everything is verified; swap it in (unless Battle.net started meanwhile:
+        // the staged files stay, and the next try picks them up).
         guard RunningProcesses.inside(root).isEmpty else { throw UpdateError.gameRunning }
+        try BattleNet.ensureNotRunning()
         var remainingUses = Dictionary(plan.files.map { ($0.contentKey, 1) }, uniquingKeysWith: +)
         for file in plan.files {
             let staged = stagedURL(file.contentKey)
@@ -426,14 +435,18 @@ private final class ProgressCounter: @unchecked Sendable {
 public enum RunningProcesses {
     public static func inside(_ folder: URL) -> [pid_t] {
         let prefix = folder.standardizedFileURL.path + "/"
+        return executables().filter { $0.path.hasPrefix(prefix) }.map(\.pid)
+    }
+
+    /// Every process's executable path (those we're allowed to see).
+    public static func executables() -> [(pid: pid_t, path: String)] {
         let capacity = Int(proc_listallpids(nil, 0)) + 64
         var pids = [pid_t](repeating: 0, count: capacity)
         let count = Int(proc_listallpids(&pids, Int32(capacity * MemoryLayout<pid_t>.size)))
         var buffer = [CChar](repeating: 0, count: 4 * Int(MAXPATHLEN))
-        return pids.prefix(max(count, 0)).filter { pid in
-            guard pid > 0, proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { return false }
-            let path = String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
-            return path.hasPrefix(prefix)
+        return pids.prefix(max(count, 0)).compactMap { pid in
+            guard pid > 0, proc_pidpath(pid, &buffer, UInt32(buffer.count)) > 0 else { return nil }
+            return (pid, String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self))
         }
     }
 }

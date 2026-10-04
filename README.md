@@ -121,6 +121,9 @@ Right-click the button for more:
 - **Verify Files**: re-checks every file and repairs broken ones.
 - **Play Without Updating**: shown only when an update is waiting.
 
+> [!NOTE]
+> Waypoint doesn't install or update games while Battle.net or its background Agent is running, so the two never write to the same files at once. Quit Battle.net and try again; a download that was already under way picks up where it stopped.
+
 
 ## How it works
 

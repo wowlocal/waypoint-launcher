@@ -390,3 +390,17 @@ private func expectStoredIndexesOnly(_ dir: URL, version: UInt32) throws {
     let keys = try #require(try StoredKeys.load(dir))
     #expect(keys.count == 2)
 }
+
+// MARK: - Battle.net detection
+
+@Test func recognizesBattleNetProcesses() {
+    #expect(BattleNet.kind(ofExecutable: "/Applications/Battle.net.app/Contents/MacOS/Battle.net") == .app)
+    #expect(BattleNet.kind(ofExecutable: "/Users/me/Apps/Battle.net.app/Contents/Frameworks/Battle.net Helper.app/Contents/MacOS/Battle.net Helper") == .app)
+    #expect(BattleNet.kind(ofExecutable: "/Users/Shared/Battle.net/Agent/Agent.9824/Agent.app/Contents/MacOS/Agent") == .agent)
+    #expect(BattleNet.kind(ofExecutable: "/Users/Shared/Battle.net/Agent/Blizzard Error.app/Contents/MacOS/Blizzard Error") == nil)
+    #expect(BattleNet.kind(ofExecutable: "/Applications/Warcraft III/Warcraft III Launcher.app/Contents/MacOS/Warcraft III Launcher") == nil)
+    #expect(BattleNet.kind(ofExecutable: "/Applications/Waypoint.app/Contents/MacOS/Waypoint") == nil)
+    #expect(BattleNet.kind(ofExecutable: "/usr/libexec/UserEventAgent") == nil)
+    // Nothing of Battle.net's runs while the tests do (or this says so).
+    #expect(BattleNet.running().isEmpty || (try? BattleNet.ensureNotRunning()) == nil)
+}
