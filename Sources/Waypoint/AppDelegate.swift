@@ -89,6 +89,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         model.reload()
     }
 
+    @objc func addAccount(_ sender: Any?) {
+        Task { await model.addAccount() }
+    }
+
     @objc func signOut(_ sender: Any?) {
         Task { await model.signOut() }
     }
@@ -114,7 +118,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         NSWorkspace.shared.activateFileViewerSelecting([Diagnostics.shared.directory])
     }
 
-    /// The app menu: shows whichever update command applies as it opens.
+    /// The app menu: shows whichever update command applies as it opens,
+    /// and names the account Sign Out applies to.
     func menuNeedsUpdate(_ menu: NSMenu) {
         let ready = appUpdater.readyVersion
         for item in menu.items {
@@ -124,6 +129,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             case #selector(restartToUpdate(_:)):
                 item.isHidden = ready == nil
                 item.title = "Restart to Update Waypoint \(ready ?? "")"
+            case #selector(addAccount(_:)):
+                item.title = model.accounts.isEmpty ? "Sign In to Battle.net…" : "Add Battle.net Account…"
+            case #selector(signOut(_:)):
+                item.isHidden = model.activeAccount == nil
+                item.title = "Sign Out of \(model.activeAccount?.displayName ?? "Battle.net")"
             default:
                 break
             }
@@ -131,6 +141,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
-        item.action == #selector(checkForUpdates(_:)) ? appUpdater.canCheck : true
+        switch item.action {
+        case #selector(checkForUpdates(_:)): appUpdater.canCheck
+        case #selector(addAccount(_:)), #selector(signOut(_:)): !model.isSigningIn
+        default: true
+        }
     }
 }

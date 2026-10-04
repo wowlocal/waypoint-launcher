@@ -38,26 +38,64 @@ final class TokenCatcher: NSObject, WKNavigationDelegate {
 }
 
 enum WebSession {
-    /// Shared, persistent cookie jar (stored per bundle id), so the Battle.net
-    /// session survives restarts and later tokens can be fetched silently.
-    @MainActor static func makeConfiguration() -> WKWebViewConfiguration {
+    /// A persistent cookie jar per account (see `WebSessionID`), so each
+    /// Battle.net session survives restarts and later tokens can be fetched
+    /// silently.
+    @MainActor static func makeConfiguration(_ session: WebSessionID) -> WKWebViewConfiguration {
         let config = WKWebViewConfiguration()
-        config.websiteDataStore = .default()
+        config.websiteDataStore = store(session)
         // Look like Safari; WKWebView's default user agent has no browser
         // token, which login and captcha pages may treat as unsupported.
         config.applicationNameForUserAgent = "Version/26.0 Safari/605.1.15"
         return config
     }
 
-    @MainActor static func signOut() async {
-        let store = WKWebsiteDataStore.default()
+    @MainActor static func store(_ session: WebSessionID) -> WKWebsiteDataStore {
+        switch session {
+        case .shared: .default()
+        case .own(let id): WKWebsiteDataStore(forIdentifier: id)
+        }
+    }
+
+    /// Whether the session has any Battle.net cookies, without going online.
+    @MainActor static func hasCookies(_ session: WebSessionID) async -> Bool {
+        await store(session).httpCookieStore.allCookies().contains { isBlizzard($0.domain) }
+    }
+
+    /// Signs the session out for good: its own store is deleted, the shared
+    /// one loses its Blizzard data.
+    @MainActor static func delete(_ session: WebSessionID) async {
+        if case .own(let id) = session {
+            do {
+                try await WKWebsiteDataStore.remove(forIdentifier: id)
+                return
+            } catch {
+                // A web view still using the store keeps it alive; empty it instead.
+                Log.warning(.auth, "web_session_remove_failed", nil, ["error": error])
+            }
+        }
+        let store = store(session)
         let types = WKWebsiteDataStore.allWebsiteDataTypes()
         let records = await store.dataRecords(ofTypes: types)
-        let blizzard = records.filter {
-            $0.displayName.contains("battle.net") || $0.displayName.contains("blizzard.com")
-                || $0.displayName.contains("battlenet.com.cn")
+        await store.removeData(ofTypes: types, for: session == .shared ? records.filter { isBlizzard($0.displayName) } : records)
+    }
+
+    /// Deletes every account store except `kept`.
+    @MainActor static func deleteAll(except kept: Set<WebSessionID>) async {
+        // Listing stores before anything else has started WebKit crashes it
+        // (null main run loop, macOS 27); getting a store starts it.
+        _ = WKWebsiteDataStore.default()
+        for id in await WKWebsiteDataStore.allDataStoreIdentifiers where !kept.contains(.own(id)) {
+            do {
+                try await WKWebsiteDataStore.remove(forIdentifier: id)
+            } catch {
+                Log.warning(.auth, "web_session_remove_failed", nil, ["error": error])
+            }
         }
-        await store.removeData(ofTypes: types, for: blizzard)
+    }
+
+    private static func isBlizzard(_ domain: String) -> Bool {
+        domain.contains("battle.net") || domain.contains("blizzard.com") || domain.contains("battlenet.com.cn")
     }
 }
 
@@ -68,7 +106,7 @@ final class SilentTokenFetcher {
     /// Fresh per attempt; the web view only holds its delegate weakly.
     private var catcher: TokenCatcher?
 
-    func fetch(_ url: URL, timeout: Duration = .seconds(12)) async -> LoginToken? {
+    func fetch(_ url: URL, session: WebSessionID, timeout: Duration = .seconds(12)) async -> LoginToken? {
         await withCheckedContinuation { (continuation: CheckedContinuation<LoginToken?, Never>) in
             var resumed = false
             let finish: (LoginToken?) -> Void = { [weak self] token in
@@ -91,7 +129,7 @@ final class SilentTokenFetcher {
                 }
             }
             let view = WKWebView(frame: NSRect(x: 0, y: 0, width: 800, height: 700),
-                                 configuration: WebSession.makeConfiguration())
+                                 configuration: WebSession.makeConfiguration(session))
             view.navigationDelegate = catcher
             webView = view
             view.load(URLRequest(url: url))
@@ -111,14 +149,14 @@ final class LoginWindow: NSObject, NSWindowDelegate {
     private var continuation: CheckedContinuation<LoginToken?, Never>?
     private var catcher: TokenCatcher?
 
-    func run(_ url: URL, title: String) async -> LoginToken? {
+    func run(_ url: URL, title: String, session: WebSessionID) async -> LoginToken? {
         await withCheckedContinuation { continuation in
             self.continuation = continuation
             let catcher = TokenCatcher()
             self.catcher = catcher
             catcher.onToken = { [weak self] token in self?.finish(token) }
 
-            let webView = WKWebView(frame: .zero, configuration: WebSession.makeConfiguration())
+            let webView = WKWebView(frame: .zero, configuration: WebSession.makeConfiguration(session))
             webView.navigationDelegate = catcher
             webView.load(URLRequest(url: url))
 

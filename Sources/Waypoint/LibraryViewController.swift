@@ -2,8 +2,9 @@ import AppKit
 import WaypointCore
 
 /// The library window: installed games with Play and Update, games being
-/// installed, a + toolbar menu to install more, and Waypoint's own update
-/// status when it has something to say.
+/// installed, the Battle.net account games launch as (in the subtitle; a
+/// toolbar menu switches it), a + toolbar menu to install more, and
+/// Waypoint's own update status when it has something to say.
 @MainActor
 final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSToolbarDelegate {
     private enum Row {
@@ -34,6 +35,9 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
                                          action: #selector(AppDelegate.restartToUpdate(_:)))
     private let installMenu = NSMenu()
     private var installItem: NSMenuToolbarItem?
+    private let accountMenu = NSMenu()
+    private var accountItem: NSMenuToolbarItem?
+    private var subtitle = ""
 
     private(set) lazy var toolbar: NSToolbar = {
         let toolbar = NSToolbar(identifier: "Library")
@@ -116,6 +120,11 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
         observeChanges { [weak self] in self?.render() }
     }
 
+    override func viewWillAppear() {
+        super.viewWillAppear()
+        view.window?.subtitle = subtitle
+    }
+
     /// Reads everything the window shows from the model, so `observeChanges`
     /// calls this again whenever any of it changes.
     private func render() {
@@ -131,6 +140,11 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
 
         installMenu.items = installMenuItems.isEmpty ? [] : [.sectionHeader(title: "Install a Game")] + installMenuItems
         installItem?.isEnabled = !installMenuItems.isEmpty
+
+        accountMenu.items = AccountMenu.items(model: model)
+        subtitle = model.activeAccount?.displayName ?? "Not signed in"
+        view.window?.subtitle = subtitle
+        accountItem?.toolTip = model.activeAccount.map { "Signed in as \($0.displayName)" } ?? "Sign in to Battle.net"
 
         let ready = appUpdater.readyVersion != nil
         updateBar.isHidden = appUpdater.status == nil && !ready
@@ -180,6 +194,17 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
 
     func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier,
                  willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        if identifier == .account {
+            let item = NSMenuToolbarItem(itemIdentifier: identifier)
+            item.image = .symbol("person.crop.circle")
+            item.label = "Account"
+            item.toolTip = model.activeAccount.map { "Signed in as \($0.displayName)" } ?? "Sign in to Battle.net"
+            item.showsIndicator = false
+            accountMenu.autoenablesItems = false
+            item.menu = accountMenu
+            accountItem = item
+            return item
+        }
         guard identifier == .install else { return nil }
         let item = NSMenuToolbarItem(itemIdentifier: identifier)
         item.image = .symbol("plus")
@@ -194,11 +219,11 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.flexibleSpace, .install]
+        [.flexibleSpace, .account, .install]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.flexibleSpace, .install]
+        [.flexibleSpace, .account, .install]
     }
 
     // MARK: NSTableViewDataSource, NSTableViewDelegate
@@ -219,4 +244,5 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
 
 private extension NSToolbarItem.Identifier {
     static let install = Self("install")
+    static let account = Self("account")
 }

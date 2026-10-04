@@ -71,6 +71,8 @@ final class MenuBarItem: NSObject, NSMenuDelegate {
             }
         }
         menu.addItem(.separator())
+        menu.addItem(AccountMenu.submenuItem(model: model))
+        menu.addItem(.separator())
         if let version = appUpdater.readyVersion {
             menu.addItem(ActionItem("Restart to Update Waypoint \(version)") { [appUpdater] in
                 appUpdater.restartToUpdate()

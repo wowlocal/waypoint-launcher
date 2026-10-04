@@ -38,7 +38,8 @@ A launcher only has to do three things: install the game, keep it up to date, an
 ## Features
 
 - **Native.** Written in Swift, built only for arm64.
-- **One sign-in.** Uses the official Battle.net web login once. After that every launch is one click.
+- **One sign-in per account.** Uses the official Battle.net web login once. After that every launch is one click.
+- **Several accounts.** Each one keeps its own Battle.net session, so switching between them is one click, with no login.
 - **Installs games.** Click **+** in the toolbar and pick a game. Waypoint downloads it straight from Blizzard's servers and lays it out exactly the way Battle.net does, so the game takes it as its own. Interrupted installs pick up where they stopped. Every Blizzard game with a Mac version is on the list; [Supported games](#supported-games) shows what has been tested.
 - **Updates games itself**, including ones Battle.net installed. It checks Blizzard's servers, downloads only the files that changed, verifies every one of them, and puts them in place: loose files are swapped in, and new data goes into the game's CASC storage the way Battle.net adds it.
 - **Light.** About 27 MB of memory while it sits there. Installs and updates read Blizzard's manifests and indexes straight from disk instead of loading them, so even planning a 130 GB World of Warcraft install stays under 100 MB.
@@ -108,6 +109,8 @@ Updates are signed with an EdDSA key kept in the keychain under the account `way
 2. The first time, sign in to Battle.net in the window that appears. Two-factor auth works.
 3. That's it. Later launches skip the login.
 
+The window's subtitle shows the account games launch as. To switch, click the person button in the toolbar and pick another account. **Add Account…** signs in to one more, and **Sign Out** forgets the current one. The same menu is in the menu bar item.
+
 To install a game, click **+** in the toolbar and pick it. Choose where it goes (`/Applications` by default), the language and the region; the sheet shows the real download size. Progress shows in the game's row.
 
 When a new version is out, **Play** turns into **Update**, with a progress bar while it downloads.
@@ -159,6 +162,8 @@ sequenceDiagram
 
 **Token.** The Battle.net web login at `https://<region>.battle.net/login/en/?externalChallenge=login&app=<CODE>` finishes with a redirect to `http://localhost:0/?ST=<token>`. The token looks like `US-<32 hex>-<account id>`.
 
+**Accounts.** Each account has its own persistent WebKit data store (`WKWebsiteDataStore(forIdentifier:)`), so their Battle.net sessions sit side by side and switching needs no login. The last token per account and game is kept in the login keychain, for when a session has expired. The BattleTag and email come from the JSON API behind Blizzard's account page (`account.battle.net/api/details`), read with that account's session.
+
 **Launch commands**
 
 | Game | Command | Working directory |
@@ -209,6 +214,7 @@ WAYPOINT_NETWORK_TESTS=1 xcrun swift test --filter liveUpdate  # real update, 36
 
 - [x] Hearthstone
 - [x] Sign in once, launch with one click
+- [x] Several accounts, switched without signing in again
 - [x] Hearthstone updates without Battle.net
 - [x] Install games from scratch, for every Blizzard game with a Mac version
 - [x] Warcraft III installed and launched without Battle.net
