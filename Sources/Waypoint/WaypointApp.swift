@@ -4,10 +4,13 @@ import WaypointCore
 
 @main
 struct WaypointApp: App {
+    @NSApplicationDelegateAdaptor private var appDelegate: AppDelegate
+    @Environment(\.openWindow) private var openWindow
     @State private var model = AppModel()
     @State private var appUpdater = AppUpdater()
 
     var body: some Scene {
+        let _ = appDelegate.openWindow = openWindow
         Window("Waypoint", id: "main") {
             LibraryView()
                 .environment(model)
