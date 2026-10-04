@@ -112,6 +112,89 @@ private func key(_ byte: UInt8) -> Data { Data(repeating: byte, count: 16) }
     #expect(manifest.select(tagString: "OSX deDE").map(\.path) == ["mac/base", "mac/de"])
 }
 
+// MARK: - Tag selection
+
+/// Tag mask bits, MSB first, for entries `0..<count`.
+private func tagMask(_ entries: Set<Int>, count: Int) -> Data {
+    var bytes = [UInt8](repeating: 0, count: (count + 7) / 8)
+    for i in entries { bytes[i / 8] |= 0x80 >> UInt8(i % 8) }
+    return Data(bytes)
+}
+
+/// A small game tagged the way Blizzard's manifests are: shared files carry
+/// every locale and content tag, language files one of each.
+private let tagFixturePaths = ["base", "win/base", "us-only", "de/speech", "de/text", "en/speech", "en/text"]
+private let tagFixture: [(name: String, type: UInt16, entries: Set<Int>)] = [
+    ("OSX", 1, [0, 2, 3, 4, 5, 6]),
+    ("Windows", 1, [1]),
+    ("EU", 2, [0, 1, 3, 4, 5, 6]),
+    ("US", 2, [0, 1, 2, 3, 4, 5, 6]),
+    ("deDE", 3, [0, 1, 3, 4]),
+    ("enUS", 3, [0, 1, 2, 5, 6]),
+    ("speech", 4, [0, 1, 2, 3, 5]),
+    ("text", 4, [0, 1, 2, 4, 6]),
+]
+
+private func selectFixture(_ tagString: String) -> [String] {
+    let count = tagFixturePaths.count
+    let tags = tagFixture.map { InstallManifest.Tag(name: $0.name, type: $0.type, mask: tagMask($0.entries, count: count)) }
+    return InstallManifest.Tag.selectedIndices(tagString, in: tags, entryCount: count).map { tagFixturePaths[$0] }
+}
+
+@Test func tagSelectionSingleSet() {
+    #expect(selectFixture("OSX EU enUS speech") == ["base", "en/speech"])
+    #expect(selectFixture("Windows deDE") == ["win/base"])
+}
+
+@Test func tagSelectionIdenticalSetsMatchOneSet() {
+    #expect(selectFixture("OSX EU enUS:OSX EU enUS") == selectFixture("OSX EU enUS"))
+    // Same language for speech and text: what merging both sets gave before.
+    #expect(selectFixture("OSX EU? enUS speech?:OSX EU? enUS text?") == ["base", "en/speech", "en/text"])
+}
+
+@Test func tagSelectionMixedSpeechAndTextLanguages() {
+    // German speech, English text: no English speech, no German text.
+    #expect(selectFixture("OSX EU? deDE speech?:OSX EU? enUS text?") == ["base", "de/speech", "en/text"])
+    // Manifest order is kept whichever set comes first; shared files once.
+    #expect(selectFixture("OSX EU? enUS text?:OSX EU? deDE speech?") == ["base", "de/speech", "en/text"])
+}
+
+@Test func tagSelectionIgnoresOptionalTagsTheManifestLacks() {
+    // acct-CZE and geoip-NL aren't in the manifest; EU is, and filters.
+    let tagString = "OSX EU? acct-CZE? geoip-NL? enUS speech?:OSX EU? acct-CZE? geoip-NL? deDE text?"
+    #expect(selectFixture(tagString) == ["base", "de/text", "en/speech"])
+    // KR isn't in the manifest either, so region doesn't filter.
+    #expect(selectFixture("OSX KR? enUS speech") == ["base", "us-only", "en/speech"])
+}
+
+@Test func tagSelectionTypesWithoutNamedTagsDontFilter() {
+    // No region named: the US-only file stays in.
+    #expect(selectFixture("OSX enUS speech") == ["base", "us-only", "en/speech"])
+    // No content type named: speech and text both.
+    #expect(selectFixture("OSX EU deDE") == ["base", "de/speech", "de/text"])
+    #expect(selectFixture("") == tagFixturePaths)
+}
+
+@Test func tagSelectionThroughBothManifests() throws {
+    let count = tagFixturePaths.count
+    let tagString = "OSX EU? deDE speech?:OSX EU? enUS text?"
+    var tagData = Data()
+    for tag in tagFixture {
+        tagData += Data(tag.name.utf8) + Data([0]) + be(UInt64(tag.type), 2) + tagMask(tag.entries, count: count)
+    }
+
+    var install = Data("IN".utf8) + Data([1, 16]) + be(UInt64(tagFixture.count), 2) + be(UInt64(count), 4) + tagData
+    for (i, path) in tagFixturePaths.enumerated() {
+        install += Data(path.utf8) + Data([0]) + key(UInt8(i)) + be(UInt64(i), 4)
+    }
+    #expect(try InstallManifest(install).select(tagString: tagString).map(\.path) == ["base", "de/speech", "en/text"])
+
+    var download = Data("DL".utf8) + Data([1, 16, 0]) + be(UInt64(count), 4) + be(UInt64(tagFixture.count), 2)
+    for i in 0..<count { download += key(UInt8(i)) + be(UInt64(i), 5) + Data([0]) }
+    download += tagData
+    #expect(try DownloadManifest(download).select(tagString: tagString).map(\.size) == [0, 3, 6])
+}
+
 // MARK: - Encoding
 
 @Test func encodingTableFindsWantedKeys() throws {

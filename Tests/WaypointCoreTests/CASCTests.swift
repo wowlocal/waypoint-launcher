@@ -173,3 +173,63 @@ func matchesAgentWrittenStorage() throws {
     #expect(throws: TACTError.self) { try BLTE.verify(blob, encodedKey: Data(repeating: 0, count: 16)) }
     #expect(throws: TACTError.self) { try BLTE.verify(blob + Data([0]), encodedKey: key) }
 }
+
+/// A failed write (a full disk; here a file-size limit) used to raise an
+/// Objective-C exception in FileHandle.write(_:) and abort the app. It must
+/// throw, cut off the partial write, and let the caller retry. Runs in a
+/// child process because the limit applies to the whole process.
+@Test func writeFailureThrowsAndCanBeRetried() async {
+    await #expect(processExitsWith: .success) {
+        let fm = FileManager.default
+        let dir = fm.temporaryDirectory.appendingPathComponent("waypoint-casc-\(UUID().uuidString)")
+        defer { try? fm.removeItem(at: dir) }
+        let first = Data(repeating: 0xA1, count: 16), second = Data(repeating: 0xB2, count: 16)
+        let small = Data(repeating: 1, count: 1000), big = Data(repeating: 2, count: 200_000)
+        let writer = try CASCStorageWriter(directory: dir)
+        try writer.append(encodedKey: first, blob: small, fullKey: false)
+        let archive = dir.appendingPathComponent("data.000")
+        let sizeBefore = try fm.attributesOfItem(atPath: archive.path)[.size] as! Int
+
+        signal(SIGXFSZ, SIG_IGN) // make write(2) fail with EFBIG instead of killing us
+        var limit = rlimit()
+        getrlimit(RLIMIT_FSIZE, &limit)
+        let unlimited = limit
+        limit.rlim_cur = 100_000
+        setrlimit(RLIMIT_FSIZE, &limit)
+        var threw = false
+        do { try writer.append(encodedKey: second, blob: big, fullKey: false) } catch { threw = true }
+        limit = unlimited
+        setrlimit(RLIMIT_FSIZE, &limit)
+        guard threw, !writer.contains(second) else { exit(1) }
+        guard try fm.attributesOfItem(atPath: archive.path)[.size] as! Int == sizeBefore else { exit(2) }
+
+        try writer.append(encodedKey: second, blob: big, fullKey: false)
+        try writer.finish()
+        let data = try Data(contentsOf: archive)
+        guard data.count == sizeBefore + 30 + big.count, data.suffix(big.count) == big else { exit(3) }
+    }
+}
+
+/// Opening a writer on a finished storage used to start over silently:
+/// the first blob overwrote data.000, and finish() deleted the other archives
+/// (or, with nothing appended, every archive).
+@Test func finishedStorageIsNeverOverwritten() throws {
+    let fm = FileManager.default
+    let dir = fm.temporaryDirectory.appendingPathComponent("waypoint-casc-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: dir) }
+    let key = Data(repeating: 0x5A, count: 16)
+    let writer = try CASCStorageWriter(directory: dir)
+    // Too big for any archive: would overflow the 30-bit offsets.
+    #expect(throws: TACTError.self) { try writer.append(encodedKey: key, blob: Data(count: 1 << 30), fullKey: false) }
+    try writer.append(encodedKey: key, blob: Data(repeating: 7, count: 500), fullKey: false)
+    try writer.finish()
+    #expect(throws: TACTError.self) { try writer.append(encodedKey: Data(repeating: 1, count: 16), blob: Data([1]), fullKey: false) }
+    #expect(throws: TACTError.self) { try writer.finish() }
+
+    let archive = dir.appendingPathComponent("data.000")
+    let before = try Data(contentsOf: archive)
+    #expect(throws: TACTError.self) { _ = try CASCStorageWriter(directory: dir) }
+    #expect(try Data(contentsOf: archive) == before)
+    #expect(try fm.contentsOfDirectory(atPath: dir.path).filter { $0.hasSuffix(".idx") }.count == 16)
+    #expect(!fm.fileExists(atPath: dir.appendingPathComponent(".waypoint-journal").path))
+}

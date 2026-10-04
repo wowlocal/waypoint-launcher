@@ -224,18 +224,42 @@ public struct InstallManifest: Sendable {
     }
 
     /// Entries Battle.net would install for a tag string like
-    /// `OSX base … EU? enUS speech?:OSX base … enUS text?`.
-    ///
-    /// Tags are grouped by type (platform, region, locale, content…). An entry
-    /// is selected when, for every type the string mentions, it carries at
-    /// least one of the mentioned tags. Types not mentioned don't filter.
-    /// Unknown words (`speech?`, `acct-CZE?`) are ignored.
+    /// `OSX EU? enUS speech?:OSX EU? deDE text?`. See
+    /// `Tag.selectedIndices(_:in:entryCount:)` for the rule.
     public func select(tagString: String) -> [Entry] {
-        let words = Set(tagString.split(whereSeparator: { $0 == " " || $0 == ":" }).map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "?")) })
-        let byType = Dictionary(grouping: tags.filter { words.contains($0.name) }, by: \.type)
-        return entries.indices.filter { index in
-            byType.values.allSatisfy { group in group.contains { $0.contains(index) } }
-        }.map { entries[$0] }
+        Tag.selectedIndices(tagString, in: tags, entryCount: entries.count).map { entries[$0] }
+    }
+}
+
+extension InstallManifest.Tag {
+    /// Indices, in manifest order, of the entries a Battle.net tag string
+    /// selects. Shared by the install and download manifests.
+    ///
+    /// The string holds `:`-separated tag sets, e.g.
+    /// `OSX EU? enUS speech?:OSX EU? deDE text?`: the first set picks the
+    /// speech-language files, the second the text-language files. An entry is
+    /// selected when any set selects it.
+    ///
+    /// Within a set, the manifest's tags named in it are grouped by type
+    /// (platform, region, locale, content…). The set selects an entry when,
+    /// for every such type, the entry carries at least one of its named tags.
+    /// Types the set names no tag of don't filter. Words the manifest has no
+    /// tag for are ignored; a trailing `?` marks a tag as optional, which
+    /// amounts to the same thing.
+    static func selectedIndices(_ tagString: String, in tags: [Self], entryCount: Int) -> [Int] {
+        var sets = tagString.split(separator: ":")
+        if sets.isEmpty { sets = [""] } // no tags at all: everything
+        let setGroups: [[[Self]]] = sets.map { set in
+            let names = Set(set.split(whereSeparator: \.isWhitespace).map { word in
+                String(word.hasSuffix("?") ? word.dropLast() : word)
+            })
+            return Array(Dictionary(grouping: tags.filter { names.contains($0.name) }, by: \.type).values)
+        }
+        return (0..<entryCount).filter { index in
+            setGroups.contains { groups in
+                groups.allSatisfy { group in group.contains { $0.contains(index) } }
+            }
+        }
     }
 }
 
@@ -292,11 +316,7 @@ public struct DownloadManifest: Sendable {
 
     /// Same selection rule as `InstallManifest.select(tagString:)`.
     public func select(tagString: String) -> [Entry] {
-        let words = Set(tagString.split(whereSeparator: { $0 == " " || $0 == ":" }).map { $0.trimmingCharacters(in: CharacterSet(charactersIn: "?")) })
-        let byType = Dictionary(grouping: tags.filter { words.contains($0.name) }, by: \.type)
-        return entries.indices.filter { index in
-            byType.values.allSatisfy { group in group.contains { $0.contains(index) } }
-        }.map { entries[$0] }
+        InstallManifest.Tag.selectedIndices(tagString, in: tags, entryCount: entries.count).map { entries[$0] }
     }
 }
 

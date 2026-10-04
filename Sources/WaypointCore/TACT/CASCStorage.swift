@@ -182,12 +182,16 @@ public final class CASCStorageWriter {
     private let baseKey: Data
     private let journal: FileHandle
     private var unsyncedBytes = 0
+    private var finished = false
 
     static let journalName = ".waypoint-journal"
     static let journalRecordSize = 16 + 2 + 8 + 4 + 1
 
     public var count: Int { stored.count }
 
+    /// Starts a new storage, or resumes an interrupted one. Throws rather
+    /// than touch a finished storage (no journal, but archives or indexes):
+    /// starting over would overwrite `data.000` and delete the rest.
     public init(directory: URL) throws {
         self.directory = directory
         let fm = FileManager.default
@@ -199,8 +203,14 @@ public final class CASCStorageWriter {
         if existing.count >= 16 {
             baseKey = existing.prefix(16)
         } else {
+            let files = (try? fm.contentsOfDirectory(atPath: directory.path)) ?? []
+            if files.contains(where: { $0.hasSuffix(".idx") || $0.wholeMatch(of: /data\.\d{3}/) != nil }) {
+                throw TACTError.unsupported("writing over the existing storage in \(directory.path)")
+            }
             baseKey = Data((0..<16).map { _ in UInt8.random(in: 0...255) })
-            fm.createFile(atPath: journalURL.path, contents: baseKey)
+            guard fm.createFile(atPath: journalURL.path, contents: baseKey) else {
+                throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: journalURL.path])
+            }
         }
         journal = try FileHandle(forWritingTo: journalURL)
         try journal.seekToEnd()
@@ -209,29 +219,48 @@ public final class CASCStorageWriter {
 
     public func contains(_ encodedKey: Data) -> Bool { stored.contains(encodedKey.prefix(9)) }
 
-    /// Appends one BLTE blob (exactly as served by the CDN).
+    /// Appends one BLTE blob (exactly as served by the CDN). A failed write
+    /// (disk full) throws and leaves nothing behind, so the call can be
+    /// retried, or the install resumed later.
     public func append(encodedKey: Data, blob: Data, fullKey: Bool) throws {
+        guard !finished else { throw TACTError.unsupported("appending to a finished storage") }
         let key9 = Data(encodedKey.prefix(9))
         guard !stored.contains(key9) else { return }
         let size = UInt64(CASC.headerSize + blob.count)
+        guard size <= CASC.archiveSize - UInt64(CASC.segmentHeadersSize) else {
+            throw TACTError.unsupported("\(blob.count)-byte file: larger than a storage archive")
+        }
         if archive < 0 || archiveEnd + size > CASC.archiveSize { try startArchive() }
+        guard let archiveHandle else { throw TACTError.unsupported("storage archive not open") }
 
         let header = CASC.entryHeader(encodedKey: encodedKey, blobSize: blob.count, archive: archive, offset: archiveEnd, fullKey: fullKey)
-        archiveHandle!.write(header + blob)
         let entry = CASC.IndexEntry(key: key9, archive: archive, offset: archiveEnd, size: UInt32(size))
+        var record = Data(encodedKey.prefix(16))
+        record += Data(CASC.le16(UInt16(archive))) + Data(CASC.le64(entry.offset)) + Data(CASC.le32(entry.size)) + Data([fullKey ? 1 : 0])
+        // FileHandle.write(_:) raises an Objective-C exception on failure,
+        // which kills the app; write(contentsOf:) throws.
+        let journalEnd = try journal.offset()
+        do {
+            try archiveHandle.write(contentsOf: header + blob)
+            try journal.write(contentsOf: record)
+        } catch {
+            // Cut off the partial write, or the next blob would land after it
+            // while the index points before it.
+            try? archiveHandle.truncate(atOffset: archiveEnd)
+            try? journal.truncate(atOffset: journalEnd)
+            throw error
+        }
         buckets[CASC.bucket(of: key9)].append(entry)
         stored.insert(key9)
         archiveEnd += size
-
-        var record = Data(encodedKey.prefix(16))
-        record += Data(CASC.le16(UInt16(archive))) + Data(CASC.le64(entry.offset)) + Data(CASC.le32(entry.size)) + Data([fullKey ? 1 : 0])
-        journal.write(record)
         unsyncedBytes += Int(size)
         if unsyncedBytes > 64 << 20 { try sync() }
     }
 
-    /// Writes the index files and shmem. The storage is usable afterwards.
+    /// Writes the index files and shmem. The storage is usable afterwards,
+    /// and the writer is done: further calls throw.
     public func finish() throws {
+        guard !finished else { throw TACTError.unsupported("finishing a storage twice") }
         try sync()
         try archiveHandle?.close()
         archiveHandle = nil
@@ -257,23 +286,27 @@ public final class CASCStorageWriter {
         fm.createFile(atPath: directory.appendingPathComponent("index.lock.0").path, contents: Data())
         try journal.close()
         try fm.removeItem(at: directory.appendingPathComponent(Self.journalName))
+        finished = true
     }
 
     // MARK: Internals
 
+    /// Opens the next archive. Nothing changes unless it all succeeds.
     private func startArchive() throws {
-        if let handle = archiveHandle {
-            try handle.synchronize()
-            try handle.close()
+        let next = archive + 1
+        guard next < CASC.maxArchives else { throw TACTError.unsupported("storage larger than \(CASC.maxArchives) archives") }
+        try archiveHandle?.synchronize()
+        let url = archiveURL(next)
+        let (headers, entries) = CASC.segmentHeaders(baseKey: baseKey, archive: next)
+        try headers.write(to: url) // replaces what an interrupted run may have left
+        let handle = try FileHandle(forWritingTo: url)
+        try handle.seekToEnd()
+        if let old = archiveHandle {
+            try? old.close()
             archiveSizes[archive] = archiveEnd
         }
-        archive += 1
-        guard archive < CASC.maxArchives else { throw TACTError.unsupported("storage larger than \(CASC.maxArchives) archives") }
-        let url = archiveURL(archive)
-        FileManager.default.createFile(atPath: url.path, contents: nil)
-        archiveHandle = try FileHandle(forWritingTo: url)
-        let (headers, entries) = CASC.segmentHeaders(baseKey: baseKey, archive: archive)
-        archiveHandle!.write(headers)
+        archive = next
+        archiveHandle = handle
         for (bucket, entry) in entries { buckets[bucket].append(entry) }
         archiveEnd = UInt64(headers.count)
         archiveSizes.append(archiveEnd)
