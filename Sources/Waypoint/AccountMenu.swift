@@ -2,8 +2,9 @@ import AppKit
 import WaypointCore
 
 /// The account switcher, in the library toolbar and the menu bar item: the
-/// saved accounts (a check marks the one games launch as), then Add Account
-/// and Sign Out. Switching is instant: each account keeps its own session.
+/// saved accounts (a check marks the one games launch as), then Add Account,
+/// Sign In Again and Sign Out. Switching is instant: each account keeps its
+/// own session.
 @MainActor
 enum AccountMenu {
     static func items(model: AppModel) -> [NSMenuItem] {
@@ -20,6 +21,9 @@ enum AccountMenu {
             Task { await model.addAccount() }
         })
         if let active = model.activeAccount {
+            items.append(ActionItem("Sign In to \(active.displayName) Again…", enabled: enabled) {
+                Task { await model.signInAgain() }
+            })
             items.append(ActionItem(model.hasSavedLogin ? "Update Saved Login…" : "Save Login in Keychain…", enabled: enabled) {
                 model.editSavedLogin()
             })

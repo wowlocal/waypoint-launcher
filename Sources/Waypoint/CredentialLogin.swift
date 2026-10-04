@@ -120,7 +120,7 @@ enum CredentialEditor {
     static func run(account: Account, username: String?, replacing: Bool) -> SavedCredentials? {
         let alert = NSAlert()
         alert.messageText = replacing ? "Update Saved Battle.net Login" : "Save Battle.net Login"
-        alert.informativeText = "Save the login for \(account.displayName) in this Mac’s Keychain. Waypoint will use it when your session expires. You may still need to approve two-factor authentication."
+        alert.informativeText = "Save the login for \(account.displayName) in this Mac’s Keychain. Waypoint uses it when a game has no sign-in yet, and for Sign In Again and Play. You may still need to approve two-factor authentication."
         alert.addButton(withTitle: "Save")
         alert.addButton(withTitle: "Cancel")
 

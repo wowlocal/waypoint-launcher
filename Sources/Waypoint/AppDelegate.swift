@@ -93,6 +93,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         Task { await model.addAccount() }
     }
 
+    @objc func signInAgain(_ sender: Any?) {
+        Task { await model.signInAgain() }
+    }
+
     @objc func signOut(_ sender: Any?) {
         Task { await model.signOut() }
     }
@@ -119,7 +123,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     /// The app menu: shows whichever update command applies as it opens,
-    /// and names the account Sign Out applies to.
+    /// and names the account Sign In Again and Sign Out apply to.
     func menuNeedsUpdate(_ menu: NSMenu) {
         let ready = appUpdater.readyVersion
         for item in menu.items {
@@ -131,6 +135,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
                 item.title = "Restart to Update Waypoint \(ready ?? "")"
             case #selector(addAccount(_:)):
                 item.title = model.accounts.isEmpty ? "Sign In to Battle.net…" : "Add Battle.net Account…"
+            case #selector(signInAgain(_:)):
+                item.isHidden = model.activeAccount == nil
+                item.title = "Sign In to \(model.activeAccount?.displayName ?? "Battle.net") Again…"
             case #selector(signOut(_:)):
                 item.isHidden = model.activeAccount == nil
                 item.title = "Sign Out of \(model.activeAccount?.displayName ?? "Battle.net")"
@@ -143,7 +150,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         switch item.action {
         case #selector(checkForUpdates(_:)): appUpdater.canCheck
-        case #selector(addAccount(_:)), #selector(signOut(_:)): !model.isSigningIn
+        case #selector(addAccount(_:)), #selector(signInAgain(_:)), #selector(signOut(_:)): !model.isSigningIn
         default: true
         }
     }

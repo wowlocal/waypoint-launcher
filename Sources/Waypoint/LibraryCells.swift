@@ -143,6 +143,17 @@ final class GameCell: NSView {
         if model.availableUpdate(for: game) != nil {
             menu.addItem(ActionItem("Play Without Updating") { Task { await model.play(game) } })
         }
+        let others = model.accounts.filter { $0.id != model.activeAccount?.id }
+        if !others.isEmpty {
+            let playAs = NSMenuItem(title: "Play As", action: nil, keyEquivalent: "")
+            playAs.submenu = NSMenu()
+            for account in others {
+                let item = ActionItem(account.displayName) { Task { await model.play(game, as: account.id) } }
+                item.image = .account(account)
+                playAs.submenu?.addItem(item)
+            }
+            menu.addItem(playAs)
+        }
         menu.addItem(ActionItem("Sign In Again and Play") { Task { await model.play(game, forceSignIn: true) } })
         if GameUpdate.canUpdate(game.install) {
             menu.addItem(.separator())

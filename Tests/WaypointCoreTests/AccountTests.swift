@@ -16,6 +16,15 @@ import Testing
     #expect(list.active?.id == "1")
 }
 
+@Test func signingInWithoutActivatingKeepsTheActiveAccount() {
+    var list = AccountList()
+    list.signedIn("1", session: .fresh(), activate: false)
+    #expect(list.active?.id == "1") // the first account is active anyway
+    list.signedIn("2", session: .fresh(), activate: false)
+    #expect(list.accounts.map(\.id) == ["1", "2"])
+    #expect(list.active?.id == "1")
+}
+
 @Test func signingInAgainMovesTheAccountToTheNewSession() {
     var list = AccountList()
     let old = WebSessionID.fresh(), new = WebSessionID.fresh()
@@ -105,7 +114,10 @@ import Testing
     #expect(vault.token(account: "111", codename: "WoW") == first)
     #expect(vault.token(account: "222", codename: "WTCG") == other)
     #expect(vault.token(account: "222", codename: "WoW") == nil)
-    vault.removeAll(account: "111")
+    try vault.removeAll(account: "111", except: "WoW")
     #expect(vault.token(account: "111", codename: "WTCG") == nil)
+    #expect(vault.token(account: "111", codename: "WoW") == first)
+    vault.removeAll(account: "111")
+    #expect(vault.token(account: "111", codename: "WoW") == nil)
     #expect(vault.token(account: "222", codename: "WTCG") == other)
 }

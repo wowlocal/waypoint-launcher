@@ -55,8 +55,8 @@ final class TokenCatcher: NSObject, WKNavigationDelegate {
 
 enum WebSession {
     /// A persistent cookie jar per account (see `WebSessionID`), so each
-    /// Battle.net session survives restarts and later tokens can be fetched
-    /// silently.
+    /// Battle.net session survives restarts, for the saved login and the
+    /// account page.
     @MainActor static func makeConfiguration(_ session: WebSessionID) -> WKWebViewConfiguration {
         let config = WKWebViewConfiguration()
         config.websiteDataStore = store(session)

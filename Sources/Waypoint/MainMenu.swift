@@ -14,6 +14,7 @@ enum MainMenu {
         app.addItem(withTitle: "Settings…", action: #selector(AppDelegate.showSettings(_:)), keyEquivalent: ",")
         app.addItem(.separator())
         app.addItem(withTitle: "Add Battle.net Account…", action: #selector(AppDelegate.addAccount(_:)), keyEquivalent: "")
+        app.addItem(withTitle: "Sign In to Battle.net Again…", action: #selector(AppDelegate.signInAgain(_:)), keyEquivalent: "")
         app.addItem(withTitle: "Sign Out of Battle.net", action: #selector(AppDelegate.signOut(_:)), keyEquivalent: "")
         app.addItem(.separator())
         let services = NSMenu(title: "Services")

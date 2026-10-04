@@ -38,8 +38,8 @@ A launcher only has to do three things: install the game, keep it up to date, an
 ## Features
 
 - **Native.** Written in Swift, built only for arm64.
-- **One sign-in per account.** Uses the official Battle.net web login once. After that every launch is one click.
-- **Several accounts.** Each one keeps its own Battle.net session, so switching between them is one click, with no login.
+- **Sign in once per game.** Uses the official Battle.net web login. Battle.net signs each game in separately, so each one asks once; after that every launch is one click.
+- **Several accounts.** Each one keeps its own sign-ins, so switching between them is one click, with no login. **Play As** launches a game once as another account.
 - **Installs games.** Click **+** in the toolbar and pick a game. Waypoint downloads it straight from Blizzard's servers and lays it out exactly the way Battle.net does, so the game takes it as its own. Interrupted installs pick up where they stopped. Every Blizzard game with a Mac version is on the list; [Supported games](#supported-games) shows what has been tested.
 - **Updates games itself**, including ones Battle.net installed. It checks Blizzard's servers, downloads only the files that changed, verifies every one of them, and puts them in place: loose files are swapped in, and new data goes into the game's CASC storage the way Battle.net adds it.
 - **Light.** About 27 MB of memory while it sits there. Installs and updates read Blizzard's manifests and indexes straight from disk instead of loading them, so even planning a 130 GB World of Warcraft install stays under 100 MB.
@@ -107,13 +107,13 @@ Updates are signed with an EdDSA key kept in the keychain under the account `way
 
 1. Open Waypoint and press **Play**.
 2. The first time, sign in to Battle.net in the window that appears. Two-factor auth works.
-3. That's it. Later launches skip the login.
+3. That's it. Later launches skip the login. Battle.net signs in to each game separately, so another game asks once on its first launch.
 
-The window's subtitle shows the account games launch as. To switch, click the person button in the toolbar and pick another account. **Add Account…** signs in to one more, and **Sign Out** forgets the current one. The same menu is in the menu bar item.
+The window's subtitle shows the account games launch as. To switch, click the person button in the toolbar and pick another account. **Add Account…** signs in to one more, **Sign In Again…** gets the current one a fresh login for the game you played last (use it if a game says it can't log you in; other games then ask once on their next launch), and **Sign Out** forgets the current one. The same menu is in the menu bar item.
 
-**Optional automatic login.** Choose **Save Login in Keychain…** in the account menu, or **Save Login…** in Settings, to save that account's email/phone and password on this Mac. Before launching a game, Waypoint first refreshes the web session; if it has expired, it tries the saved login once. **Sign In Again and Play** also tries it with a fresh session. Passwords stay in Keychain, outside preferences and diagnostics. A different account's token is rejected.
+**Optional automatic login.** Choose **Save Login in Keychain…** in the account menu, or **Save Login…** in Settings, to save that account's email/phone and password on this Mac. Before launching a game, Waypoint uses the token it saved for that game; if it has none, it tries the saved login once. **Sign In Again and Play** also tries it with a fresh session. Passwords stay in Keychain, outside preferences and diagnostics. A different account's token is rejected.
 
-Rejected logins, CAPTCHA and two-factor prompts pause automatic login and open the same Battle.net page for you to continue. **Update Saved Login…** replaces the saved credentials and enables automatic login again; **Forget Saved Login** disables it and deletes the password. Sign Out deletes it too. Temporary failures wait 5 minutes, then 15 minutes between attempts, with at most three consecutive attempts before pausing. Attempts happen only when you launch a game; the limit survives app restarts. Waypoint cannot observe a token rejection inside an already running game: use **Sign In Again and Play** after closing it.
+Rejected logins, CAPTCHA and two-factor prompts pause automatic login and open the same Battle.net page for you to continue. **Update Saved Login…** replaces the saved credentials and enables automatic login again; **Forget Saved Login** disables it and deletes the password. Sign Out deletes it too. Temporary failures wait 5 minutes, then 15 minutes between attempts, with at most three consecutive attempts before pausing. Attempts happen only when you launch a game; the limit survives app restarts. Waypoint cannot observe a token rejection inside an already running game: close it, then use **Sign In Again…** in the account menu or **Sign In Again and Play**.
 
 To install a game, click **+** in the toolbar and pick it. Choose where it goes (`/Applications` by default), the language and the region; the sheet shows the real download size. Progress shows in the game's row.
 
@@ -121,6 +121,7 @@ When a new version is out, **Play** turns into **Update**, with a progress bar w
 
 Right-click the button for more:
 
+- **Play As**: launches the game once as another saved account, without switching the active one.
 - **Sign In Again and Play**: use this if a game ever rejects the login.
 - **Verify Files**: re-checks every file and repairs broken ones.
 - **Play Without Updating**: shown only when an update is waiting.
@@ -170,9 +171,10 @@ sequenceDiagram
     participant S as Blizzard servers
 
     You->>W: Play
-    W->>L: /login?app=WTCG (hidden, saved session)
+    W->>W: this account's token for the game (Keychain)
+    Note over W,L: none yet → optional saved login,<br/>otherwise the login window
+    W->>L: /login?app=WTCG (only without a token)
     L-->>W: redirect to localhost:0/?ST=US-…
-    Note over W,L: no session → optional saved login<br/>otherwise last token or login window
     W->>P: Launch Options/WTCG/WEB_TOKEN (encrypted)<br/>REGION, LOCALE
     W->>G: Hearthstone -launch -uid hs_beta
     G->>P: read token
@@ -196,7 +198,7 @@ sequenceDiagram
 
 **Token.** The Battle.net web login at `https://<region>.battle.net/login/en/?externalChallenge=login&app=<CODE>` finishes with a redirect to `http://localhost:0/?ST=<token>`. The token looks like `US-<32 hex>-<account id>`.
 
-**Accounts.** Each account has its own persistent WebKit data store (`WKWebsiteDataStore(forIdentifier:)`), so their Battle.net sessions sit side by side and switching needs no login. The last token per account and game is kept in the login keychain, for when a session has expired. The BattleTag and email come from the JSON API behind Blizzard's account page (`account.battle.net/api/details`), read with that account's session.
+**Accounts.** Each account has its own persistent WebKit data store (`WKWebsiteDataStore(forIdentifier:)`), so their Battle.net sessions sit side by side. The token per account and game is kept in the login keychain and used for every launch: it lasts for months, and Battle.net's login page keeps no session that would hand out a new one without the form, so switching accounts needs no login either. The BattleTag and email come from the JSON API behind Blizzard's account page (`account.battle.net/api/details`), read with that account's session.
 
 **Launch commands**
 

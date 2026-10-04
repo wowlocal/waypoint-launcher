@@ -57,16 +57,16 @@ public struct AccountList: Codable, Equatable, Sendable {
     }
 
     /// Records that account `id` signed in through `session`, and makes it
-    /// active. A new account is added; a saved one moves to `session`. Whoever
-    /// had `session` before gets a fresh one, since its cookies now belong to
-    /// `id`. Returns the session nothing uses any more, for the caller to
-    /// delete.
+    /// active (with `activate` false, only when none is). A new account is
+    /// added; a saved one moves to `session`. Whoever had `session` before gets
+    /// a fresh one, since its cookies now belong to `id`. Returns the session
+    /// nothing uses any more, for the caller to delete.
     @discardableResult
-    public mutating func signedIn(_ id: String, session: WebSessionID) -> WebSessionID? {
+    public mutating func signedIn(_ id: String, session: WebSessionID, activate: Bool = true) -> WebSessionID? {
         for i in accounts.indices where accounts[i].id != id && accounts[i].session == session {
             accounts[i].session = .fresh()
         }
-        activeID = id
+        if activate || active == nil { activeID = id }
         guard let i = accounts.firstIndex(where: { $0.id == id }) else {
             accounts.append(Account(id: id, session: session, tint: unusedTint))
             return nil
@@ -117,9 +117,9 @@ public struct AccountList: Codable, Equatable, Sendable {
     }
 }
 
-/// Each account's last login token per game (codename), in the login
-/// keychain. A token stays valid for months, so a switched-to account whose
-/// web session has expired can still play without the login page.
+/// Each account's login token per game (codename), in the login keychain.
+/// Every launch uses it: a token stays valid for months, and Battle.net's
+/// login page can't hand out a new one without the form.
 public struct TokenVault: Sendable {
     /// The keychain item's service; one item per account.
     public var service: String
@@ -133,9 +133,18 @@ public struct TokenVault: Sendable {
     }
 
     public func save(_ token: LoginToken, codename: String) throws {
-        let account = token.accountID
-        var tokens = tokens(account: account)
+        var tokens = tokens(account: token.accountID)
         tokens[codename] = token.value
+        try write(tokens, account: token.accountID)
+    }
+
+    /// Forgets the account's tokens for every game but `codename`.
+    public func removeAll(account: String, except codename: String) throws {
+        let kept = tokens(account: account).filter { $0.key == codename }
+        if kept.isEmpty { removeAll(account: account) } else { try write(kept, account: account) }
+    }
+
+    private func write(_ tokens: [String: String], account: String) throws {
         let data = try JSONEncoder().encode(tokens)
         let status = SecItemUpdate(query(account) as CFDictionary, [kSecValueData: data] as CFDictionary)
         if status == errSecItemNotFound {

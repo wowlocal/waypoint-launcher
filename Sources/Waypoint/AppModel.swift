@@ -42,7 +42,7 @@ final class AppModel {
     var accounts: [Account] { accountList.accounts }
     /// The account games launch with.
     var activeAccount: Account? { accountList.active }
-    /// The login window is open to add an account.
+    /// The login window is open to add an account or sign one in again.
     private(set) var isAddingAccount = false
     private(set) var isManagingSavedLogin = false
     private var autoLoginStates = AutoLoginState.load() {
@@ -51,7 +51,6 @@ final class AppModel {
     private var profileFetches: Set<String> = []
 
     private let library = GameLibrary()
-    private let silentFetcher = SilentTokenFetcher()
     private let loginWindow = LoginWindow()
     /// Per bundle id, like the web sessions, so test builds never share
     /// keychain items with the installed app.
@@ -219,21 +218,32 @@ final class AppModel {
         game.isSupported && !running.contains(game.id) && !isBusy(game) && !isSigningIn
     }
 
-    /// `forceSignIn` skips the saved session and token, for when the game
-    /// rejects them or the user wants another account.
-    func play(_ game: Game, forceSignIn: Bool = false) async {
+    /// `forceSignIn` skips the saved token, for when the game rejects it.
+    /// `accountID`: Play As, another saved account for this launch only; the
+    /// active one stays active.
+    func play(_ game: Game, forceSignIn: Bool = false, as accountID: String? = nil) async {
         guard canPlay(game) else { return }
-        Log.info(.launch, "requested", nil, ["uid": game.id, "version": game.install.version ?? "?", "force_sign_in": forceSignIn])
+        let account: Account?
+        if let accountID {
+            guard let other = accountList[accountID] else { return }
+            account = other
+        } else {
+            account = activeAccount
+        }
+        Log.info(.launch, "requested", nil, ["uid": game.id, "version": game.install.version ?? "?",
+                                             "force_sign_in": forceSignIn, "play_as": accountID != nil])
         do {
             let plan = try GameLauncher.plan(for: game, region: regionOverride)
             phases[game.id] = .signingIn
-            guard let token = await token(for: plan, gameName: game.displayName, forceSignIn: forceSignIn) else {
+            guard let token = await token(for: plan, gameName: game.displayName, account: account,
+                                          activate: accountID == nil, forceSignIn: forceSignIn) else {
                 Log.notice(.auth, "sign_in_cancelled", nil, ["uid": game.id])
                 phases[game.id] = .idle
                 return
             }
             phases[game.id] = .launching
             try GameLauncher.launch(plan, token: token, gameName: game.displayName)
+            UserDefaults.standard.set(game.id, forKey: Self.lastPlayedKey)
             // Keep "launching" until the game shows up in the running list.
             try? await Task.sleep(for: .seconds(4))
             refreshRunning()
@@ -299,21 +309,49 @@ final class AppModel {
     /// Signs in to another account in the login window, in a web session of
     /// its own. It becomes the active account.
     func addAccount() async {
+        await signIn(title: "Add a Battle.net Account", reason: "add_account")
+    }
+
+    /// Signs the active account in again, for when a game won't take its
+    /// token. A changed password or authenticator voids all of an account's
+    /// tokens, so the other games' ones go too and each gets a fresh one on
+    /// its next launch.
+    func signInAgain() async {
+        guard let account = activeAccount else { return }
+        await signIn(title: "Sign In to \(account.displayName) Again", reason: "sign_in_again", replacing: account.id)
+    }
+
+    /// `replacing`: the account whose saved tokens a sign-in to it replaces.
+    private func signIn(title: String, reason: String, replacing: String? = nil) async {
         guard !isSigningIn else { return }
         isAddingAccount = true
         defer { isAddingAccount = false }
         let target = loginTarget()
         let session = WebSessionID.fresh()
-        Log.notice(.auth, "login_window_shown", nil, ["codename": target.codename, "region": target.region.rawValue, "reason": "add_account"])
+        Log.notice(.auth, "login_window_shown", nil, ["codename": target.codename, "region": target.region.rawValue, "reason": reason])
         guard let token = await loginWindow.run(BattleNetLogin.url(codename: target.codename, region: target.region),
-                                                title: "Add a Battle.net Account", session: session)
+                                                title: title, session: session)
         else {
-            Log.notice(.auth, "sign_in_cancelled", nil, ["reason": "add_account"])
+            Log.notice(.auth, "sign_in_cancelled", nil, ["reason": reason])
             await WebSession.delete(session)
             return
         }
         Log.info(.auth, "token", nil, ["source": "login_window", "codename": target.codename])
-        await adopt(token, codename: target.codename, session: session, typedName: loginWindow.typedAccountName)
+        let saved = await adopt(token, codename: target.codename, session: session, typedName: loginWindow.typedAccountName)
+        if let replacing, token.accountID == replacing {
+            if saved {
+                do {
+                    try tokenVault.removeAll(account: replacing, except: target.codename)
+                    Log.notice(.auth, "other_game_tokens_removed")
+                } catch {
+                    Log.warning(.auth, "token_remove_failed", nil, ["error": error])
+                }
+            } else {
+                // Better asked again on the next Play than handed a dead token.
+                tokenVault.removeAll(account: replacing)
+                Log.notice(.auth, "all_tokens_removed")
+            }
+        }
     }
 
     /// Signs the active account out: its web session and saved tokens are
@@ -361,10 +399,17 @@ final class AppModel {
         await adopt(token, codename: target.codename, session: .shared)
     }
 
-    /// The login page asks which game it signs in to (`app=`): the first
-    /// game that can be played, else Hearthstone, which every account has.
+    /// The game launched last: signing in to an account gets the token for
+    /// it, since each game needs one of its own.
+    private static let lastPlayedKey = "lastPlayedGame"
+
+    /// The login page asks which game it signs in to (`app=`): the game
+    /// launched last, else the first that can be played, else Hearthstone,
+    /// which every account has.
     private func loginTarget() -> (codename: String, region: Region) {
-        let plan = games.lazy.compactMap { try? GameLauncher.plan(for: $0, region: self.regionOverride) }.first
+        let last = UserDefaults.standard.string(forKey: Self.lastPlayedKey)
+        let candidates = games.filter { $0.id == last } + games.filter { $0.id != last }
+        let plan = candidates.lazy.compactMap { try? GameLauncher.plan(for: $0, region: self.regionOverride) }.first
         return (plan?.codename ?? InstallableProduct.hearthstone.codename, plan?.region ?? regionOverride ?? .us)
     }
 
@@ -374,19 +419,25 @@ final class AppModel {
     /// `typedName`: the email or phone typed into the login form, which names
     /// the account until (and unless) Blizzard's account page tells the
     /// BattleTag and email.
-    private func adopt(_ token: LoginToken, codename: String, session: WebSessionID, typedName: String? = nil) async {
+    /// Returns whether the token made it into the keychain.
+    @discardableResult
+    private func adopt(_ token: LoginToken, codename: String, session: WebSessionID, typedName: String? = nil,
+                       activate: Bool = true) async -> Bool {
         let id = token.accountID
         let isNew = accountList[id] == nil
-        let unused = accountList.signedIn(id, session: session)
+        let unused = accountList.signedIn(id, session: session, activate: activate)
         if let typedName, accountList[id]?.email == nil { accountList.setProfile(id, battleTag: nil, email: typedName) }
+        var saved = true
         do {
             try tokenVault.save(token, codename: codename)
         } catch {
+            saved = false
             Log.warning(.auth, "token_save_failed", nil, ["error": error])
         }
         if isNew { Log.notice(.auth, "account_added", nil, ["accounts": accounts.count]) }
         if let unused { await WebSession.delete(unused) }
         if accountList[id]?.battleTag == nil { Task { await refreshProfile(id) } }
+        return saved
     }
 
     /// Looks up the account's BattleTag and email on Blizzard's account page.
@@ -408,42 +459,27 @@ final class AppModel {
         }
     }
 
-    /// Refreshes cookies first, then (when opted in) signs in once with the
-    /// saved password. Otherwise the account's last token from the keychain is
-    /// used; a rejected saved login goes to the interactive window instead.
-    private func token(for plan: LaunchPlan, gameName: String, forceSignIn: Bool) async -> LoginToken? {
+    /// The account's token for the game, from the keychain. Without one (or
+    /// when forced), signs in once with the saved password when opted in, then
+    /// opens the login window; a rejected saved login goes to the interactive
+    /// window instead. `activate`: whether whoever signs in becomes the
+    /// active account.
+    private func token(for plan: LaunchPlan, gameName: String, account: Account?, activate: Bool,
+                       forceSignIn: Bool) async -> LoginToken? {
         // Only where the token came from is logged, never the token.
         let url = BattleNetLogin.url(codename: plan.codename, region: plan.region)
-        let account = activeAccount
-        var sessionExpired = false
-        if !forceSignIn {
-            // With no accounts yet, try the session from before there were any.
-            let session = account?.session ?? .shared
-            let started = Date()
-            if await WebSession.hasCookies(session) {
-                switch await silentFetcher.fetch(url, session: session) {
-                case .token(let token):
-                    if account == nil || token.accountID == account?.id {
-                        Log.info(.auth, "token", nil, ["source": "web_session", "codename": plan.codename,
-                                                       "duration_ms": Int(Date().timeIntervalSince(started) * 1000)])
-                        await adopt(token, codename: plan.codename, session: session)
-                        return token
-                    }
-                    sessionExpired = true
-                    Log.warning(.auth, "web_session_other_account")
-                case .signedOut:
-                    sessionExpired = true
-                    Log.info(.auth, "web_session_signed_out", nil, ["duration_ms": Int(Date().timeIntervalSince(started) * 1000)])
-                case .failed: // Offline is not evidence of an expired password.
-                    Log.info(.auth, "web_session_failed", nil, ["duration_ms": Int(Date().timeIntervalSince(started) * 1000)])
-                }
-            } else {
-                sessionExpired = true
-                Log.info(.auth, "web_session_empty")
-            }
+        let title = "Sign in to play \(gameName)" + (activate ? "" : account.map { " as \($0.displayName)" } ?? "")
+        // Only tokens Waypoint got itself. The one Battle.net leaves in the
+        // game's Launch Options can be long expired: the game then shows
+        // "Closed" and Waypoint can't tell, so it would keep handing it over.
+        // Nothing is refreshed first: Battle.net's login page keeps no session
+        // that signs in again without the form, and a token lasts for months.
+        if !forceSignIn, let account, let token = tokenVault.token(account: account.id, codename: plan.codename) {
+            Log.info(.auth, "token", nil, ["source": "keychain", "codename": plan.codename])
+            return token
         }
 
-        if let account, forceSignIn || sessionExpired, var state = autoLoginStates[account.id], state.begin() {
+        if let account, var state = autoLoginStates[account.id], state.begin() {
             autoLoginStates[account.id] = state // Persist before reading/submitting the password.
             let session = forceSignIn ? WebSessionID.fresh() : account.session
             let result: CredentialTokenFetcher.Result
@@ -465,32 +501,33 @@ final class AppModel {
                     state.requiresSignIn()
                     autoLoginStates[account.id] = state
                     if session != account.session { await WebSession.delete(session) }
-                    showWrongSavedAccount()
+                    showWrongSavedAccount(account)
                     return nil
                 }
                 state.succeeded()
                 autoLoginStates[account.id] = state
                 Log.info(.auth, "token", nil, ["source": "saved_login", "codename": plan.codename])
-                await adopt(token, codename: plan.codename, session: session)
+                await adopt(token, codename: plan.codename, session: session, activate: activate)
                 return token
             case .interaction(let view):
                 state.requiresSignIn()
                 autoLoginStates[account.id] = state
                 Log.notice(.auth, "automatic_login_paused")
-                let notice = "Automatic login is paused. Complete sign-in below. If your password changed, use Update Saved Login in the account menu or Settings."
-                guard let token = await loginWindow.run(url, title: "Sign in to play \(gameName)", session: session,
+                let notice = "Automatic login is paused. Complete sign-in below. If your password changed, \(updateSavedLoginHint(account))."
+                guard let token = await loginWindow.run(url, title: title, session: session,
                                                        preparedWebView: view, notice: notice) else {
                     if session != account.session { await WebSession.delete(session) }
                     return nil
                 }
                 guard token.accountID == account.id else {
                     if session != account.session { await WebSession.delete(session) }
-                    showWrongSavedAccount()
+                    showWrongSavedAccount(account)
                     return nil
                 }
                 // Manual sign-in may have used another password: only an
                 // explicit Update Saved Login re-enables these credentials.
-                await adopt(token, codename: plan.codename, session: session, typedName: loginWindow.typedAccountName)
+                await adopt(token, codename: plan.codename, session: session, typedName: loginWindow.typedAccountName,
+                            activate: activate)
                 return token
             case .failed:
                 state.failedTemporarily()
@@ -500,32 +537,49 @@ final class AppModel {
             }
         }
 
-        let savedLoginNeedsAttention = account.flatMap { autoLoginStates[$0.id] }?.isPaused == true
-        // Only tokens Waypoint got itself. The one Battle.net leaves in the
-        // game's Launch Options can be long expired: the game then shows
-        // "Closed" and Waypoint can't tell, so it would keep handing it over.
-        if !forceSignIn, !(sessionExpired && savedLoginNeedsAttention), let account,
-           let token = tokenVault.token(account: account.id, codename: plan.codename) {
-            Log.info(.auth, "token", nil, ["source": "keychain", "codename": plan.codename])
-            return token
+        var notices: [String] = []
+        if let account, autoLoginStates[account.id]?.isPaused == true {
+            notices.append("Automatic login is paused. Sign in here, then \(updateSavedLoginHint(account)) to replace the saved password.")
+        }
+        // Signed in, yet asked again: Battle.net's tokens are per game.
+        if account != nil, !forceSignIn {
+            notices.append("Battle.net signs in to each game separately, so \(gameName) needs its own sign-in. It’s needed only once.")
         }
         let session = WebSessionID.fresh()
         Log.notice(.auth, "login_window_shown", nil, ["codename": plan.codename, "region": plan.region.rawValue, "forced": forceSignIn])
-        let notice = savedLoginNeedsAttention ? "Automatic login is paused. Sign in here, then use Update Saved Login in the account menu or Settings to replace the saved password." : nil
-        guard let token = await loginWindow.run(url, title: "Sign in to play \(gameName)", session: session, notice: notice) else {
+        guard let token = await loginWindow.run(url, title: title, session: session,
+                                               notice: notices.isEmpty ? nil : notices.joined(separator: "\n\n")) else {
             await WebSession.delete(session)
             return nil
         }
+        // Play As names the account; launching another one would surprise.
+        if !activate, let account, token.accountID != account.id {
+            await WebSession.delete(session)
+            Log.warning(.auth, "play_as_other_account")
+            let alert = NSAlert()
+            alert.messageText = "That’s a different account"
+            alert.informativeText = "You signed in to a different Battle.net account than \(account.displayName), so \(gameName) wasn’t started. Try again and sign in as \(account.displayName)."
+            alert.runModal()
+            return nil
+        }
         Log.info(.auth, "token", nil, ["source": "login_window", "codename": plan.codename])
-        await adopt(token, codename: plan.codename, session: session, typedName: loginWindow.typedAccountName)
+        await adopt(token, codename: plan.codename, session: session, typedName: loginWindow.typedAccountName,
+                    activate: activate)
         return token
     }
 
-    private func showWrongSavedAccount() {
+    /// Where to fix an account's saved login: the menus act on the active one.
+    private func updateSavedLoginHint(_ account: Account) -> String {
+        account.id == activeAccount?.id
+            ? "use Update Saved Login in the account menu or Settings"
+            : "switch to \(account.displayName), then use Update Saved Login in the account menu or Settings"
+    }
+
+    private func showWrongSavedAccount(_ account: Account) {
         Log.warning(.auth, "saved_login_other_account")
         let alert = NSAlert()
         alert.messageText = "The saved login belongs to a different account"
-        alert.informativeText = "Automatic login is paused. Use Update Saved Login in the account menu or Settings to enter this account’s login and password."
+        alert.informativeText = "Automatic login is paused. To enter this account’s login and password, \(updateSavedLoginHint(account))."
         alert.runModal()
     }
 
