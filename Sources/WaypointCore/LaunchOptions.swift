@@ -50,6 +50,11 @@ public struct LaunchOptions {
         }
     }
 
+    public func clearToken() {
+        CFPreferencesSetAppValue(webTokenKey as CFString, nil, Self.domain)
+        CFPreferencesAppSynchronize(Self.domain)
+    }
+
     private func set(_ key: String, _ value: CFPropertyList) {
         CFPreferencesSetAppValue(key as CFString, value, Self.domain)
     }

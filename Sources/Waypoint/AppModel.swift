@@ -60,12 +60,14 @@ final class AppModel {
         game.isSupported && !running.contains(game.id) && !isBusy(game) && !isSigningIn
     }
 
-    func play(_ game: Game) async {
+    /// `forceSignIn` skips the saved session and token, for when the game
+    /// rejects them or the user wants another account.
+    func play(_ game: Game, forceSignIn: Bool = false) async {
         guard canPlay(game) else { return }
         do {
             let plan = try GameLauncher.plan(for: game, region: regionOverride)
             phases[game.id] = .signingIn
-            guard let token = await token(for: plan, gameName: game.displayName) else {
+            guard let token = await token(for: plan, gameName: game.displayName, forceSignIn: forceSignIn) else {
                 phases[game.id] = .idle
                 return
             }
@@ -82,13 +84,25 @@ final class AppModel {
 
     func signOut() async {
         await WebSession.signOut()
+        for codename in ["WTCG", "WoW"] {
+            LaunchOptions(gameKey: codename).clearToken()
+        }
     }
 
-    /// A fresh token for every launch, like Battle.net does: silently from the
-    /// saved web session if possible, otherwise via the login window.
-    private func token(for plan: LaunchPlan, gameName: String) async -> LoginToken? {
+    /// Prefers a fresh token, like Battle.net: silently from the saved web
+    /// session. Battle.net's session cookie doesn't always survive a restart,
+    /// so next we reuse the token from the last launch (it stays in
+    /// `net.battle`, where Battle.net keeps it too, and lasts for months).
+    /// Only if neither works do we show the login window.
+    private func token(for plan: LaunchPlan, gameName: String, forceSignIn: Bool) async -> LoginToken? {
         let url = BattleNetLogin.url(codename: plan.codename, region: plan.region)
-        if let token = await silentFetcher.fetch(url) { return token }
+        if !forceSignIn {
+            if let token = await silentFetcher.fetch(url) { return token }
+            if let stored = try? LaunchOptions(gameKey: plan.codename).storedToken(),
+               let token = LoginToken(stored) {
+                return token
+            }
+        }
         return await loginWindow.run(url, title: "Sign in to play \(gameName)")
     }
 

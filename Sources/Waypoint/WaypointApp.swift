@@ -117,6 +117,9 @@ struct GameRow: View {
                 Button("Play") { Task { await model.play(game) } }
                     .buttonStyle(.borderedProminent)
                     .disabled(!model.canPlay(game))
+                    .contextMenu {
+                        Button("Sign In Again and Play") { Task { await model.play(game, forceSignIn: true) } }
+                    }
             }
         }
     }
