@@ -78,6 +78,7 @@ Move `Waypoint.app` to `/Applications` if you want to keep it.
 ```sh
 # once: store notary credentials in the keychain (use an app-specific password)
 xcrun notarytool store-credentials NotaryProfile --apple-id <apple id> --team-id <team id>
+# …or use an App Store Connect API key instead: NOTARY_KEY=<.p8> NOTARY_KEY_ID=<id> NOTARY_ISSUER=<uuid>
 
 scripts/release.sh 0.1.0             # → dist/Waypoint-0.1.0.dmg + .sha256
 scripts/release.sh 0.1.0 --publish   # also tags v0.1.0 and creates the GitHub release

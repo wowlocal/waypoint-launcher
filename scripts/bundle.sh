@@ -1,6 +1,7 @@
 #!/bin/zsh
 # Builds build/Waypoint.app (arm64).
 #
+#   APP_PATH       where to put the app (default: build/Waypoint.app)
 #   VERSION        marketing version (default: latest v* tag, else 0.1.0)
 #   SIGN_IDENTITY  codesign identity (default: ad-hoc "-"). A real identity
 #                  also enables the hardened runtime and a secure timestamp,
@@ -18,7 +19,7 @@ identity="${SIGN_IDENTITY:--}"
 nice -n 19 xcrun swift build -c release --arch arm64 --product Waypoint
 bin="$(xcrun swift build -c release --arch arm64 --show-bin-path)/Waypoint"
 
-app=build/Waypoint.app
+app="${APP_PATH:-build/Waypoint.app}"
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$bin" "$app/Contents/MacOS/Waypoint"

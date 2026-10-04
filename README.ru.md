@@ -78,6 +78,7 @@ open build/Waypoint.app
 ```sh
 # один раз: сохранить данные для нотаризации в Keychain (нужен app-specific пароль)
 xcrun notarytool store-credentials NotaryProfile --apple-id <apple id> --team-id <team id>
+# …или ключ App Store Connect API: NOTARY_KEY=<.p8> NOTARY_KEY_ID=<id> NOTARY_ISSUER=<uuid>
 
 scripts/release.sh 0.1.0             # → dist/Waypoint-0.1.0.dmg + .sha256
 scripts/release.sh 0.1.0 --publish   # плюс тег v0.1.0 и GitHub Release
