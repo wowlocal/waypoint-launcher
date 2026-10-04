@@ -266,7 +266,7 @@ final class AppModel {
         isManagingSavedLogin = true
         defer { isManagingSavedLogin = false }
         do {
-            let old = try credentialVault.credentials(account: account.id, allowInteraction: true)
+            let old = try? credentialVault.credentials(account: account.id, allowInteraction: true)
             guard let credentials = CredentialEditor.run(account: account, username: old?.username,
                                                           replacing: hasSavedLogin) else { return }
             try credentialVault.save(credentials, account: account.id)

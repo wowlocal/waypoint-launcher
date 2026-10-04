@@ -111,6 +111,10 @@ Updates are signed with an EdDSA key kept in the keychain under the account `way
 
 The window's subtitle shows the account games launch as. To switch, click the person button in the toolbar and pick another account. **Add Account…** signs in to one more, and **Sign Out** forgets the current one. The same menu is in the menu bar item.
 
+**Optional automatic login.** Choose **Save Login in Keychain…** in the account menu, or **Save Login…** in Settings, to save that account's email/phone and password on this Mac. Before launching a game, Waypoint first refreshes the web session; if it has expired, it tries the saved login once. **Sign In Again and Play** also tries it with a fresh session. Passwords stay in Keychain, outside preferences and diagnostics. A different account's token is rejected.
+
+Rejected logins, CAPTCHA and two-factor prompts pause automatic login and open the same Battle.net page for you to continue. **Update Saved Login…** replaces the saved credentials and enables automatic login again; **Forget Saved Login** disables it and deletes the password. Sign Out deletes it too. Temporary failures wait 5 minutes, then 15 minutes between attempts, with at most three consecutive attempts before pausing. Attempts happen only when you launch a game; the limit survives app restarts. Waypoint cannot observe a token rejection inside an already running game: use **Sign In Again and Play** after closing it.
+
 To install a game, click **+** in the toolbar and pick it. Choose where it goes (`/Applications` by default), the language and the region; the sheet shows the real download size. Progress shows in the game's row.
 
 When a new version is out, **Play** turns into **Update**, with a progress bar while it downloads.
@@ -141,7 +145,7 @@ sequenceDiagram
     You->>W: Play
     W->>L: /login?app=WTCG (hidden, saved session)
     L-->>W: redirect to localhost:0/?ST=US-…
-    Note over W,L: no session → reuse last token<br/>none at all → show login window
+    Note over W,L: no session → optional saved login<br/>otherwise last token or login window
     W->>P: Launch Options/WTCG/WEB_TOKEN (encrypted)<br/>REGION, LOCALE
     W->>G: Hearthstone -launch -uid hs_beta
     G->>P: read token

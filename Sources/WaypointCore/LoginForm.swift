@@ -22,7 +22,10 @@ public enum LoginForm {
         const visible = e => e && !e.hidden && getComputedStyle(e).display !== 'none' &&
             getComputedStyle(e).visibility !== 'hidden' && e.getClientRects().length > 0;
         const errors = document.querySelectorAll('#display-errors, #js-errors, .error-helper, [role="alert"]');
-        if ([...errors].some(e => visible(e) && e.textContent.trim())) return 'interaction';
+        const messages = [...errors].filter(visible).map(e => e.textContent.trim()).filter(Boolean);
+        const networkError = (document.body.getAttribute('data-network-error-message') || '').trim();
+        if (networkError && messages.some(text => text.includes(networkError))) return 'temporary';
+        if (messages.length) return 'interaction';
         if ([...document.querySelectorAll('input')].some(e => visible(e) &&
             /captcha|authenticator|security.?code|otp|verification/i.test(e.id + ' ' + e.name)))
             return 'interaction';
@@ -37,15 +40,18 @@ public enum LoginForm {
             !(action.pathname === '/login' || action.pathname.startsWith('/login/'))) return 'interaction';
         if ((field === passwordField && !allowPassword) || (field === usernameField && !allowUsername))
             return 'waiting';
+        const button = form.querySelector('#submit, button[type="submit"], input[type="submit"]');
+        if (!button) return 'waiting';
+        if (!submit) return field === passwordField ? 'password' : 'username';
         const fill = (e, value) => {
             Object.getOwnPropertyDescriptor(HTMLInputElement.prototype, 'value').set.call(e, value);
             e.dispatchEvent(new Event('input', { bubbles: true }));
             e.dispatchEvent(new Event('change', { bubbles: true }));
+            e.dispatchEvent(new KeyboardEvent('keyup', { bubbles: true }));
         };
         if (usernameField && !usernameField.disabled) fill(usernameField, username);
         if (field === passwordField) fill(passwordField, password);
-        const button = form.querySelector('#submit, button[type="submit"], input[type="submit"]');
-        if (!button || button.disabled || button.classList.contains('disabled')) return 'waiting';
+        if (button.disabled || button.classList.contains('disabled')) return 'interaction';
         // Defer the click so the native caller records the submission before
         // a redirect can destroy this JavaScript context.
         setTimeout(() => button.click(), 0);

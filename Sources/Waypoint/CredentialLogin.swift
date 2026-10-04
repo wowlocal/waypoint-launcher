@@ -45,15 +45,36 @@ final class CredentialTokenFetcher {
                             return
                         }
                         do {
-                            let result = try await view.callAsyncJavaScript(LoginForm.script, arguments: [
+                            var arguments: [String: Any] = [
                                 "expectedHost": url.host!, "username": credentials.username, "password": credentials.password,
                                 "allowUsername": !submittedUsername && !submittedPassword,
                                 "allowPassword": !submittedPassword,
-                            ], contentWorld: .defaultClient) as? String
+                                "submit": false,
+                            ]
+                            let result = try await view.callAsyncJavaScript(LoginForm.script, arguments: arguments,
+                                                                           contentWorld: .defaultClient) as? String
                             guard !Task.isCancelled, self?.continuation != nil else { return }
                             switch result {
-                            case "username": submittedUsername = true
-                            case "password": submittedPassword = true
+                            case "username", "password":
+                                // Consume the submission BEFORE calling JS:
+                                // redirects can destroy its result context.
+                                if result == "password" { submittedPassword = true } else { submittedUsername = true }
+                                arguments["allowUsername"] = result == "username"
+                                arguments["allowPassword"] = result == "password"
+                                arguments["submit"] = true
+                                let submission = try await view.callAsyncJavaScript(LoginForm.script, arguments: arguments,
+                                                                                    contentWorld: .defaultClient) as? String
+                                if submission == "interaction", !Task.isCancelled {
+                                    self?.finish(.interaction(view))
+                                    return
+                                }
+                                if submission == "temporary", !Task.isCancelled {
+                                    self?.finish(.failed)
+                                    return
+                                }
+                            case "temporary":
+                                self?.finish(.failed)
+                                return
                             case "interaction":
                                 self?.finish(.interaction(view))
                                 return
@@ -112,11 +133,12 @@ enum CredentialEditor {
             [NSTextField(labelWithString: "Password:"), password],
         ])
         grid.column(at: 0).xPlacement = .trailing
+        grid.column(at: 1).xPlacement = .fill
         grid.columnSpacing = 8
         grid.rowSpacing = 8
         grid.rowAlignment = .firstBaseline
         grid.frame = NSRect(x: 0, y: 0, width: 360, height: 60)
-        email.widthAnchor.constraint(equalToConstant: 270).isActive = true
+        password.widthAnchor.constraint(equalTo: email.widthAnchor).isActive = true
         alert.accessoryView = grid
         alert.window.initialFirstResponder = email.stringValue.isEmpty ? email : password
         NSApp.activate()
