@@ -79,23 +79,39 @@ func parseDuration(_ text: String) -> TimeInterval? {
     }
 }
 
-/// `launch <uid> [--state file] [--dry-run]`: starts a game with the saved
+/// `launch <uid> [--path root] [--state file] [--dry-run]`: starts a game with the saved
 /// sign-in token (from the app or Battle.net). The terminal can't show the
 /// web login, so sign in once in the app if there's no token yet.
 func launch(_ args: [String]) {
-    let usage = "usage: waypoint-cli launch <uid> [--state file] [--dry-run]"
+    let usage = "usage: waypoint-cli launch <uid> [--path install-root] [--state file] [--dry-run]"
     var positional: [String] = []
     var state: String?
+    var path: String?
     var i = 0
     while i < args.count {
         if args[i] == "--state", i + 1 < args.count { state = args[i + 1]; i += 2; continue }
+        if args[i] == "--path", i + 1 < args.count { path = args[i + 1]; i += 2; continue }
         if !args[i].hasPrefix("--") { positional.append(args[i]) }
         i += 1
     }
     guard positional.count == 1 else { fail(usage) }
     let store = state.map { InstallStateStore(file: URL(fileURLWithPath: $0)) } ?? InstallStateStore()
-    guard let game = GameLibrary(stateStore: store).games().first(where: { $0.install.uid == positional[0] }) else {
-        fail("no installed game with uid \(positional[0])")
+    let game: Game
+    if let path {
+        // A specific install, e.g. a test copy next to Battle.net's own.
+        // Compare resolved paths: /tmp and /private/tmp name the same folder.
+        func resolved(_ p: String) -> String { URL(fileURLWithPath: p).standardizedFileURL.resolvingSymlinksInPath().path }
+        let root = resolved(path)
+        guard let product = InstallableProduct.all.first(where: { $0.uid == positional[0] }) else { fail("unknown uid \(positional[0])") }
+        let recorded = store.load()[product.uid].flatMap { $0.install(uid: product.uid) }.flatMap { resolved($0.installPath) == root ? $0 : nil }
+        game = GameCatalog.game(for: recorded ?? ProductInstall(uid: product.uid, productCode: product.productCode, installPath: root,
+                                                                 region: Region.preferred(games: GameLibrary().games()).rawValue,
+                                                                 textLanguage: product.defaultLanguage()))
+    } else {
+        guard let found = GameLibrary(stateStore: store).games().first(where: { $0.install.uid == positional[0] }) else {
+            fail("no installed game with uid \(positional[0])")
+        }
+        game = found
     }
     do {
         let plan = try GameLauncher.plan(for: game)

@@ -130,3 +130,11 @@ private func tempDir() throws -> URL {
     #expect(Diagnostics.describe(lost) == "NSURLErrorDomain -1005: The network connection was lost. (https://cdn.example/tpr/wow/data/aa/bb/aabb)")
     #expect(Diagnostics.describe(TACTError.notFound("thing")) == "Not found: thing")
 }
+
+@Test func newInstallsDefaultToTheRegionInstalledGamesUse() {
+    func game(_ uid: String, _ region: String) -> Game {
+        GameCatalog.game(for: ProductInstall(uid: uid, productCode: uid, installPath: "/nonexistent", region: region))
+    }
+    #expect(Region.preferred(games: [game("hs_beta", "eu"), game("w3", "eu"), game("wow", "us")]) == .eu)
+    #expect(Region.preferred(games: []) == Region.default())
+}

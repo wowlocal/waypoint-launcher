@@ -490,7 +490,7 @@ public struct InstalledBuild: Codable, Sendable, Equatable {
     }
 
     /// The install this record describes, if it has enough to stand alone.
-    func install(uid: String) -> ProductInstall? {
+    public func install(uid: String) -> ProductInstall? {
         guard let productCode, let installPath else { return nil }
         return ProductInstall(uid: uid, productCode: productCode, installPath: installPath, region: region,
                               textLanguage: textLanguage, version: version, buildConfig: buildConfig,

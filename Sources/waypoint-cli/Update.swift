@@ -90,7 +90,7 @@ func install(_ args: [String]) async {
     guard positional.count == 2,
           let product = InstallableProduct.all.first(where: { $0.uid == positional[0] || $0.productCode == positional[0] })
     else { fail(usage) }
-    guard let region = options["--region"].map({ Region(rawValue: $0) }) ?? Region.default() else { fail(usage) }
+    guard let region = options["--region"].map({ Region(rawValue: $0) }) ?? Region.preferred(games: GameLibrary().games()) else { fail(usage) }
     let language = options["--language"] ?? product.defaultLanguage()
     guard product.languages.contains(language) else { fail("\(product.displayName) has no \(language); pick one of \(product.languages.joined(separator: " "))") }
     let pattern = options["--only"]

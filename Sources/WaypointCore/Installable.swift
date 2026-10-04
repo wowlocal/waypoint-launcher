@@ -105,6 +105,14 @@ public struct InstallableProduct: Sendable, Identifiable, Equatable {
 }
 
 extension Region {
+    /// The region for a new install: the one the installed games already use
+    /// (a Battle.net account lives in one region), else the system's.
+    public static func preferred(games: [Game]) -> Region {
+        let used = games.compactMap { $0.install.region.flatMap(Region.init(rawValue:)) }
+        let counts = Dictionary(used.map { ($0, 1) }, uniquingKeysWith: +)
+        return counts.max { $0.value < $1.value }?.key ?? .default()
+    }
+
     /// The Battle.net region for a country: Americas and Oceania play on US,
     /// East Asia on KR, mainland China on CN, everyone else on EU.
     public static func `default`(for country: String? = Locale.current.region?.identifier) -> Region {
