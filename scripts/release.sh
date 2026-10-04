@@ -155,7 +155,7 @@ cp "$dmg" "$feed_dir/"
 rm -rf "$feed_dir"
 signature="$(sed -n 's/.*sparkle:edSignature="\([^"]*\)".*/\1/p' "$dist/appcast.xml" | awk 'NR == 1')"
 [[ -n "$signature" ]] || fail "appcast has no EdDSA signature"
-"$sparkle_bin/sign_update" --verify "$dmg" "$signature" || fail "appcast signature doesn't match the DMG"
+"$sparkle_bin/sign_update" --account waypoint --verify "$dmg" "$signature" || fail "appcast signature doesn't match the DMG"
 grep -q "url=\"$public_base/${dmg:t}\"" "$dist/appcast.xml" || fail "appcast points somewhere unexpected"
 print -P "%F{green}Ready:%f $dmg"
 
