@@ -120,3 +120,13 @@ private func tempDir() throws -> URL {
     try FileManager.default.removeItem(at: folder)
     #expect(library.installs().isEmpty, "a deleted install disappears")
 }
+
+@Test func errorsLogAsOneCompactLine() {
+    let lost = NSError(domain: NSURLErrorDomain, code: -1005, userInfo: [
+        NSLocalizedDescriptionKey: "The network connection was lost.",
+        NSURLErrorFailingURLStringErrorKey: "https://cdn.example/tpr/wow/data/aa/bb/aabb",
+        "_NSURLErrorRelatedURLSessionTaskErrorKey": ["LocalDownloadTask <x>"],
+    ])
+    #expect(Diagnostics.describe(lost) == "NSURLErrorDomain -1005: The network connection was lost. (https://cdn.example/tpr/wow/data/aa/bb/aabb)")
+    #expect(Diagnostics.describe(TACTError.notFound("thing")) == "Not found: thing")
+}

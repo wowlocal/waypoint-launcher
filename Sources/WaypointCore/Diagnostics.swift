@@ -221,9 +221,22 @@ public final class Diagnostics: @unchecked Sendable {
         case let v as Double: v
         case let v as String: v
         case let v as URL: v.path
-        case let v as Error: String(describing: v)
+        case let v as Error: describe(v)
         default: String(describing: value)
         }
+    }
+
+    /// One line per error: our own errors as they describe themselves,
+    /// system ones as `domain code: description` (not the userInfo dump).
+    static func describe(_ error: Error) -> String {
+        if !(type(of: error) is NSError.Type) {
+            let text = String(describing: error)
+            if !text.contains("UserInfo=") { return text }
+        }
+        let ns = error as NSError
+        var text = "\(ns.domain) \(ns.code): \(ns.localizedDescription)"
+        if let url = ns.userInfo[NSURLErrorFailingURLStringErrorKey] as? String { text += " (\(url))" }
+        return text
     }
 
     nonisolated(unsafe) private static let formatter: ISO8601DateFormatter = {
