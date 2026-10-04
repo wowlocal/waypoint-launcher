@@ -9,13 +9,25 @@ final class AppModel {
         case idle
         case signingIn
         case launching
+        case updating(UpdateProgress?)
         case failed(String)
+
+        static func == (a: Phase, b: Phase) -> Bool {
+            switch (a, b) {
+            case (.idle, .idle), (.signingIn, .signingIn), (.launching, .launching), (.updating, .updating): true
+            case (.failed(let x), .failed(let y)): x == y
+            default: false
+            }
+        }
     }
 
     private(set) var games: [Game] = []
     /// Game uid -> phase, so each row shows its own progress.
     private(set) var phases: [String: Phase] = [:]
     private(set) var running: Set<String> = []
+    /// Game uid -> result of the last update check.
+    private(set) var updates: [String: UpdateCheck] = [:]
+    private var lastUpdateCheck: Date?
 
     /// nil = use the region each game was installed for.
     var regionOverride: Region? {
@@ -36,6 +48,11 @@ final class AppModel {
                 MainActor.assumeIsolated { self?.refreshRunning() }
             })
         }
+        observers.append(NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { _ = Task { await self?.checkForUpdates() } }
+        })
+        Task { await checkForUpdates(force: true) }
     }
 
     func reload() {
@@ -43,11 +60,57 @@ final class AppModel {
         refreshRunning()
     }
 
+    // MARK: Updates
+
+    func availableUpdate(for game: Game) -> UpdateCheck? {
+        guard let check = updates[game.id], check.isUpdateAvailable else { return nil }
+        return check
+    }
+
+    func canUpdate(_ game: Game) -> Bool {
+        GameUpdater.canUpdate(game.family) && game.appURL != nil && !running.contains(game.id) && !isBusy(game)
+    }
+
+    /// Asks Blizzard's version service which build is live. Cheap (one small
+    /// request per game), throttled to every 15 minutes unless forced.
+    func checkForUpdates(force: Bool = false) async {
+        if !force, let last = lastUpdateCheck, Date().timeIntervalSince(last) < 15 * 60 { return }
+        lastUpdateCheck = Date()
+        for game in games where game.family != .other && game.appURL != nil {
+            if let check = try? await GameUpdater(install: game.install).check() {
+                updates[game.id] = check
+            }
+        }
+    }
+
+    /// Downloads and installs the latest build; with `verify`, re-checks
+    /// every file and repairs what's broken.
+    func update(_ game: Game, verify: Bool = false) async {
+        guard canUpdate(game) else { return }
+        phases[game.id] = .updating(nil)
+        do {
+            let updater = GameUpdater(install: game.install)
+            let plan = try await updater.plan(target: updates[game.id]?.latest, verify: verify)
+            if !plan.isEmpty {
+                try await updater.apply(plan) { [weak self] progress in
+                    Task { @MainActor in
+                        if case .updating = self?.phases[game.id] { self?.phases[game.id] = .updating(progress) }
+                    }
+                }
+            }
+            reload()
+            await checkForUpdates(force: true)
+            phases[game.id] = .idle
+        } catch {
+            phases[game.id] = .failed(String(describing: error))
+        }
+    }
+
     func phase(of game: Game) -> Phase { phases[game.id] ?? .idle }
 
     func isBusy(_ game: Game) -> Bool {
         switch phase(of: game) {
-        case .signingIn, .launching: true
+        case .signingIn, .launching, .updating: true
         default: false
         }
     }

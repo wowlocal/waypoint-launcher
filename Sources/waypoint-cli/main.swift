@@ -49,6 +49,15 @@ case "plan":
         fail("\(error)")
     }
 
+case "check-updates":
+    await checkUpdates()
+
+case "update":
+    await update(Array(args.dropFirst()))
+
+case "fetch":
+    await fetch(Array(args.dropFirst()))
+
 default:
-    fail("usage: waypoint-cli [list | plan <uid> | check-tokens [GAMEKEY…]]")
+    fail("usage: waypoint-cli [list | plan <uid> | check-tokens [GAMEKEY…] | check-updates | update <uid> [--verify] [--dry-run] | fetch <uid> <regex> <dir>]")
 }

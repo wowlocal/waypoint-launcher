@@ -21,12 +21,20 @@ struct WaypointApp: App {
 
         MenuBarExtra("Waypoint", systemImage: "gamecontroller") {
             ForEach(model.games.filter(\.isSupported)) { game in
-                Button(model.running.contains(game.id) ? "\(game.displayName) (running)" : "Play \(game.displayName)") {
-                    Task { await model.play(game) }
+                if let update = model.availableUpdate(for: game), GameUpdater.canUpdate(game.family) {
+                    Button("Update \(game.displayName) to \(update.latest.name)") {
+                        Task { await model.update(game) }
+                    }
+                    .disabled(!model.canUpdate(game))
+                } else {
+                    Button(model.running.contains(game.id) ? "\(game.displayName) (running)" : "Play \(game.displayName)") {
+                        Task { await model.play(game) }
+                    }
+                    .disabled(!model.canPlay(game))
                 }
-                .disabled(!model.canPlay(game))
             }
             Divider()
+            Button("Check for Updates") { Task { await model.checkForUpdates(force: true) } }
             Button("Rescan Games") { model.reload() }
             Button("Quit Waypoint") { NSApp.terminate(nil) }.keyboardShortcut("q")
         }
@@ -59,6 +67,7 @@ struct LibraryView: View {
                 .labelsHidden()
                 .fixedSize()
                 Spacer()
+                Button("Check for Updates") { Task { await model.checkForUpdates(force: true) } }
                 Button("Rescan") { model.reload() }
             }
             .padding(10)
@@ -81,6 +90,16 @@ struct GameRow: View {
                 if case .failed(let message) = model.phase(of: game) {
                     Text(message).font(.caption).foregroundStyle(.red).lineLimit(2)
                 }
+                if case .updating(let progress) = model.phase(of: game) {
+                    ProgressView(value: progress?.fraction ?? 0)
+                        .frame(maxWidth: 220)
+                    Text(progressText(progress)).font(.caption2).foregroundStyle(.secondary).monospacedDigit()
+                } else if let update = model.availableUpdate(for: game) {
+                    Text(GameUpdater.canUpdate(game.family)
+                         ? "Update available: \(update.latest.name)"
+                         : "Update \(update.latest.name) available in Battle.net")
+                        .font(.caption).foregroundStyle(.orange)
+                }
             }
             Spacer()
             action
@@ -101,6 +120,13 @@ struct GameRow: View {
         return parts.joined(separator: " · ")
     }
 
+    private func progressText(_ progress: UpdateProgress?) -> String {
+        guard let progress else { return "Checking files…" }
+        let done = ByteCountFormatter.string(fromByteCount: Int64(progress.completedBytes), countStyle: .file)
+        let total = ByteCountFormatter.string(fromByteCount: Int64(progress.totalBytes), countStyle: .file)
+        return "\(Int(progress.fraction * 100))% · \(done) of \(total)"
+    }
+
     @ViewBuilder private var action: some View {
         if model.running.contains(game.id) {
             Text("Running").font(.callout).foregroundStyle(.secondary)
@@ -113,13 +139,30 @@ struct GameRow: View {
                 ProgressView().controlSize(.small).help("Signing in…")
             case .launching:
                 ProgressView().controlSize(.small).help("Starting…")
+            case .updating:
+                Text("Updating…").font(.callout).foregroundStyle(.secondary)
             case .idle, .failed:
-                Button("Play") { Task { await model.play(game) } }
-                    .buttonStyle(.borderedProminent)
-                    .disabled(!model.canPlay(game))
-                    .contextMenu {
-                        Button("Sign In Again and Play") { Task { await model.play(game, forceSignIn: true) } }
+                Group {
+                    if model.availableUpdate(for: game) != nil, GameUpdater.canUpdate(game.family) {
+                        Button("Update") { Task { await model.update(game) } }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(!model.canUpdate(game))
+                    } else {
+                        Button("Play") { Task { await model.play(game) } }
+                            .buttonStyle(.borderedProminent)
+                            .disabled(!model.canPlay(game))
                     }
+                }
+                .contextMenu {
+                    if model.availableUpdate(for: game) != nil {
+                        Button("Play Without Updating") { Task { await model.play(game) } }
+                    }
+                    Button("Sign In Again and Play") { Task { await model.play(game, forceSignIn: true) } }
+                    if GameUpdater.canUpdate(game.family) {
+                        Divider()
+                        Button("Verify Files") { Task { await model.update(game, verify: true) } }
+                    }
+                }
             }
         }
     }

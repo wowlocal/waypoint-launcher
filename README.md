@@ -36,17 +36,18 @@ The only thing you really need a launcher for is logging the game in. Waypoint d
 
 - **Native.** Written in Swift, built only for arm64.
 - **One sign-in.** Uses the official Battle.net web login once. After that every launch is one click.
+- **Updates games itself.** It checks Blizzard's servers, downloads only the files that changed, verifies every one of them, and swaps them in. Hearthstone only for now.
 - **Finds your games.** Reads Battle.net's install list and falls back to scanning the game folders, so it keeps working after you delete Battle.net.
 - **Changes nothing in the game.** No patches and no injected code: the login is handed over exactly the way Battle.net does it.
 - **Menu bar** quick launch.
 
 ## Supported games
 
-| Game | Status |
-|---|---|
-| Hearthstone | ✅ **Works.** Tested natively with the Battle.net app and its Agent fully quit |
-| World of Warcraft: Retail, Classic, Classic Era | 🧪 Implemented, not yet tested on macOS |
-| Warcraft III: Reforged | ❌ The game itself is Intel-only, so Rosetta is unavoidable |
+| Game | Launch | Updates |
+|---|---|---|
+| Hearthstone | ✅ Tested natively, with the Battle.net app and its Agent fully quit | ✅ Through Waypoint |
+| World of Warcraft: Retail, Classic, Classic Era | 🧪 Implemented, not yet tested on macOS | Through Battle.net for now |
+| Warcraft III: Reforged | ❌ The game itself is Intel-only, so Rosetta is unavoidable | — |
 
 ## Build
 
@@ -67,10 +68,16 @@ Move `Waypoint.app` to `/Applications` if you want to keep it.
 2. The first time, sign in to Battle.net in the window that appears. Two-factor auth works.
 3. That's it. Later launches skip the login.
 
-If a game ever rejects the login, right-click **Play** and choose **Sign In Again and Play**.
+When a new version is out, **Play** turns into **Update**, with a progress bar while it downloads.
+
+Right-click the button for more:
+
+- **Sign In Again and Play**: use this if a game ever rejects the login.
+- **Verify Files**: re-checks every file and repairs broken ones.
+- **Play Without Updating**: shown only when an update is waiting.
 
 > [!NOTE]
-> For now the Battle.net app is still what installs and patches your games (see [Roadmap](#roadmap)). Waypoint launches whatever is installed. When a patch is out, update once through Battle.net.
+> Installing a game from scratch, and updating World of Warcraft, still need the Battle.net app for now (see [Roadmap](#roadmap)).
 
 ## How it works
 
@@ -121,6 +128,17 @@ sequenceDiagram
 
 Games are started with `posix_spawn` and disclaim the launcher as their responsible process, like apps started by Battle.net. So privacy prompts, such as the microphone for WoW voice chat, belong to the game.
 
+**Updates** use Blizzard's content delivery protocol (TACT):
+
+1. Ask `https://<region>.version.battle.net/v2/products/hsb/versions` which build is live.
+2. Fetch that build's config and *install manifest* from the CDN. The manifest lists every file with its MD5 and tags (platform, region, language, content).
+3. Select files with the tags Battle.net recorded for your install. For Hearthstone that's exactly the 5398 files in its folder.
+4. Diff against the installed build's manifest. Only files whose hash changed are downloaded. Without the old manifest, local files are hashed instead (this is what **Verify Files** does).
+5. Look up each file's encoded key in the *encoding* table and its location in the CDN archive indexes, then download it with an HTTP range request, decode the BLTE container chunk by chunk, and check the MD5.
+6. Once every file is downloaded and verified, swap them in, then delete the files the new build no longer has.
+
+Downloads are staged in `.waypoint-staging` inside the game folder, so an interrupted update resumes where it stopped. Updating refuses to run while the game is open.
+
 **Finding games.** The list comes from `/Users/Shared/Battle.net/Agent/product.db` (protobuf), or from the `.product.db` inside each game folder.
 
 </details>
@@ -131,16 +149,22 @@ Games are started with `posix_spawn` and disclaim the launcher as their responsi
 xcrun swift run waypoint-cli list            # installed games and whether they run natively
 xcrun swift run waypoint-cli plan hs_beta    # dry run: how a game would be launched
 xcrun swift run waypoint-cli check-tokens    # verify the cipher on tokens Battle.net wrote
+xcrun swift run waypoint-cli check-updates   # installed vs. live version
+xcrun swift run waypoint-cli update hs_beta --dry-run           # what an update would download
+xcrun swift run waypoint-cli update hs_beta --verify --dry-run  # hash-check the whole install
+xcrun swift run waypoint-cli fetch hs_beta '^Strings/' /tmp/hs  # download files into another folder
 xcrun swift test
+WAYPOINT_NETWORK_TESTS=1 xcrun swift test --filter liveUpdate  # real update, 36.6.0 → live, in a temp folder
 ```
 
 ## Roadmap
 
 - [x] Hearthstone
 - [x] Sign in once, launch with one click
+- [x] Hearthstone updates without Battle.net
 - [ ] World of Warcraft tested on macOS
-- [ ] Install and patch games without Battle.net (TACT/NGDP)
-- [ ] Hearthstone in-game shop without Battle.net (untested)
+- [ ] World of Warcraft updates (its data lives in CASC storage)
+- [ ] Install games from scratch
 - [ ] Prebuilt, notarized releases
 - [ ] App icon
 

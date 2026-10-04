@@ -12,15 +12,22 @@ public struct ProductInstall: Equatable, Sendable {
     public var region: String?
     public var textLanguage: String?
     public var version: String?
+    /// Build config hash of the installed build.
+    public var buildConfig: String?
+    /// Install tags Battle.net selected, e.g. `OSX base … EU? enUS speech?:… enUS text?`.
+    public var tagString: String?
 
     public init(uid: String, productCode: String, installPath: String,
-                region: String? = nil, textLanguage: String? = nil, version: String? = nil) {
+                region: String? = nil, textLanguage: String? = nil, version: String? = nil,
+                buildConfig: String? = nil, tagString: String? = nil) {
         self.uid = uid
         self.productCode = productCode
         self.installPath = installPath
         self.region = region
         self.textLanguage = textLanguage
         self.version = version
+        self.buildConfig = buildConfig
+        self.tagString = tagString
     }
 }
 
@@ -33,7 +40,8 @@ public struct ProductInstall: Equatable, Sendable {
 ///                     CachedProductState cached_product_state = 4; }
 ///   UserSettings    { install_path = 1; play_region = 2; selected_text_language = 6; }
 ///   CachedProductState { BaseProductState base_product_state = 1; }
-///   BaseProductState   { current_version_str = 7; }
+///   BaseProductState   { current_version_str = 7; completed_build_keys = 12;
+///                        active_build_key = 14; active_tag_string = 17; }
 public enum ProductDB {
     public static let agentDatabaseURL = URL(fileURLWithPath: "/Users/Shared/Battle.net/Agent/product.db")
 
@@ -66,7 +74,7 @@ public enum ProductDB {
               let path = settings[1]?.first?.string, !path.isEmpty
         else { return nil }
 
-        let version = try fields[4]?.first?.message?.fields()[1]?.first?.message?.fields()[7]?.first?.string
+        let state = try fields[4]?.first?.message?.fields()[1]?.first?.message?.fields() ?? [:]
 
         return ProductInstall(
             uid: uid,
@@ -74,7 +82,9 @@ public enum ProductDB {
             installPath: path,
             region: settings[2]?.first?.string.nonEmpty,
             textLanguage: settings[6]?.first?.string.nonEmpty,
-            version: version.nonEmpty
+            version: state[7]?.first?.string.nonEmpty,
+            buildConfig: state[14]?.first?.string.nonEmpty ?? state[12]?.last?.string.nonEmpty,
+            tagString: state[17]?.first?.string.nonEmpty
         )
     }
 }

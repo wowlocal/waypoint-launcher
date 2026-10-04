@@ -133,6 +133,7 @@ public struct GameLibrary {
     /// Battle.net app is removed.
     public var searchRoots: [URL]
     public var fileManager: FileManager
+    public var stateStore: InstallStateStore
 
     public static let defaultSearchRoots: [URL] = [
         "/Applications/Hearthstone",
@@ -142,10 +143,12 @@ public struct GameLibrary {
 
     public init(agentDatabase: URL = ProductDB.agentDatabaseURL,
                 searchRoots: [URL] = GameLibrary.defaultSearchRoots,
-                fileManager: FileManager = .default) {
+                fileManager: FileManager = .default,
+                stateStore: InstallStateStore = InstallStateStore()) {
         self.agentDatabase = agentDatabase
         self.searchRoots = searchRoots
         self.fileManager = fileManager
+        self.stateStore = stateStore
     }
 
     public func installs() -> [ProductInstall] {
@@ -167,7 +170,7 @@ public struct GameLibrary {
                 add(install)
             }
         }
-        return order.compactMap { byUID[$0] }
+        return order.compactMap { byUID[$0] }.map(stateStore.apply(to:))
     }
 
     public func games() -> [Game] {
