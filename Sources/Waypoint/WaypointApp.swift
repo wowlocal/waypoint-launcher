@@ -8,6 +8,8 @@ struct WaypointApp: App {
     @Environment(\.openWindow) private var openWindow
     @State private var model = AppModel()
     @State private var appUpdater = AppUpdater()
+    /// The menu bar item is opt-in: most menu bars are crowded already.
+    @AppStorage("showsMenuBarItem") private var showsMenuBarItem = false
 
     var body: some Scene {
         let _ = appDelegate.openWindow = openWindow
@@ -27,6 +29,7 @@ struct WaypointApp: App {
                         .disabled(!appUpdater.canCheck)
                 }
                 Divider()
+                Toggle("Show in Menu Bar", isOn: $showsMenuBarItem)
                 Button("Sign Out of Battle.net") { Task { await model.signOut() } }
             }
             CommandGroup(after: .help) {
@@ -37,7 +40,7 @@ struct WaypointApp: App {
             }
         }
 
-        MenuBarExtra("Waypoint", systemImage: "gamecontroller") {
+        MenuBarExtra("Waypoint", systemImage: "gamecontroller", isInserted: $showsMenuBarItem) {
             ForEach(model.games.filter(\.isSupported)) { game in
                 if let update = model.availableUpdate(for: game), GameUpdater.canUpdate(game.family) {
                     Button("Update \(game.displayName) to \(update.latest.name)") {

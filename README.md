@@ -40,10 +40,10 @@ The only thing you really need a launcher for is logging the game in. Waypoint d
 - **Native.** Written in Swift, built only for arm64.
 - **One sign-in.** Uses the official Battle.net web login once. After that every launch is one click.
 - **Updates games itself.** It checks Blizzard's servers, downloads only the files that changed, verifies every one of them, and swaps them in. Hearthstone only for now.
-- **Updates itself** in the background with [Sparkle](https://sparkle-project.org). New versions download silently and install when you quit. There are no update dialogs; a small "Restart to Update" appears in the window footer and the menu bar menu.
+- **Updates itself** in the background with [Sparkle](https://sparkle-project.org). New versions download silently and install when you quit. There are no update dialogs; a small "Restart to Update" appears in the window footer (and in the menu bar menu, if you turned it on).
 - **Finds your games.** Reads Battle.net's install list and falls back to scanning the game folders, so it keeps working after you delete Battle.net.
 - **Changes nothing in the game.** No patches and no injected code: the login is handed over exactly the way Battle.net does it.
-- **Menu bar** quick launch.
+- **Menu bar** quick launch, off by default. Turn it on with Waypoint ▸ Show in Menu Bar.
 
 ## Supported games
 
