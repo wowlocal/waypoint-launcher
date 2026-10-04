@@ -5,16 +5,25 @@ import WaypointCore
 @main
 struct WaypointApp: App {
     @State private var model = AppModel()
+    @State private var appUpdater = AppUpdater()
 
     var body: some Scene {
         Window("Waypoint", id: "main") {
             LibraryView()
                 .environment(model)
+                .environment(appUpdater)
                 .frame(minWidth: 420, idealWidth: 460, minHeight: 260)
         }
         .windowResizability(.contentSize)
         .commands {
             CommandGroup(after: .appInfo) {
+                if let version = appUpdater.readyVersion {
+                    Button("Restart to Update Waypoint \(version)") { appUpdater.restartToUpdate() }
+                } else if appUpdater.isEnabled {
+                    Button("Check for Updates…") { checkForUpdates() }
+                        .disabled(!appUpdater.canCheck)
+                }
+                Divider()
                 Button("Sign Out of Battle.net") { Task { await model.signOut() } }
             }
         }
@@ -34,15 +43,26 @@ struct WaypointApp: App {
                 }
             }
             Divider()
-            Button("Check for Updates") { Task { await model.checkForUpdates(force: true) } }
+            if let version = appUpdater.readyVersion {
+                Button("Restart to Update Waypoint \(version)") { appUpdater.restartToUpdate() }
+            }
+            Button("Check for Updates") { checkForUpdates() }
             Button("Rescan Games") { model.reload() }
             Button("Quit Waypoint") { NSApp.terminate(nil) }.keyboardShortcut("q")
         }
+    }
+
+    /// One button for everything: games (Blizzard's version service) and
+    /// Waypoint itself (Sparkle, in the background).
+    private func checkForUpdates() {
+        appUpdater.checkNow()
+        Task { await model.checkForUpdates(force: true) }
     }
 }
 
 struct LibraryView: View {
     @Environment(AppModel.self) private var model
+    @Environment(AppUpdater.self) private var appUpdater
 
     var body: some View {
         @Bindable var model = model
@@ -57,6 +77,10 @@ struct LibraryView: View {
                 .listStyle(.inset)
             }
             Divider()
+            if appUpdater.status != nil || appUpdater.readyVersion != nil {
+                AppUpdateBar()
+                Divider()
+            }
             HStack {
                 Picker("Region", selection: $model.regionOverride) {
                     Text("Region: as installed").tag(Region?.none)
@@ -67,11 +91,41 @@ struct LibraryView: View {
                 .labelsHidden()
                 .fixedSize()
                 Spacer()
-                Button("Check for Updates") { Task { await model.checkForUpdates(force: true) } }
+                Button("Check for Updates") {
+                    appUpdater.checkNow()
+                    Task { await model.checkForUpdates(force: true) }
+                }
                 Button("Rescan") { model.reload() }
             }
             .padding(10)
         }
+    }
+}
+
+/// Inline status for Waypoint's own updates, instead of Sparkle's windows.
+struct AppUpdateBar: View {
+    @Environment(AppUpdater.self) private var appUpdater
+
+    var body: some View {
+        HStack(spacing: 8) {
+            if appUpdater.isBusy {
+                ProgressView().controlSize(.small)
+            } else {
+                Image(systemName: appUpdater.readyVersion != nil ? "arrow.down.circle.fill" : "info.circle")
+                    .foregroundStyle(appUpdater.readyVersion != nil ? Color.accentColor : .secondary)
+            }
+            Text(appUpdater.status ?? "")
+                .font(.callout)
+                .foregroundStyle(.secondary)
+                .lineLimit(2)
+            Spacer()
+            if appUpdater.readyVersion != nil {
+                Button("Restart to Update") { appUpdater.restartToUpdate() }
+                    .controlSize(.small)
+            }
+        }
+        .padding(.horizontal, 10)
+        .padding(.vertical, 6)
     }
 }
 

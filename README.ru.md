@@ -40,6 +40,7 @@ Battle.net для Mac до сих пор собран только под Intel.
 - **Нативный.** Написан на Swift и собран только под arm64.
 - **Вход один раз.** Через официальный веб-логин Battle.net. Дальше каждый запуск — в один клик.
 - **Сам обновляет игры.** Спрашивает у серверов Blizzard, есть ли новая версия, качает только изменившиеся файлы, проверяет каждый и подменяет их. Пока только Hearthstone.
+- **Обновляется сам** в фоне через [Sparkle](https://sparkle-project.org). Новые версии тихо скачиваются и ставятся, когда ты закрываешь приложение. Окон обновления нет: внизу окна и в меню в строке меню появляется небольшое «Restart to Update».
 - **Сам находит игры.** Читает список установок Battle.net, а если его нет, сканирует папки игр. Поэтому работает и после удаления Battle.net.
 - **Ничего не меняет в игре.** Без патчей и внедрения кода: логин передаётся ровно так же, как это делает Battle.net.
 - **Быстрый запуск** из строки меню.
@@ -74,7 +75,9 @@ open build/Waypoint.app
 <details>
 <summary><b>Как выпустить релиз</b></summary>
 
-`scripts/release.sh` прогоняет тесты, собирает приложение и подписывает его Developer ID (hardened runtime). Потом нотаризует приложение и делает staple, упаковывает его в DMG, подписывает, нотаризует и делает staple для DMG тоже. В конце проверяет результат через Gatekeeper.
+`scripts/release.sh` прогоняет тесты, собирает приложение и подписывает его Developer ID (hardened runtime). Потом нотаризует приложение и делает staple, упаковывает его в DMG, подписывает, нотаризует и делает staple для DMG тоже. Проверяет результат через Gatekeeper, затем пишет `appcast.xml` для Sparkle и проверяет его подпись EdDSA.
+
+Установленные копии берут фид из `releases/latest/download/appcast.xml`, поэтому обновление уходит к пользователям в момент публикации релиза.
 
 ```sh
 # один раз: сохранить данные для нотаризации в Keychain (нужен app-specific пароль)
@@ -83,6 +86,15 @@ xcrun notarytool store-credentials NotaryProfile --apple-id <apple id> --team-id
 
 scripts/release.sh 0.1.0             # → dist/Waypoint-0.1.0.dmg + .sha256
 scripts/release.sh 0.1.0 --publish   # плюс тег v0.1.0 и GitHub Release
+
+scripts/test-self-update.sh          # сквозной тест: старая сборка обновляет себя с локального фида
+```
+
+Обновления подписываются ключом EdDSA, который лежит в Keychain под аккаунтом `waypoint`. Его публичная часть — в `scripts/bundle.sh`. Сделай резервную копию ключа: без него установленные копии не получится обновить.
+
+```sh
+.build/artifacts/sparkle/Sparkle/bin/generate_keys --account waypoint -x waypoint-sparkle.key   # экспорт
+.build/artifacts/sparkle/Sparkle/bin/generate_keys --account waypoint -f waypoint-sparkle.key   # импорт на другом Mac
 ```
 
 </details>
@@ -191,6 +203,7 @@ WAYPOINT_NETWORK_TESTS=1 xcrun swift test --filter liveUpdate  # настоящ�
 - [ ] Обновление World of Warcraft (его данные лежат в хранилище CASC)
 - [ ] Установка игр с нуля
 - [x] Готовые подписанные релизы с нотаризацией
+- [x] Самообновление (Sparkle)
 - [x] Иконка приложения
 
 ## Дисклеймер

@@ -40,6 +40,7 @@ The only thing you really need a launcher for is logging the game in. Waypoint d
 - **Native.** Written in Swift, built only for arm64.
 - **One sign-in.** Uses the official Battle.net web login once. After that every launch is one click.
 - **Updates games itself.** It checks Blizzard's servers, downloads only the files that changed, verifies every one of them, and swaps them in. Hearthstone only for now.
+- **Updates itself** in the background with [Sparkle](https://sparkle-project.org). New versions download silently and install when you quit. There are no update dialogs; a small "Restart to Update" appears in the window footer and the menu bar menu.
 - **Finds your games.** Reads Battle.net's install list and falls back to scanning the game folders, so it keeps working after you delete Battle.net.
 - **Changes nothing in the game.** No patches and no injected code: the login is handed over exactly the way Battle.net does it.
 - **Menu bar** quick launch.
@@ -74,7 +75,9 @@ Move `Waypoint.app` to `/Applications` if you want to keep it.
 <details>
 <summary><b>Making a release</b></summary>
 
-`scripts/release.sh` runs the tests, then builds the app and signs it with your Developer ID (hardened runtime). It notarizes and staples the app, then packs it into a DMG and signs, notarizes and staples that too. Finally it checks the result with Gatekeeper.
+`scripts/release.sh` runs the tests, then builds the app and signs it with your Developer ID (hardened runtime). It notarizes and staples the app, then packs it into a DMG and signs, notarizes and staples that too. It checks the result with Gatekeeper, then writes the Sparkle `appcast.xml` and verifies its EdDSA signature.
+
+Installed copies read their feed from `releases/latest/download/appcast.xml`, so publishing a release is what ships the update.
 
 ```sh
 # once: store notary credentials in the keychain (use an app-specific password)
@@ -83,6 +86,15 @@ xcrun notarytool store-credentials NotaryProfile --apple-id <apple id> --team-id
 
 scripts/release.sh 0.1.0             # → dist/Waypoint-0.1.0.dmg + .sha256
 scripts/release.sh 0.1.0 --publish   # also tags v0.1.0 and creates the GitHub release
+
+scripts/test-self-update.sh          # end-to-end: an old build updates itself from a local feed
+```
+
+Updates are signed with an EdDSA key kept in the keychain under the account `waypoint`. Its public half is in `scripts/bundle.sh`. Back it up somewhere safe: without it, installed copies can't be updated.
+
+```sh
+.build/artifacts/sparkle/Sparkle/bin/generate_keys --account waypoint -x waypoint-sparkle.key   # export
+.build/artifacts/sparkle/Sparkle/bin/generate_keys --account waypoint -f waypoint-sparkle.key   # import on another Mac
 ```
 
 </details>
@@ -191,6 +203,7 @@ WAYPOINT_NETWORK_TESTS=1 xcrun swift test --filter liveUpdate  # real update, 36
 - [ ] World of Warcraft updates (its data lives in CASC storage)
 - [ ] Install games from scratch
 - [x] Prebuilt, notarized releases
+- [x] Self-updates (Sparkle)
 - [x] App icon
 
 ## Disclaimer

@@ -8,9 +8,15 @@ let package = Package(
         .executable(name: "Waypoint", targets: ["Waypoint"]),
         .executable(name: "waypoint-cli", targets: ["waypoint-cli"]),
     ],
+    dependencies: [
+        .package(url: "https://github.com/sparkle-project/Sparkle", exact: "2.9.5"),
+    ],
     targets: [
         .target(name: "WaypointCore"),
-        .executableTarget(name: "Waypoint", dependencies: ["WaypointCore"]),
+        .executableTarget(name: "Waypoint", dependencies: [
+            "WaypointCore",
+            .product(name: "Sparkle", package: "Sparkle"),
+        ]),
         .executableTarget(name: "waypoint-cli", dependencies: ["WaypointCore"]),
         .testTarget(name: "WaypointCoreTests", dependencies: ["WaypointCore"]),
     ]
