@@ -4,8 +4,8 @@
 
 # Waypoint
 
-**Крошечный нативный лаунчер для игр Blizzard на маках с Apple Silicon.**<br>
-Без Battle.net. Без Rosetta. Просто жмёшь Play.
+**Battle.net без лишнего для маков с Apple Silicon.**<br>
+Устанавливает, обновляет и запускает игры Blizzard без приложения Battle.net. Без Rosetta. Просто жмёшь Play.
 
 [![Latest release](https://img.shields.io/github/v/release/wowlocal/waypoint-launcher?color=2ea44f)](https://github.com/wowlocal/waypoint-launcher/releases/latest)
 [![macOS 14+](https://img.shields.io/badge/macOS-14%2B-111?logo=apple&logoColor=white)](#сборка)
@@ -27,18 +27,19 @@ Battle.net для Mac до сих пор собран только под Intel.
 
 Скоро это станет настоящей проблемой: **macOS 27 — последняя версия с полной Rosetta**. Начиная с macOS 28, Apple оставит только урезанную версию для старых игр.
 
-Сам лаунчер на деле нужен только для того, чтобы залогинить игру. Waypoint делает ровно это, и нативно.
+От лаунчера нужно всего три вещи: установить игру, держать её обновлённой и залогинить. Waypoint делает ровно это, нативно и ничего больше.
 
 |  | Battle.net | Waypoint |
 |---|---|---|
 | Архитектура | Intel (Rosetta) | Apple Silicon |
-| Размер на диске | ~1.5 ГБ | **536 КБ** |
+| Размер на диске | ~1.5 ГБ | **6 МБ** |
 | Висит в фоне | приложение + Agent + браузерные хелперы | ничего |
 
 ## Возможности
 
 - **Нативный.** Написан на Swift и собран только под arm64.
 - **Вход один раз.** Через официальный веб-логин Battle.net. Дальше каждый запуск — в один клик.
+- **Устанавливает игры.** Нажми **+** на панели инструментов и выбери игру. Waypoint скачает её прямо с серверов Blizzard и разложит ровно так же, как это делает Battle.net, поэтому игра принимает установку как свою. Прерванная установка продолжится с места остановки. В списке есть все игры Blizzard с версией для Mac; что уже проверено, смотри в разделе [Поддерживаемые игры](#поддерживаемые-игры).
 - **Сам обновляет игры.** Спрашивает у серверов Blizzard, есть ли новая версия, качает только изменившиеся файлы, проверяет каждый и подменяет их. Пока только Hearthstone.
 - **Обновляется сам** в фоне через [Sparkle](https://sparkle-project.org). Новые версии тихо скачиваются и ставятся, когда ты закрываешь приложение. Окон обновления нет: внизу окна (и в меню в строке меню, если оно включено) появляется небольшое «Restart to Update».
 - **Сам находит игры.** Читает список установок Battle.net, а если его нет, сканирует папки игр. Поэтому работает и после удаления Battle.net.
@@ -47,11 +48,12 @@ Battle.net для Mac до сих пор собран только под Intel.
 
 ## Поддерживаемые игры
 
-| Игра | Запуск | Обновления |
-|---|---|---|
-| Hearthstone | ✅ Проверено нативно при полностью закрытых Battle.net и Agent | ✅ Через Waypoint |
-| World of Warcraft: Retail, Classic, Classic Era | 🧪 Реализовано, на macOS ещё не проверено | Пока через Battle.net |
-| Warcraft III: Reforged | ❌ Сама игра только под Intel, без Rosetta не обойтись | — |
+| Игра | Установка | Запуск | Обновления |
+|---|---|---|---|
+| Hearthstone | ✅ Через Waypoint | ✅ Проверено нативно при полностью закрытых Battle.net и Agent | ✅ Через Waypoint |
+| Warcraft III: Reforged | ✅ Проверено: те же файлы, что и в установке самого Battle.net | ✅ Проверено. Сама игра только под Intel, поэтому идёт через Rosetta | Пока через Battle.net |
+| World of Warcraft: Retail, Classic, Classic Era, Anniversary | 🧪 Реализовано, ещё не проверено | 🧪 Реализовано, ещё не проверено | Пока через Battle.net |
+| StarCraft II, StarCraft: Remastered, Diablo III, Heroes of the Storm | 🧪 Реализовано, ещё не проверено | 🧪 Реализовано, ещё не проверено | Пока через Battle.net |
 
 ## Скачать
 
@@ -105,6 +107,8 @@ scripts/test-self-update.sh          # сквозной тест: старая �
 2. В первый раз войди в Battle.net в появившемся окне. Двухфакторка работает.
 3. Всё. При следующих запусках логин не нужен.
 
+Чтобы установить игру, нажми **+** на панели инструментов и выбери её. Укажи, куда ставить (по умолчанию `/Applications`), язык и регион; в окне видно настоящий размер загрузки. Прогресс показывается в строке игры.
+
 Когда выходит новая версия, **Play** превращается в **Update**, а пока идёт загрузка, виден прогресс.
 
 Правая кнопка мыши на кнопке открывает дополнительные действия:
@@ -114,7 +118,7 @@ scripts/test-self-update.sh          # сквозной тест: старая �
 - **Play Without Updating**: появляется, только когда ждёт обновление.
 
 > [!NOTE]
-> Установка игры с нуля и обновление World of Warcraft пока по-прежнему требуют Battle.net (см. [Планы](#планы)).
+> Обновлять игры, кроме Hearthstone, пока по-прежнему нужно через Battle.net (см. [Планы](#планы)).
 
 ## Как это работает
 
@@ -162,6 +166,7 @@ sequenceDiagram
 |---|---|---|
 | Hearthstone | `Hearthstone.app/…/Hearthstone -launch -uid hs_beta` | папка установки |
 | WoW | `World of Warcraft.app/…/World of Warcraft -launcherlogin -uid wow` | папка версии (`_retail_`, `_classic_`, …) |
+| Остальные игры | `<Game>.app/…/<Game> -launch -uid <uid>` | папка установки (Warcraft III: `_retail_`) |
 
 Игры запускаются через `posix_spawn` и сами отвечают за себя перед системой, как и при запуске из Battle.net. Поэтому системные запросы разрешений (например, микрофон для голосового чата WoW) приходят от игры, а не от лаунчера.
 
@@ -176,7 +181,9 @@ sequenceDiagram
 
 Загрузки складываются в `.waypoint-staging` внутри папки игры, поэтому прерванное обновление продолжится с места остановки. Пока игра открыта, обновление не запустится.
 
-**Поиск игр.** Список берётся из `/Users/Shared/Battle.net/Agent/product.db` (protobuf) или из `.product.db` в папке каждой игры.
+**Установка.** Hearthstone хранит файлы как есть, поэтому его установка — это обновление в пустую папку. Все остальные игры держат данные в локальном хранилище CASC (`Data/data`), которое игра читает сама. Waypoint скачивает файлы, которые download-манифест сборки перечисляет для твоей платформы и языка, и пишет архивы `data.###`, 16 индексов `.idx` и `shmem` байт в байт так же, как Battle.net Agent. Само приложение и остальные файлы из install-манифеста кладутся в папку игры как есть, рядом с `.build.info`, `Data/config` и `Data/indices`. Установка Warcraft III через Waypoint содержит ровно те же 73 972 файла, что и установка этой сборки через Battle.net, и игра из неё запускается.
+
+**Поиск игр.** Список берётся из `/Users/Shared/Battle.net/Agent/product.db` (protobuf) или из `.product.db` в папке каждой игры, плюс игры, которые установил сам Waypoint.
 
 </details>
 
@@ -190,6 +197,8 @@ xcrun swift run waypoint-cli check-updates   # установленная вер
 xcrun swift run waypoint-cli update hs_beta --dry-run           # что скачает обновление
 xcrun swift run waypoint-cli update hs_beta --verify --dry-run  # проверить хэши всей установки
 xcrun swift run waypoint-cli fetch hs_beta '^Strings/' /tmp/hs  # скачать файлы в другую папку
+xcrun swift run waypoint-cli install w3 /Applications/Warcraft\ III --dry-run  # что скачает установка игры
+xcrun swift run waypoint-cli launch w3        # запустить установленную игру
 xcrun swift test
 WAYPOINT_NETWORK_TESTS=1 xcrun swift test --filter liveUpdate  # настоящее обновление 36.6.0 → актуальная, во временной папке
 ```
@@ -199,16 +208,18 @@ WAYPOINT_NETWORK_TESTS=1 xcrun swift test --filter liveUpdate  # настоящ�
 - [x] Hearthstone
 - [x] Вход один раз, запуск в один клик
 - [x] Обновление Hearthstone без Battle.net
+- [x] Установка игр с нуля, для всех игр Blizzard с версией для Mac
+- [x] Warcraft III установлен и запущен без Battle.net
 - [ ] Проверить World of Warcraft на macOS
-- [ ] Обновление World of Warcraft (его данные лежат в хранилище CASC)
-- [ ] Установка игр с нуля
+- [ ] Обновление игр с хранилищем CASC (World of Warcraft, StarCraft, Diablo III, Warcraft III, Heroes of the Storm)
 - [x] Готовые подписанные релизы с нотаризацией
 - [x] Самообновление (Sparkle)
 - [x] Иконка приложения
+- [x] Нативный интерфейс на AppKit (без SwiftUI)
 
 ## Дисклеймер
 
-Waypoint — неофициальный фанатский проект. Он не связан с Blizzard Entertainment и не одобрен ею. Blizzard, Battle.net, Hearthstone, World of Warcraft и Warcraft — торговые марки Blizzard Entertainment, Inc.
+Waypoint — неофициальный фанатский проект. Он не связан с Blizzard Entertainment и не одобрен ею. Blizzard, Battle.net, Hearthstone, World of Warcraft, Warcraft, StarCraft, Diablo и Heroes of the Storm — торговые марки Blizzard Entertainment, Inc.
 
 Blizzard официально не поддерживает запуск игр в обход Battle.net. Этот подход используют годами (см. Благодарности), но гарантий нет, и Blizzard может в любой момент изменить способ передачи логина. Используй на свой риск.
 

@@ -4,8 +4,8 @@
 
 # Waypoint
 
-**A tiny native launcher for Blizzard games on Apple Silicon Macs.**<br>
-No Battle.net app. No Rosetta. Just press Play.
+**A bloat-free version of Battle.net for Apple Silicon Macs.**<br>
+Install, update and launch Blizzard games without the Battle.net app. No Rosetta. Just press Play.
 
 [![Latest release](https://img.shields.io/github/v/release/wowlocal/waypoint-launcher?color=2ea44f)](https://github.com/wowlocal/waypoint-launcher/releases/latest)
 [![macOS 14+](https://img.shields.io/badge/macOS-14%2B-111?logo=apple&logoColor=white)](#build)
@@ -27,18 +27,19 @@ The Battle.net app for Mac is still Intel-only. Every Apple Silicon Mac needs Ro
 
 That is about to become a real problem: **macOS 27 is the last release with full Rosetta**. From macOS 28 on, Apple keeps only a limited subset for older games.
 
-The only thing you really need a launcher for is logging the game in. Waypoint does just that, natively.
+A launcher only has to do three things: install the game, keep it up to date, and log it in. Waypoint does just that, natively, and nothing else.
 
 |  | Battle.net | Waypoint |
 |---|---|---|
 | Architecture | Intel (Rosetta) | Apple Silicon |
-| Size on disk | ~1.5 GB | **536 KB** |
+| Size on disk | ~1.5 GB | **6 MB** |
 | Runs in the background | App + Agent + browser helpers | Nothing |
 
 ## Features
 
 - **Native.** Written in Swift, built only for arm64.
 - **One sign-in.** Uses the official Battle.net web login once. After that every launch is one click.
+- **Installs games.** Click **+** in the toolbar and pick a game. Waypoint downloads it straight from Blizzard's servers and lays it out exactly the way Battle.net does, so the game takes it as its own. Interrupted installs pick up where they stopped. Every Blizzard game with a Mac version is on the list; [Supported games](#supported-games) shows what has been tested.
 - **Updates games itself.** It checks Blizzard's servers, downloads only the files that changed, verifies every one of them, and swaps them in. Hearthstone only for now.
 - **Updates itself** in the background with [Sparkle](https://sparkle-project.org). New versions download silently and install when you quit. There are no update dialogs; a small "Restart to Update" appears at the bottom of the window (and in the menu bar menu, if you turned it on).
 - **Finds your games.** Reads Battle.net's install list and falls back to scanning the game folders, so it keeps working after you delete Battle.net.
@@ -47,11 +48,12 @@ The only thing you really need a launcher for is logging the game in. Waypoint d
 
 ## Supported games
 
-| Game | Launch | Updates |
-|---|---|---|
-| Hearthstone | ✅ Tested natively, with the Battle.net app and its Agent fully quit | ✅ Through Waypoint |
-| World of Warcraft: Retail, Classic, Classic Era | 🧪 Implemented, not yet tested on macOS | Through Battle.net for now |
-| Warcraft III: Reforged | ❌ The game itself is Intel-only, so Rosetta is unavoidable | — |
+| Game | Install | Launch | Updates |
+|---|---|---|---|
+| Hearthstone | ✅ Through Waypoint | ✅ Tested natively, with the Battle.net app and its Agent fully quit | ✅ Through Waypoint |
+| Warcraft III: Reforged | ✅ Tested: the same files as Battle.net's own install | ✅ Tested. The game itself is Intel-only, so it runs under Rosetta | Through Battle.net for now |
+| World of Warcraft: Retail, Classic, Classic Era, Anniversary | 🧪 Implemented, not yet tested | 🧪 Implemented, not yet tested | Through Battle.net for now |
+| StarCraft II, StarCraft: Remastered, Diablo III, Heroes of the Storm | 🧪 Implemented, not yet tested | 🧪 Implemented, not yet tested | Through Battle.net for now |
 
 ## Download
 
@@ -105,6 +107,8 @@ Updates are signed with an EdDSA key kept in the keychain under the account `way
 2. The first time, sign in to Battle.net in the window that appears. Two-factor auth works.
 3. That's it. Later launches skip the login.
 
+To install a game, click **+** in the toolbar and pick it. Choose where it goes (`/Applications` by default), the language and the region; the sheet shows the real download size. Progress shows in the game's row.
+
 When a new version is out, **Play** turns into **Update**, with a progress bar while it downloads.
 
 Right-click the button for more:
@@ -114,7 +118,7 @@ Right-click the button for more:
 - **Play Without Updating**: shown only when an update is waiting.
 
 > [!NOTE]
-> Installing a game from scratch, and updating World of Warcraft, still need the Battle.net app for now (see [Roadmap](#roadmap)).
+> Updating games other than Hearthstone still needs the Battle.net app for now (see [Roadmap](#roadmap)).
 
 ## How it works
 
@@ -162,6 +166,7 @@ sequenceDiagram
 |---|---|---|
 | Hearthstone | `Hearthstone.app/…/Hearthstone -launch -uid hs_beta` | install folder |
 | WoW | `World of Warcraft.app/…/World of Warcraft -launcherlogin -uid wow` | flavor folder (`_retail_`, `_classic_`, …) |
+| Other games | `<Game>.app/…/<Game> -launch -uid <uid>` | install folder (Warcraft III: `_retail_`) |
 
 Games are started with `posix_spawn` and disclaim the launcher as their responsible process, like apps started by Battle.net. So privacy prompts, such as the microphone for WoW voice chat, belong to the game.
 
@@ -176,7 +181,9 @@ Games are started with `posix_spawn` and disclaim the launcher as their responsi
 
 Downloads are staged in `.waypoint-staging` inside the game folder, so an interrupted update resumes where it stopped. Updating refuses to run while the game is open.
 
-**Finding games.** The list comes from `/Users/Shared/Battle.net/Agent/product.db` (protobuf), or from the `.product.db` inside each game folder.
+**Installs.** Hearthstone keeps its files loose, so installing it is an update into an empty folder. Every other game keeps its data in local CASC storage (`Data/data`), which the game reads itself. Waypoint downloads the files the build's download manifest lists for your platform and language, and writes the `data.###` archives, the 16 `.idx` index files and `shmem` byte for byte the way the Battle.net Agent does. The app and the other files from the install manifest go loose into the game folder, next to `.build.info`, `Data/config` and `Data/indices`. A Warcraft III install made by Waypoint holds exactly the same 73,972 files as Battle.net's own install of that build, and the game launches from it.
+
+**Finding games.** The list comes from `/Users/Shared/Battle.net/Agent/product.db` (protobuf), or from the `.product.db` inside each game folder, plus the games Waypoint installed itself.
 
 </details>
 
@@ -190,6 +197,8 @@ xcrun swift run waypoint-cli check-updates   # installed vs. live version
 xcrun swift run waypoint-cli update hs_beta --dry-run           # what an update would download
 xcrun swift run waypoint-cli update hs_beta --verify --dry-run  # hash-check the whole install
 xcrun swift run waypoint-cli fetch hs_beta '^Strings/' /tmp/hs  # download files into another folder
+xcrun swift run waypoint-cli install w3 /Applications/Warcraft\ III --dry-run  # what installing a game would download
+xcrun swift run waypoint-cli launch w3        # start an installed game
 xcrun swift test
 WAYPOINT_NETWORK_TESTS=1 xcrun swift test --filter liveUpdate  # real update, 36.6.0 → live, in a temp folder
 ```
@@ -199,16 +208,18 @@ WAYPOINT_NETWORK_TESTS=1 xcrun swift test --filter liveUpdate  # real update, 36
 - [x] Hearthstone
 - [x] Sign in once, launch with one click
 - [x] Hearthstone updates without Battle.net
+- [x] Install games from scratch, for every Blizzard game with a Mac version
+- [x] Warcraft III installed and launched without Battle.net
 - [ ] World of Warcraft tested on macOS
-- [ ] World of Warcraft updates (its data lives in CASC storage)
-- [ ] Install games from scratch
+- [ ] Updates for games stored in CASC (World of Warcraft, StarCraft, Diablo III, Warcraft III, Heroes of the Storm)
 - [x] Prebuilt, notarized releases
 - [x] Self-updates (Sparkle)
 - [x] App icon
+- [x] Native AppKit interface (no SwiftUI)
 
 ## Disclaimer
 
-Waypoint is an unofficial fan project. It is not affiliated with or endorsed by Blizzard Entertainment. Blizzard, Battle.net, Hearthstone, World of Warcraft and Warcraft are trademarks of Blizzard Entertainment, Inc.
+Waypoint is an unofficial fan project. It is not affiliated with or endorsed by Blizzard Entertainment. Blizzard, Battle.net, Hearthstone, World of Warcraft, Warcraft, StarCraft, Diablo and Heroes of the Storm are trademarks of Blizzard Entertainment, Inc.
 
 Blizzard doesn't officially support launching games outside the Battle.net app. The approach has been used for years (see Credits), but there are no guarantees, and Blizzard can change the login hand-off at any time. Use at your own risk.
 
