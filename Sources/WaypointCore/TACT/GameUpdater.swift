@@ -65,8 +65,8 @@ public enum UpdateError: Error, CustomStringConvertible {
 /// manifests, download what changed from the CDN, verify every file against
 /// its content hash, then swap the files in.
 ///
-/// WoW keeps its data in a CASC archive store instead, which this doesn't
-/// write yet.
+/// Games that keep their data in local CASC storage go through `GameUpdate`,
+/// which uses this for their loose files.
 public struct GameUpdater: Sendable {
     public var install: ProductInstall
     public var versions: VersionService
@@ -156,8 +156,7 @@ public struct GameUpdater: Sendable {
 
         log("Resolving \(changed.count) files")
         guard let encodingKey = buildConfig.encodedKey("encoding") else { throw TACTError.malformed("build config (no encoding)") }
-        let encoding = try EncodingTable(BLTE.decode(try await cdn.cached(.data, encodingKey)),
-                                         wanted: Set(changed.map(\.contentKey)))
+        let encoding = try EncodingTable(try await cdn.decoded(encodingKey), wanted: Set(changed.map(\.contentKey)))
         var files: [UpdatePlan.File] = try changed.map { entry in
             guard let encoded = encoding.entries[entry.contentKey] else { throw TACTError.notFound("encoding entry for \(entry.path)") }
             return UpdatePlan.File(path: entry.path, contentKey: entry.contentKey, encodedKey: encoded.encodedKey,
@@ -329,41 +328,13 @@ public struct GameUpdater: Sendable {
 
     private func installManifest(_ buildConfig: TACTConfig, _ cdn: CDNClient) async throws -> InstallManifest {
         guard let key = buildConfig.encodedKey("install") else { throw TACTError.malformed("build config (no install)") }
-        return try InstallManifest(BLTE.decode(try await cdn.cached(.data, key)))
+        return try InstallManifest(try await cdn.decoded(key))
     }
 
     private func locate(_ wanted: Set<Data>, archives: [String], _ cdn: CDNClient) async throws -> [Data: ArchiveLocation] {
-        let localIndexes = root.appendingPathComponent("Data/indices")
-        // Fetch indexes in parallel (they're ~100 KB each), then scan them.
-        let indexes = try await withThrowingTaskGroup(of: (String, Data).self) { group in
-            var results: [(String, Data)] = []
-            var pending = archives.makeIterator()
-            for _ in 0..<8 {
-                guard let archive = pending.next() else { break }
-                group.addTask {
-                    (archive, try await cdn.cached(.data, archive, suffix: ".index",
-                                                   localCopy: localIndexes.appendingPathComponent("\(archive).index")))
-                }
-            }
-            while let result = try await group.next() {
-                results.append(result)
-                if let archive = pending.next() {
-                    group.addTask {
-                        (archive, try await cdn.cached(.data, archive, suffix: ".index",
-                                                       localCopy: localIndexes.appendingPathComponent("\(archive).index")))
-                    }
-                }
-            }
-            return results
-        }
-        var remaining = wanted
-        var found: [Data: ArchiveLocation] = [:]
-        for (archive, data) in indexes where !remaining.isEmpty {
-            let hits = try ArchiveIndex.locate(remaining, in: data, archive: archive)
-            found.merge(hits) { a, _ in a }
-            remaining.subtract(hits.keys)
-        }
-        return found
+        let files = try await ArchiveIndexes.fetch(archives, cdn: cdn, localDirectory: root.appendingPathComponent("Data/indices"), concurrency: 8)
+        let found = try ArchiveIndexes.locate(Set(wanted.compactMap(Key16.init)), archives: archives, indexFiles: files)
+        return Dictionary(uniqueKeysWithValues: found.map { ($0.key.data, $0.value) })
     }
 
     /// Resolves a manifest path inside the game folder, rejecting anything

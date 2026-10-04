@@ -15,9 +15,9 @@ func game(_ uid: String) -> Game {
 }
 
 func checkUpdates() async {
-    for game in GameLibrary().games() where game.family != .other {
+    for game in GameLibrary().games() where game.family != .other || GameUpdate.canUpdate(game.install) {
         do {
-            let check = try await GameUpdater(install: game.install).check()
+            let check = try await GameUpdate(install: game.install).check()
             let state = check.isUpdateAvailable ? "UPDATE → \(check.latest.name)" : "up to date"
             print("\(game.install.uid): installed \(game.install.version ?? "?"), latest \(check.latest.name) — \(state)")
         } catch {
@@ -26,18 +26,55 @@ func checkUpdates() async {
     }
 }
 
-/// `update <uid> [--verify] [--dry-run]`
+/// Value of `--name value` in an argument list.
+func option(_ name: String, in args: [String]) -> String? {
+    guard let i = args.firstIndex(of: name), i + 1 < args.count else { return nil }
+    return args[i + 1]
+}
+
+func stateStore(_ args: [String]) -> InstallStateStore {
+    option("--state", in: args).map { InstallStateStore(file: URL(fileURLWithPath: $0)) } ?? InstallStateStore()
+}
+
+/// `update <uid> [--path root] [--state file] [--verify] [--dry-run]`
 func update(_ args: [String]) async {
-    guard let uid = args.first(where: { !$0.hasPrefix("--") }) else { fail("usage: waypoint-cli update <uid> [--verify] [--dry-run]") }
-    let updater = GameUpdater(install: game(uid).install)
+    let usage = "usage: waypoint-cli update <uid> [--path install-root] [--state file] [--verify] [--dry-run]"
+    var positional: [String] = []
+    var i = 0
+    while i < args.count {
+        if ["--path", "--state"].contains(args[i]) { i += 2; continue }
+        if !args[i].hasPrefix("--") { positional.append(args[i]) }
+        i += 1
+    }
+    guard positional.count == 1 else { fail(usage) }
+    let store = stateStore(args)
+    let games = GameLibrary(stateStore: store).games().filter { $0.install.uid == positional[0] }
+    let install: ProductInstall
+    if let path = option("--path", in: args) {
+        // A specific install, e.g. a test copy next to Battle.net's own.
+        func resolved(_ p: String) -> String { URL(fileURLWithPath: p).standardizedFileURL.resolvingSymlinksInPath().path }
+        let recorded = store.load()[positional[0]].flatMap { $0.install(uid: positional[0]) }
+        guard let match = ([recorded].compactMap { $0 } + games.map(\.install)).first(where: { resolved($0.installPath) == resolved(path) })
+        else { fail("no \(positional[0]) install at \(path)") }
+        install = store.apply(to: match)
+    } else {
+        guard let game = games.first else { fail("no game with uid \(positional[0])") }
+        install = game.install
+    }
+    let updater = GameUpdate(install: install, store: store)
     do {
         let plan = try await updater.plan(verify: args.contains("--verify"), log: log)
         print("target: \(plan.target.name)")
-        print("download: \(plan.files.count) files, \(byteString(plan.downloadSize))")
+        print("download: \(plan.fileCount) files, \(byteString(plan.downloadSize))")
         print("delete: \(plan.deletions.count) files")
-        for file in plan.files.prefix(10) { print("  + \(file.path) (\(byteString(file.size)))") }
+        if case .loose(let p) = plan {
+            for file in p.files.prefix(10) { print("  + \(file.path) (\(byteString(file.size)))") }
+        } else if case .casc(let p) = plan {
+            print("  storage: \(p.storage.count) files, \(byteString(p.storage.reduce(0) { $0 + $1.size }))")
+            for file in p.loose.files.prefix(10) { print("  + \(file.path) (\(byteString(file.size)))") }
+        }
         for path in plan.deletions.prefix(10) { print("  - \(path)") }
-        guard !args.contains("--dry-run"), !plan.isEmpty else { return }
+        guard !args.contains("--dry-run"), !plan.isEmpty || plan.target.buildConfig != install.buildConfig else { return }
         try await updater.apply(plan) { p in
             log(String(format: "%.1f%%  %@ / %@  (%d/%d files)", p.fraction * 100,
                        byteString(p.completedBytes), byteString(p.totalBytes), p.completedFiles, p.totalFiles))
@@ -112,7 +149,7 @@ func install(_ args: [String]) async {
         case .casc(let p):
             print("version \(p.target.name): \(p.storage.count) files into \(p.config.dataDirectory)data "
                   + "(\(byteString(p.storage.reduce(0) { $0 + $1.size }))), \(p.loose.files.count) loose files "
-                  + "(\(byteString(p.loose.downloadSize))); \(p.storage.filter { $0.location == nil }.count) outside archives")
+                  + "(\(byteString(p.loose.downloadSize))); \(p.storage.filter { !$0.isInArchive }.count) outside archives")
         }
         // Debugging aid: the encoded keys a CASC install would store, one hex per line.
         if let dump = options["--dump-keys"], case .casc(let p) = plan {

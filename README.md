@@ -40,7 +40,8 @@ A launcher only has to do three things: install the game, keep it up to date, an
 - **Native.** Written in Swift, built only for arm64.
 - **One sign-in.** Uses the official Battle.net web login once. After that every launch is one click.
 - **Installs games.** Click **+** in the toolbar and pick a game. Waypoint downloads it straight from Blizzard's servers and lays it out exactly the way Battle.net does, so the game takes it as its own. Interrupted installs pick up where they stopped. Every Blizzard game with a Mac version is on the list; [Supported games](#supported-games) shows what has been tested.
-- **Updates games itself.** It checks Blizzard's servers, downloads only the files that changed, verifies every one of them, and swaps them in. Hearthstone only for now.
+- **Updates games itself**, including ones Battle.net installed. It checks Blizzard's servers, downloads only the files that changed, verifies every one of them, and puts them in place: loose files are swapped in, and new data goes into the game's CASC storage the way Battle.net adds it.
+- **Light.** About 27 MB of memory while it sits there. Installs and updates read Blizzard's manifests and indexes straight from disk instead of loading them, so even planning a 130 GB World of Warcraft install stays under 100 MB.
 - **Updates itself** in the background with [Sparkle](https://sparkle-project.org). New versions download silently and install when you quit. There are no update dialogs; a small "Restart to Update" appears at the bottom of the window (and in the menu bar menu, if you turned it on).
 - **Finds your games.** Reads Battle.net's install list and falls back to scanning the game folders, so it keeps working after you delete Battle.net.
 - **Changes nothing in the game.** No patches and no injected code: the login is handed over exactly the way Battle.net does it.
@@ -51,9 +52,9 @@ A launcher only has to do three things: install the game, keep it up to date, an
 | Game | Install | Launch | Updates |
 |---|---|---|---|
 | Hearthstone | ✅ Through Waypoint | ✅ Tested natively, with the Battle.net app and its Agent fully quit | ✅ Through Waypoint |
-| Warcraft III: Reforged | ✅ Tested: the same files as Battle.net's own install | ✅ Tested. The game itself is Intel-only, so it runs under Rosetta | Through Battle.net for now |
-| World of Warcraft: Retail, Classic, Classic Era, Anniversary | 🧪 Implemented, not yet tested | 🧪 Implemented, not yet tested | Through Battle.net for now |
-| StarCraft II, StarCraft: Remastered, Diablo III, Heroes of the Storm | 🧪 Implemented, not yet tested | 🧪 Implemented, not yet tested | Through Battle.net for now |
+| Warcraft III: Reforged | ✅ Tested: the same files as Battle.net's own install | ✅ Tested. The game itself is Intel-only, so it runs under Rosetta | 🧪 Through Waypoint. Tested by repairing Waypoint's and Battle.net's installs; no new build has shipped yet |
+| World of Warcraft: Retail, Classic, Classic Era, Anniversary | 🧪 Implemented, not yet tested | 🧪 Implemented, not yet tested | 🧪 Implemented, not yet tested |
+| StarCraft II, StarCraft: Remastered, Diablo III, Heroes of the Storm | 🧪 Implemented, not yet tested | 🧪 Implemented, not yet tested | 🧪 Implemented, not yet tested |
 
 ## Download
 
@@ -117,8 +118,6 @@ Right-click the button for more:
 - **Verify Files**: re-checks every file and repairs broken ones.
 - **Play Without Updating**: shown only when an update is waiting.
 
-> [!NOTE]
-> Updating games other than Hearthstone still needs the Battle.net app for now (see [Roadmap](#roadmap)).
 
 ## How it works
 
@@ -183,6 +182,8 @@ Downloads are staged in `.waypoint-staging` inside the game folder, so an interr
 
 **Installs.** Hearthstone keeps its files loose, so installing it is an update into an empty folder. Every other game keeps its data in local CASC storage (`Data/data`), which the game reads itself. Waypoint downloads the files the build's download manifest lists for your platform and language, and writes the `data.###` archives, the 16 `.idx` index files and `shmem` byte for byte the way the Battle.net Agent does. The app and the other files from the install manifest go loose into the game folder, next to `.build.info`, `Data/config` and `Data/indices`. A Warcraft III install made by Waypoint holds exactly the same 73,972 files as Battle.net's own install of that build, and the game launches from it.
 
+**Updates of these games** add the new build's files to the same storage, whoever wrote it. Nothing already there is moved or rewritten: new files go after the end of the last archive, then into new ones; the 16 index files are written as their next version, then `shmem`, and only then are the old index files removed, so the game always finds a complete set. An interrupted update resumes from its journal. Loose files are updated like Hearthstone's.
+
 **Finding games.** The list comes from `/Users/Shared/Battle.net/Agent/product.db` (protobuf), or from the `.product.db` inside each game folder, plus the games Waypoint installed itself.
 
 </details>
@@ -195,6 +196,7 @@ xcrun swift run waypoint-cli plan hs_beta    # dry run: how a game would be laun
 xcrun swift run waypoint-cli check-tokens    # verify the cipher on tokens Battle.net wrote
 xcrun swift run waypoint-cli check-updates   # installed vs. live version
 xcrun swift run waypoint-cli update hs_beta --dry-run           # what an update would download
+xcrun swift run waypoint-cli update w3 --dry-run                # the same for a game stored in CASC
 xcrun swift run waypoint-cli update hs_beta --verify --dry-run  # hash-check the whole install
 xcrun swift run waypoint-cli fetch hs_beta '^Strings/' /tmp/hs  # download files into another folder
 xcrun swift run waypoint-cli install w3 /Applications/Warcraft\ III --dry-run  # what installing a game would download
@@ -211,7 +213,8 @@ WAYPOINT_NETWORK_TESTS=1 xcrun swift test --filter liveUpdate  # real update, 36
 - [x] Install games from scratch, for every Blizzard game with a Mac version
 - [x] Warcraft III installed and launched without Battle.net
 - [ ] World of Warcraft tested on macOS
-- [ ] Updates for games stored in CASC (World of Warcraft, StarCraft, Diablo III, Warcraft III, Heroes of the Storm)
+- [x] Updates for games stored in CASC (World of Warcraft, StarCraft, Diablo III, Warcraft III, Heroes of the Storm)
+- [ ] A CASC game's update tested on a real new build
 - [x] Prebuilt, notarized releases
 - [x] Self-updates (Sparkle)
 - [x] App icon

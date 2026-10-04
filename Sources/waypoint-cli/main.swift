@@ -76,7 +76,7 @@ case "diagnose":
     diagnose()
 
 default:
-    fail("usage: waypoint-cli [list | plan <uid> | check-tokens [GAMEKEY…] | check-updates | update <uid> [--verify] [--dry-run] | fetch <uid> <regex> <dir> | install <uid> <dir> [options] | launch <uid> [--state file] [--dry-run] | logs [options] | diagnose]")
+    fail("usage: waypoint-cli [list | plan <uid> | check-tokens [GAMEKEY…] | check-updates | update <uid> [--path root] [--state file] [--verify] [--dry-run] | fetch <uid> <regex> <dir> | install <uid> <dir> [options] | launch <uid> [--state file] [--dry-run] | logs [options] | diagnose]")
 }
 
 Diagnostics.shared.flush()

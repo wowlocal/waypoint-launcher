@@ -41,6 +41,14 @@ struct ByteReader {
         return Data(data[base + offset..<base + offset + count])
     }
 
+    /// Like `bytes(_:)`, but sharing the underlying storage instead of
+    /// copying (a slice: index it from its `startIndex`).
+    mutating func slice(_ count: Int) throws -> Data {
+        guard count >= 0, offset + count <= data.count else { throw TACTError.malformed("data (unexpected end)") }
+        defer { offset += count }
+        return data[base + offset..<base + offset + count]
+    }
+
     mutating func u8() throws -> UInt8 {
         guard offset < data.count else { throw TACTError.malformed("data (unexpected end)") }
         defer { offset += 1 }
@@ -139,34 +147,39 @@ public struct EncodingTable: Sendable {
     /// every build and we never need most of it.
     public var entries: [Data: Entry]
 
+    /// Scans the table (ideally memory-mapped) in place, without copying keys.
     public init(_ data: Data, wanted: Set<Data>) throws {
         var r = ByteReader(data)
         guard try r.bytes(2) == Data("EN".utf8) else { throw TACTError.malformed("encoding header") }
         _ = try r.u8() // version
         let ckeySize = Int(try r.u8())
-        let ekeySize = Int(try r.u8())
+        let ekeySize = Int(try r.uintBE(1))
         let pageSize = Int(try r.uintBE(2)) * 1024
         _ = try r.uintBE(2) // espec page size
         let pageCount = Int(try r.uintBE(4))
         _ = try r.uintBE(4) // espec page count
         _ = try r.u8()
         let especSize = Int(try r.uintBE(4))
-        r.offset += especSize
-        r.offset += pageCount * (ckeySize + 16) // page index: first key + md5
+        let pagesStart = r.offset + especSize + pageCount * (ckeySize + 16) // after the page index: first key + md5
+        guard ckeySize == 16, ekeySize >= 1, pageSize > 0 else { throw TACTError.unsupported("encoding table key sizes \(ckeySize)/\(ekeySize)") }
 
+        var remaining = Set(wanted.compactMap(Key16.init))
         var entries: [Data: Entry] = [:]
-        for page in 0..<pageCount {
-            var p = ByteReader(data, offset: r.offset + page * pageSize)
-            let pageEnd = p.offset + pageSize
-            while p.offset + 6 + ckeySize <= min(pageEnd, data.count) {
-                let keyCount = Int(try p.u8())
-                if keyCount == 0 { break }
-                let size = try p.uintBE(5)
-                let ckey = try p.bytes(ckeySize)
-                let firstEKey = try p.bytes(ekeySize)
-                p.offset += (keyCount - 1) * ekeySize
-                if wanted.contains(ckey) {
-                    entries[ckey] = Entry(encodedKey: firstEKey, size: size)
+        data.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else { return }
+            for page in 0..<pageCount where !remaining.isEmpty {
+                var p = pagesStart + page * pageSize
+                let pageEnd = min(p + pageSize, raw.count)
+                while p + 6 + ckeySize + ekeySize <= pageEnd {
+                    let keyCount = Int(raw[p])
+                    if keyCount == 0 { break }
+                    let ckey = Key16(base + p + 6)
+                    if remaining.remove(ckey) != nil {
+                        let size = (1...5).reduce(UInt64(0)) { $0 << 8 | UInt64(raw[p + $1]) }
+                        let ekeyStart = p + 6 + ckeySize
+                        entries[ckey.data] = Entry(encodedKey: Data(raw[ekeyStart..<ekeyStart + ekeySize]), size: size)
+                    }
+                    p += 6 + ckeySize + keyCount * ekeySize
                 }
             }
         }
@@ -186,11 +199,14 @@ public struct InstallManifest: Sendable {
     public struct Tag: Sendable {
         public var name: String
         public var type: UInt16
-        /// Bit i (MSB first) set = entry i has this tag.
+        /// Bit i (MSB first) set = entry i has this tag. A slice of the
+        /// manifest: index it from `startIndex`.
         var mask: Data
 
         func contains(_ index: Int) -> Bool {
-            mask[index / 8] & (0x80 >> UInt8(index % 8)) != 0
+            let byte = index / 8
+            guard byte < mask.count else { return false }
+            return mask[mask.startIndex + byte] & (0x80 >> UInt8(index % 8)) != 0
         }
     }
 
@@ -210,7 +226,7 @@ public struct InstallManifest: Sendable {
         for _ in 0..<tagCount {
             let name = try r.cString()
             let type = UInt16(try r.uintBE(2))
-            tags.append(Tag(name: name, type: type, mask: try r.bytes(maskSize)))
+            tags.append(Tag(name: name, type: type, mask: try r.slice(min(maskSize, r.data.count - r.offset))))
         }
         var entries: [Entry] = []
         entries.reserveCapacity(entryCount)
@@ -247,19 +263,35 @@ extension InstallManifest.Tag {
     /// tag for are ignored; a trailing `?` marks a tag as optional, which
     /// amounts to the same thing.
     static func selectedIndices(_ tagString: String, in tags: [Self], entryCount: Int) -> [Int] {
+        let mask = selectionMask(tagString, in: tags, entryCount: entryCount)
+        return (0..<entryCount).filter { mask[$0 / 8] & (0x80 >> UInt8($0 % 8)) != 0 }
+    }
+
+    /// The same selection as a bitmap (bit i, MSB first, set = entry i
+    /// selected): ⌈entryCount/8⌉ bytes however many entries there are.
+    static func selectionMask(_ tagString: String, in tags: [Self], entryCount: Int) -> [UInt8] {
+        let byteCount = (entryCount + 7) / 8
         var sets = tagString.split(separator: ":")
         if sets.isEmpty { sets = [""] } // no tags at all: everything
-        let setGroups: [[[Self]]] = sets.map { set in
+        var result = [UInt8](repeating: 0, count: byteCount)
+        for set in sets {
             let names = Set(set.split(whereSeparator: \.isWhitespace).map { word in
                 String(word.hasSuffix("?") ? word.dropLast() : word)
             })
-            return Array(Dictionary(grouping: tags.filter { names.contains($0.name) }, by: \.type).values)
-        }
-        return (0..<entryCount).filter { index in
-            setGroups.contains { groups in
-                groups.allSatisfy { group in group.contains { $0.contains(index) } }
+            var selected = [UInt8](repeating: 0xFF, count: byteCount)
+            for group in Dictionary(grouping: tags.filter { names.contains($0.name) }, by: \.type).values {
+                var any = [UInt8](repeating: 0, count: byteCount)
+                for tag in group {
+                    tag.mask.withUnsafeBytes { m in
+                        for i in 0..<min(byteCount, m.count) { any[i] |= m[i] }
+                    }
+                }
+                for i in 0..<byteCount { selected[i] &= any[i] }
             }
+            for i in 0..<byteCount { result[i] |= selected[i] }
         }
+        if entryCount % 8 != 0 { result[byteCount - 1] &= UInt8(truncatingIfNeeded: 0xFF00 >> (entryCount % 8)) }
+        return result
     }
 }
 
@@ -273,8 +305,27 @@ public struct DownloadManifest: Sendable {
         public var priority: Int8
     }
 
-    public var entries: [Entry]
+    /// Entries are read from the manifest's bytes on demand: WoW's lists
+    /// about 3 million, far too many to hold as values. Keep the data
+    /// memory-mapped (`CDNClient.decoded`) and this costs next to nothing.
+    public struct Entries: RandomAccessCollection, Sendable {
+        let manifest: DownloadManifest
+        public var startIndex: Int { 0 }
+        public var endIndex: Int { manifest.count }
+        public subscript(i: Int) -> Entry {
+            Entry(encodedKey: Data(manifest.data[manifest.recordStart(i)..<manifest.recordStart(i) + manifest.keySize]),
+                  size: manifest.size(at: i), priority: manifest.priority(at: i))
+        }
+    }
+
+    let data: Data
+    let keySize: Int
+    let entrySize: Int
+    let entriesStart: Int
+    public let count: Int
     var tags: [InstallManifest.Tag]
+
+    public var entries: Entries { Entries(manifest: self) }
 
     /// Layout: `DL`, version, key size, has-checksum, entry count (u32),
     /// tag count (u16); v2 adds a flag-byte count, v3 a base priority and 3
@@ -285,38 +336,51 @@ public struct DownloadManifest: Sendable {
         guard try r.bytes(2) == Data("DL".utf8) else { throw TACTError.malformed("download manifest header") }
         let version = try r.u8()
         guard (1...3).contains(version) else { throw TACTError.unsupported("download manifest v\(version)") }
-        let keySize = Int(try r.u8())
+        keySize = Int(try r.u8())
         let hasChecksum = try r.u8() != 0
-        let entryCount = Int(try r.uintBE(4))
+        count = Int(try r.uintBE(4))
         let tagCount = Int(try r.uintBE(2))
         var flagBytes = 0
         if version >= 2 { flagBytes = Int(try r.u8()) }
         if version >= 3 { _ = try r.bytes(4) }
+        entrySize = keySize + 5 + 1 + (hasChecksum ? 4 : 0) + flagBytes
+        entriesStart = data.startIndex + r.offset
+        guard keySize > 0, r.offset + count * entrySize <= data.count else { throw TACTError.malformed("download manifest entries") }
+        r.offset += count * entrySize
 
-        var entries: [Entry] = []
-        entries.reserveCapacity(entryCount)
-        for _ in 0..<entryCount {
-            let key = try r.bytes(keySize)
-            let size = try r.uintBE(5)
-            let priority = Int8(bitPattern: try r.u8())
-            if hasChecksum { _ = try r.uintBE(4) }
-            if flagBytes > 0 { _ = try r.bytes(flagBytes) }
-            entries.append(Entry(encodedKey: key, size: size, priority: priority))
-        }
-        let maskSize = (entryCount + 7) / 8
+        let maskSize = (count + 7) / 8
         var tags: [InstallManifest.Tag] = []
         for _ in 0..<tagCount {
             let name = try r.cString()
             let type = UInt16(try r.uintBE(2))
-            tags.append(InstallManifest.Tag(name: name, type: type, mask: try r.bytes(maskSize)))
+            tags.append(InstallManifest.Tag(name: name, type: type, mask: try r.slice(min(maskSize, data.count - r.offset))))
         }
-        self.entries = entries
+        self.data = data
         self.tags = tags
     }
 
+    @inline(__always) func recordStart(_ i: Int) -> Int { entriesStart + i * entrySize }
+
+    /// Entry i's encoded key (the first 16 bytes; manifests use 16).
+    func key(at i: Int) -> Key16 {
+        data.withUnsafeBytes { raw in Key16(raw.baseAddress! + (recordStart(i) - data.startIndex)) }
+    }
+
+    func size(at i: Int) -> UInt64 {
+        let start = recordStart(i) + keySize
+        return (0..<5).reduce(UInt64(0)) { $0 << 8 | UInt64(data[start + $1]) }
+    }
+
+    func priority(at i: Int) -> Int8 { Int8(bitPattern: data[recordStart(i) + keySize + 5]) }
+
     /// Same selection rule as `InstallManifest.select(tagString:)`.
     public func select(tagString: String) -> [Entry] {
-        InstallManifest.Tag.selectedIndices(tagString, in: tags, entryCount: entries.count).map { entries[$0] }
+        InstallManifest.Tag.selectedIndices(tagString, in: tags, entryCount: count).map { entries[$0] }
+    }
+
+    /// The selection as a bitmap; see `InstallManifest.Tag.selectionMask`.
+    func selectionMask(tagString: String) -> [UInt8] {
+        InstallManifest.Tag.selectionMask(tagString, in: tags, entryCount: count)
     }
 }
 
@@ -329,8 +393,11 @@ public struct ArchiveLocation: Sendable, Equatable {
 }
 
 public enum ArchiveIndex {
-    /// Scans an `.index` file for the wanted encoded keys.
-    public static func locate(_ wanted: Set<Data>, in data: Data, archive: String) throws -> [Data: ArchiveLocation] {
+    /// Visits every entry of an `.index` file in place (ideally memory-mapped),
+    /// without copying keys: `visit(key, keySize, size, offset)` returns false
+    /// to stop early.
+    static func scan(_ data: Data, archive: String,
+                     _ visit: (UnsafeRawPointer, Int, UInt64, UInt64) -> Bool) throws {
         // Footer: toc hash[8], version, 2 reserved, block size KB, offset bytes,
         // size bytes, key bytes, checksum bytes, element count (LE u32), checksum[8].
         let footerSize = 28
@@ -344,23 +411,36 @@ public enum ArchiveIndex {
         let keySize = Int(try f.u8())
         let checksumSize = Int(try f.u8())
         let entrySize = keySize + sizeBytes + offsetBytes
-        guard blockSize > 0, entrySize > 0 else { throw TACTError.malformed("archive index \(archive)") }
+        guard blockSize > 0, entrySize > 0, keySize > 0 else { throw TACTError.malformed("archive index \(archive)") }
 
         // After the blocks: a table of contents with each block's last key and a checksum.
         let blockCount = (data.count - footerSize) / (blockSize + keySize + checksumSize)
-        var found: [Data: ArchiveLocation] = [:]
-        for block in 0..<blockCount {
-            var r = ByteReader(data, offset: block * blockSize)
-            let end = r.offset + blockSize
-            while r.offset + entrySize <= end {
-                let key = try r.bytes(keySize)
-                if key.allSatisfy({ $0 == 0 }) { break }
-                let size = try r.uintBE(sizeBytes)
-                let offset = try r.uintBE(offsetBytes)
-                if wanted.contains(key) {
-                    found[key] = ArchiveLocation(archive: archive, offset: offset, size: size)
+        data.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else { return }
+            func uint(_ at: Int, _ n: Int) -> UInt64 { (0..<n).reduce(UInt64(0)) { $0 << 8 | UInt64(raw[at + $1]) } }
+            for block in 0..<blockCount {
+                var p = block * blockSize
+                let end = p + blockSize
+                while p + entrySize <= end {
+                    if (0..<keySize).allSatisfy({ raw[p + $0] == 0 }) { break }
+                    let size = uint(p + keySize, sizeBytes)
+                    let offset = uint(p + keySize + sizeBytes, offsetBytes)
+                    if !visit(base + p, keySize, size, offset) { return }
+                    p += entrySize
                 }
             }
+        }
+    }
+
+    /// Finds the wanted encoded keys in an `.index` file.
+    public static func locate(_ wanted: Set<Data>, in data: Data, archive: String) throws -> [Data: ArchiveLocation] {
+        var remaining = Set(wanted.compactMap(Key16.init))
+        var found: [Data: ArchiveLocation] = [:]
+        try scan(data, archive: archive) { key, keySize, size, offset in
+            guard keySize >= 16 else { return false }
+            let k = Key16(key)
+            if remaining.remove(k) != nil { found[k.data] = ArchiveLocation(archive: archive, offset: offset, size: size) }
+            return !remaining.isEmpty
         }
         return found
     }

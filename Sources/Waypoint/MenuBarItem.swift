@@ -58,7 +58,7 @@ final class MenuBarItem: NSObject, NSMenuDelegate {
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
         for game in model.games where game.isSupported {
-            if let update = model.availableUpdate(for: game), GameUpdater.canUpdate(game.family) {
+            if let update = model.availableUpdate(for: game), GameUpdate.canUpdate(game.install) {
                 menu.addItem(ActionItem("Update \(game.displayName) to \(update.latest.name)",
                                         enabled: model.canUpdate(game)) { [model] in
                     Task { await model.update(game) }

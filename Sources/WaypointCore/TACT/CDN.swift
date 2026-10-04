@@ -127,6 +127,56 @@ public struct CDNClient: Sendable {
         return try await mirror.cached(.raw, hash)
     }
 
+    /// A file on disk, downloaded once into the cache (or the given local
+    /// copy, when it exists). For files too big to hold in memory.
+    public func cachedFile(_ kind: Kind, _ hash: String, suffix: String = "", localCopy: URL? = nil) async throws -> URL {
+        let fm = FileManager.default
+        let cacheFile = cacheDirectory.appendingPathComponent(relativePath(kind, hash, suffix: suffix))
+        if fm.fileExists(atPath: cacheFile.path) { return cacheFile }
+        if let localCopy, fm.fileExists(atPath: localCopy.path) { return localCopy }
+        let temp = try await download(kind, hash, suffix: suffix)
+        try fm.createDirectory(at: cacheFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        do {
+            try fm.moveItem(at: temp, to: cacheFile)
+        } catch {
+            try? fm.removeItem(at: temp)
+            guard fm.fileExists(atPath: cacheFile.path) else { throw error } // else: another task got there first
+        }
+        return cacheFile
+    }
+
+    /// A BLTE file (manifest, encoding table), decoded once into the cache and
+    /// memory-mapped. These run to tens of megabytes for WoW; mapped pages
+    /// aren't part of the app's footprint, and the system drops them when
+    /// it needs the memory.
+    public func decoded(_ hash: String) async throws -> Data {
+        let fm = FileManager.default
+        let decodedFile = cacheDirectory.appendingPathComponent(relativePath(.data, hash, suffix: ".decoded"))
+        if let data = try? Data(contentsOf: decodedFile, options: .alwaysMapped) { return data }
+        let encoded = try await cachedFile(.data, hash)
+        let partial = decodedFile.appendingPathExtension("\(UUID().uuidString).part")
+        try fm.createDirectory(at: decodedFile.deletingLastPathComponent(), withIntermediateDirectories: true)
+        guard fm.createFile(atPath: partial.path, contents: nil) else {
+            throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: partial.path])
+        }
+        do {
+            let output = try FileHandle(forWritingTo: partial)
+            defer { try? output.close() }
+            _ = try BLTE.decode(file: encoded, to: output)
+        } catch {
+            try? fm.removeItem(at: partial)
+            throw error
+        }
+        do {
+            try fm.moveItem(at: partial, to: decodedFile)
+        } catch {
+            try? fm.removeItem(at: partial)
+            guard fm.fileExists(atPath: decodedFile.path) else { throw error }
+        }
+        try? fm.removeItem(at: encoded) // only the decoded form is read again
+        return try Data(contentsOf: decodedFile, options: .alwaysMapped)
+    }
+
     /// Small files, kept in memory and cached on disk.
     public func cached(_ kind: Kind, _ hash: String, suffix: String = "", localCopy: URL? = nil) async throws -> Data {
         let cacheFile = cacheDirectory.appendingPathComponent(relativePath(kind, hash, suffix: suffix))
@@ -148,8 +198,8 @@ public struct CDNClient: Sendable {
 
     /// Downloads to a temporary file. `range` is an inclusive byte range
     /// inside an archive.
-    public func download(_ kind: Kind, _ hash: String, range: ClosedRange<UInt64>? = nil) async throws -> URL {
-        try await withMirrors(kind, hash, suffix: "", range: range) { request in
+    public func download(_ kind: Kind, _ hash: String, suffix: String = "", range: ClosedRange<UInt64>? = nil) async throws -> URL {
+        try await withMirrors(kind, hash, suffix: suffix, range: range) { request in
             let (file, response) = try await session.download(for: request)
             do {
                 try Self.check(response, request, expectPartial: range != nil)

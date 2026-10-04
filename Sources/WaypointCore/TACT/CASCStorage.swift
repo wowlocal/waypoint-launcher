@@ -168,64 +168,114 @@ public enum CASC {
     }
 }
 
-/// Builds a local storage from scratch, one blob at a time. Every write is
-/// journaled, so an interrupted install picks up where it stopped: the
-/// journal is replayed and the last archive trimmed to what it records.
+/// Writes a local storage one blob at a time: a new one from scratch, or
+/// more blobs into one that exists (an update, or another product sharing
+/// it), whoever wrote it. Every write is journaled, so an interrupted run
+/// picks up where it stopped: the journal is replayed and the archive being
+/// written is trimmed to what it records.
+///
+/// Existing data is never moved or rewritten. New blobs go after the end of
+/// the last archive, then into new ones; `finish()` writes every index file
+/// as the next version, then `shmem`, and only then removes the old versions,
+/// so a reader always finds a complete set.
+///
+/// Memory stays small however big the storage: the writer keeps no per-file
+/// state beyond the sorted 9-byte keys a resumed run had already written
+/// (and, updating, the ones the storage held), and builds each index file
+/// from the journal at the end, one bucket at a time. Callers pass each key
+/// once per run (plans are deduplicated); keys already stored are skipped.
 public final class CASCStorageWriter {
     public let directory: URL
-    private var buckets = [[CASC.IndexEntry]](repeating: [], count: 16)
-    private var stored = Set<Data>()          // 9-byte keys already written
+    /// Whether this adds to a storage that existed before.
+    public let isUpdate: Bool
+    private var resumed: [Key9] = []          // sorted: keys an interrupted run had written
+    private var appended = 0
+    private var existing: StoredKeys?         // updating: what the storage already held
+    private var versions = [UInt32](repeating: 0, count: 16)
+    private let firstNewArchive: Int          // archives from here on are this writer's
     private var archive = -1
     private var archiveEnd: UInt64 = 0
     private var archiveHandle: FileHandle?
     private var archiveSizes: [UInt64] = []
     private let baseKey: Data
+    private let journalURL: URL
     private let journal: FileHandle
     private var unsyncedBytes = 0
     private var finished = false
 
     static let journalName = ".waypoint-journal"
     static let journalRecordSize = 16 + 2 + 8 + 4 + 1
+    /// First journal record of an update: where appending started.
+    static let markerKey = Data(repeating: 0xFF, count: 16)
 
-    public var count: Int { stored.count }
+    /// Keys stored, counting what an existing storage already had.
+    public var count: Int { resumed.count + appended + (existing?.count ?? 0) }
 
-    /// Starts a new storage, or resumes an interrupted one. Throws rather
-    /// than touch a finished storage (no journal, but archives or indexes):
-    /// starting over would overwrite `data.000` and delete the rest.
-    public init(directory: URL) throws {
+    /// Starts a new storage, resumes an interrupted run, or (with
+    /// `allowExisting`) adds to a finished storage. Without it, a finished
+    /// storage is an error rather than something to start over on.
+    public init(directory: URL, allowExisting: Bool = false) throws {
         self.directory = directory
         let fm = FileManager.default
         try fm.createDirectory(at: directory, withIntermediateDirectories: true)
-        let journalURL = directory.appendingPathComponent(Self.journalName)
-        let existing = (try? Data(contentsOf: journalURL)) ?? Data()
+        journalURL = directory.appendingPathComponent(Self.journalName)
+        let saved = (try? Data(contentsOf: journalURL, options: .alwaysMapped)) ?? Data()
 
-        // The journal's first record holds the container's base key.
-        if existing.count >= 16 {
-            baseKey = existing.prefix(16)
-        } else {
-            let files = (try? fm.contentsOfDirectory(atPath: directory.path)) ?? []
-            if files.contains(where: { $0.hasSuffix(".idx") || $0.wholeMatch(of: /data\.\d{3}/) != nil }) {
-                throw TACTError.unsupported("writing over the existing storage in \(directory.path)")
+        var start: (archive: Int, offset: UInt64)?
+        // The journal's first 16 bytes hold the container's base key.
+        if saved.count >= 16 {
+            baseKey = Data(saved.prefix(16))
+            start = Self.marker(in: saved.dropFirst(16))
+        } else if let state = try CASC.scanStorage(directory) {
+            guard allowExisting else { throw TACTError.unsupported("writing over the existing storage in \(directory.path)") }
+            guard let last = state.archiveSizes.indices.last else { throw TACTError.malformed("storage without archives in \(directory.path)") }
+            baseKey = state.baseKey ?? Self.randomKey()
+            start = (last, state.archiveSizes[last])
+            let header = baseKey + Self.record(key: Self.markerKey, archive: last, offset: state.archiveSizes[last], size: 0, flag: 2)
+            guard fm.createFile(atPath: journalURL.path, contents: header) else {
+                throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: journalURL.path])
             }
-            baseKey = Data((0..<16).map { _ in UInt8.random(in: 0...255) })
+        } else {
+            baseKey = Self.randomKey()
             guard fm.createFile(atPath: journalURL.path, contents: baseKey) else {
                 throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: journalURL.path])
             }
         }
+        isUpdate = start != nil
+        firstNewArchive = start.map { $0.archive + 1 } ?? 0
+
+        if let start {
+            guard let state = try CASC.scanStorage(directory), let keys = try StoredKeys.load(directory) else {
+                throw TACTError.malformed("storage in \(directory.path) is gone")
+            }
+            versions = state.versions
+            existing = keys
+            archiveSizes = Array(state.archiveSizes.prefix(start.archive + 1))
+            while archiveSizes.count < start.archive + 1 { archiveSizes.append(0) }
+            archiveSizes[start.archive] = start.offset
+            archive = start.archive
+            archiveEnd = start.offset
+        }
         journal = try FileHandle(forWritingTo: journalURL)
-        try journal.seekToEnd()
-        try replay(existing.dropFirst(16))
+        try replay(saved.count > 16 ? saved.dropFirst(16) : Data(), skipping: isUpdate ? 1 : 0)
     }
 
-    public func contains(_ encodedKey: Data) -> Bool { stored.contains(encodedKey.prefix(9)) }
+    public func contains(_ encodedKey: Data) -> Bool { Key9(encodedKey).map(contains) ?? false }
+    public func contains(_ key: Key16) -> Bool { contains(key.prefix9) }
+    func contains(_ key: Key9) -> Bool { resumed.sortedContains(key) || existing?.contains(key) == true }
+
+    public func append(encodedKey: Data, blob: Data, fullKey: Bool) throws {
+        guard let key = Key16(encodedKey) else { throw TACTError.malformed("encoded key \(encodedKey.hex)") }
+        try append(key: key, blob: blob, fullKey: fullKey)
+    }
 
     /// Appends one BLTE blob (exactly as served by the CDN). A failed write
     /// (disk full) throws and leaves nothing behind, so the call can be
     /// retried, or the install resumed later.
-    public func append(encodedKey: Data, blob: Data, fullKey: Bool) throws {
+    public func append(key: Key16, blob: Data, fullKey: Bool) throws {
         guard !finished else { throw TACTError.unsupported("appending to a finished storage") }
-        let key9 = Data(encodedKey.prefix(9))
-        guard !stored.contains(key9) else { return }
+        let key9 = key.prefix9
+        guard !contains(key9) else { return }
         let size = UInt64(CASC.headerSize + blob.count)
         guard size <= CASC.archiveSize - UInt64(CASC.segmentHeadersSize) else {
             throw TACTError.unsupported("\(blob.count)-byte file: larger than a storage archive")
@@ -233,15 +283,16 @@ public final class CASCStorageWriter {
         if archive < 0 || archiveEnd + size > CASC.archiveSize { try startArchive() }
         guard let archiveHandle else { throw TACTError.unsupported("storage archive not open") }
 
+        let encodedKey = key.data
         let header = CASC.entryHeader(encodedKey: encodedKey, blobSize: blob.count, archive: archive, offset: archiveEnd, fullKey: fullKey)
-        let entry = CASC.IndexEntry(key: key9, archive: archive, offset: archiveEnd, size: UInt32(size))
-        var record = Data(encodedKey.prefix(16))
-        record += Data(CASC.le16(UInt16(archive))) + Data(CASC.le64(entry.offset)) + Data(CASC.le32(entry.size)) + Data([fullKey ? 1 : 0])
+        let record = Self.record(key: encodedKey, archive: archive, offset: archiveEnd, size: UInt32(size), flag: fullKey ? 1 : 0)
         // FileHandle.write(_:) raises an Objective-C exception on failure,
-        // which kills the app; write(contentsOf:) throws.
+        // which kills the app; write(contentsOf:) throws. Header and blob go
+        // separately: the blob may be a slice of a mapped download.
         let journalEnd = try journal.offset()
         do {
-            try archiveHandle.write(contentsOf: header + blob)
+            try archiveHandle.write(contentsOf: header)
+            try archiveHandle.write(contentsOf: blob)
             try journal.write(contentsOf: record)
         } catch {
             // Cut off the partial write, or the next blob would land after it
@@ -250,8 +301,7 @@ public final class CASCStorageWriter {
             try? journal.truncate(atOffset: journalEnd)
             throw error
         }
-        buckets[CASC.bucket(of: key9)].append(entry)
-        stored.insert(key9)
+        appended += 1
         archiveEnd += size
         unsyncedBytes += Int(size)
         if unsyncedBytes > 64 << 20 { try sync() }
@@ -272,24 +322,81 @@ public final class CASCStorageWriter {
             try fm.removeItem(at: archiveURL(extra))
             extra += 1
         }
-        // A fresh storage: version 1 of every bucket. Remove stale ones.
-        for file in (try? fm.contentsOfDirectory(atPath: directory.path)) ?? [] where file.hasSuffix(".idx") {
-            try? fm.removeItem(at: directory.appendingPathComponent(file))
+
+        // This writer's segment headers, by bucket.
+        var segmentEntries = [[CASC.IndexEntry]](repeating: [], count: 16)
+        if archive >= firstNewArchive {
+            for arc in firstNewArchive...archive {
+                for (bucket, entry) in CASC.segmentHeaders(baseKey: baseKey, archive: arc).entries { segmentEntries[bucket].append(entry) }
+            }
         }
+        // The next version of every index file (1 for a new storage): what
+        // was there, plus this writer's blobs from the journal. Then shmem;
+        // only then drop the old versions.
+        let journalData = try Data(contentsOf: journalURL, options: .alwaysMapped)
+        let newVersions = versions.map { $0 + 1 }
+        var writtenNames = Set<String>()
+        struct Location: Hashable { var key: Data; var offset: UInt64 }
         for bucket in 0..<16 {
-            try CASC.indexFile(bucket: bucket, entries: buckets[bucket])
-                .write(to: directory.appendingPathComponent(CASC.indexFileName(bucket: bucket, version: 1)), options: .atomic)
+            var entries = isUpdate ? try CASC.loadBucket(directory, bucket: bucket, version: versions[bucket]) : []
+            entries += segmentEntries[bucket]
+            Self.journalEntries(journalData, skipping: isUpdate ? 1 : 0) { key9, entry in
+                if key9.bucket == bucket { entries.append(entry) }
+            }
+            var seen = Set<Location>()
+            entries.removeAll { !seen.insert(Location(key: $0.key, offset: $0.storageOffset)).inserted }
+            let name = CASC.indexFileName(bucket: bucket, version: newVersions[bucket])
+            try CASC.indexFile(bucket: bucket, entries: entries).write(to: directory.appendingPathComponent(name), options: .atomic)
+            writtenNames.insert(name)
         }
-        if let shmem = CASC.shmem(storagePath: directory.path, indexVersions: Array(repeating: 1, count: 16), archiveSizes: archiveSizes) {
+        if let shmem = CASC.shmem(storagePath: directory.path, indexVersions: newVersions, archiveSizes: archiveSizes) {
             try shmem.write(to: directory.appendingPathComponent("shmem"), options: .atomic)
         }
-        fm.createFile(atPath: directory.appendingPathComponent("index.lock.0").path, contents: Data())
+        for file in (try? fm.contentsOfDirectory(atPath: directory.path)) ?? [] where file.hasSuffix(".idx") && !writtenNames.contains(file) {
+            try? fm.removeItem(at: directory.appendingPathComponent(file))
+        }
+        let lock = directory.appendingPathComponent("index.lock.0")
+        if !fm.fileExists(atPath: lock.path) { fm.createFile(atPath: lock.path, contents: Data()) }
         try journal.close()
-        try fm.removeItem(at: directory.appendingPathComponent(Self.journalName))
+        try fm.removeItem(at: journalURL)
+        versions = newVersions
         finished = true
     }
 
     // MARK: Internals
+
+    private static func randomKey() -> Data { Data((0..<16).map { _ in UInt8.random(in: 0...255) }) }
+
+    private static func record(key: Data, archive: Int, offset: UInt64, size: UInt32, flag: UInt8) -> Data {
+        key.prefix(16) + Data(CASC.le16(UInt16(archive))) + Data(CASC.le64(offset)) + Data(CASC.le32(size)) + Data([flag])
+    }
+
+    /// An update's journal starts with a marker: where appending began.
+    private static func marker(in records: Data) -> (archive: Int, offset: UInt64)? {
+        let r = [UInt8](records.prefix(journalRecordSize))
+        guard r.count == journalRecordSize, Data(r[0..<16]) == markerKey, r[30] == 2 else { return nil }
+        let arc = Int(UInt16(r[16]) | UInt16(r[17]) << 8)
+        let offset = (0..<8).reduce(UInt64(0)) { $0 | UInt64(r[18 + $1]) << (8 * UInt64($1)) }
+        return (arc, offset)
+    }
+
+    /// Calls `body` for every blob record of a journal (after the base key and
+    /// `skipping` header records).
+    private static func journalEntries(_ journal: Data, skipping header: Int, _ body: (Key9, CASC.IndexEntry) -> Void) {
+        let size = journalRecordSize
+        journal.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else { return }
+            var p = 16 + header * size
+            while p + size <= raw.count {
+                let key9 = Key9(base + p)
+                let arc = Int(UInt16(raw[p + 16]) | UInt16(raw[p + 17]) << 8)
+                let offset = (0..<8).reduce(UInt64(0)) { $0 | UInt64(raw[p + 18 + $1]) << (8 * UInt64($1)) }
+                let entrySize = (0..<4).reduce(UInt32(0)) { $0 | UInt32(raw[p + 26 + $1]) << (8 * UInt32($1)) }
+                body(key9, CASC.IndexEntry(key: key9.data, archive: arc, offset: offset, size: entrySize))
+                p += size
+            }
+        }
+    }
 
     /// Opens the next archive. Nothing changes unless it all succeeds.
     private func startArchive() throws {
@@ -297,7 +404,7 @@ public final class CASCStorageWriter {
         guard next < CASC.maxArchives else { throw TACTError.unsupported("storage larger than \(CASC.maxArchives) archives") }
         try archiveHandle?.synchronize()
         let url = archiveURL(next)
-        let (headers, entries) = CASC.segmentHeaders(baseKey: baseKey, archive: next)
+        let headers = CASC.segmentHeaders(baseKey: baseKey, archive: next).data
         try headers.write(to: url) // replaces what an interrupted run may have left
         let handle = try FileHandle(forWritingTo: url)
         try handle.seekToEnd()
@@ -307,7 +414,6 @@ public final class CASCStorageWriter {
         }
         archive = next
         archiveHandle = handle
-        for (bucket, entry) in entries { buckets[bucket].append(entry) }
         archiveEnd = UInt64(headers.count)
         archiveSizes.append(archiveEnd)
     }
@@ -322,50 +428,195 @@ public final class CASCStorageWriter {
         unsyncedBytes = 0
     }
 
-    /// Rebuilds state from the journal. Data after the last journaled blob is
-    /// discarded; the next write continues right there.
-    private func replay(_ records: Data) throws {
+    /// Rebuilds state from the journal (after `skipping` header records).
+    /// Data after the last journaled blob is discarded (for an update with
+    /// nothing journaled yet, everything after the old end); the next write
+    /// continues right there.
+    private func replay(_ records: Data, skipping header: Int) throws {
         let size = Self.journalRecordSize
-        var bytes = [UInt8](records)
-        bytes = Array(bytes.prefix(bytes.count - bytes.count % size))
+        let usable = records.count - records.count % size
         var lastArchive = -1
         var lastEnd: UInt64 = 0
         var trusted = 0
-        for start in stride(from: 0, to: bytes.count, by: size) {
-            let r = Array(bytes[start..<start + size])
-            let key = Data(r[0..<16])
-            let arc = Int(UInt16(r[16]) | UInt16(r[17]) << 8)
-            let offset = (0..<8).reduce(UInt64(0)) { $0 | UInt64(r[18 + $1]) << (8 * UInt64($1)) }
-            let entrySize = (0..<4).reduce(UInt32(0)) { $0 | UInt32(r[26 + $1]) << (8 * UInt32($1)) }
-            let end = offset + UInt64(entrySize)
-            // Only trust records whose bytes made it to disk.
-            let fileSize = (try? FileManager.default.attributesOfItem(atPath: archiveURL(arc).path)[.size] as? UInt64) ?? 0
-            guard end <= fileSize else { break }
-            while archive < arc {
-                archive += 1
-                let (_, entries) = CASC.segmentHeaders(baseKey: baseKey, archive: archive)
-                for (bucket, e) in entries { buckets[bucket].append(e) }
-                archiveSizes.append(UInt64(CASC.segmentHeadersSize))
+        var fileSizes: [Int: UInt64] = [:]
+        try records.withUnsafeBytes { raw in
+            guard let base = raw.baseAddress else { return }
+            var p = header * size
+            while p + size <= usable {
+                let key9 = Key9(base + p)
+                let arc = Int(UInt16(raw[p + 16]) | UInt16(raw[p + 17]) << 8)
+                let offset = (0..<8).reduce(UInt64(0)) { $0 | UInt64(raw[p + 18 + $1]) << (8 * UInt64($1)) }
+                let entrySize = (0..<4).reduce(UInt32(0)) { $0 | UInt32(raw[p + 26 + $1]) << (8 * UInt32($1)) }
+                let end = offset + UInt64(entrySize)
+                // Only trust records whose bytes made it to disk.
+                if fileSizes[arc] == nil {
+                    fileSizes[arc] = (try? FileManager.default.attributesOfItem(atPath: archiveURL(arc).path)[.size] as? UInt64) ?? 0
+                }
+                guard arc >= max(archive, 0), end <= fileSizes[arc] ?? 0 else { break }
+                while archive < arc {
+                    archive += 1
+                    archiveSizes.append(UInt64(CASC.segmentHeadersSize))
+                }
+                resumed.append(key9)
+                archiveSizes[arc] = max(archiveSizes[arc], end)
+                lastArchive = arc
+                lastEnd = end
+                trusted += 1
+                p += size
             }
-            let key9 = Data(key.prefix(9))
-            buckets[CASC.bucket(of: key9)].append(CASC.IndexEntry(key: key9, archive: arc, offset: offset, size: entrySize))
-            stored.insert(key9)
-            archiveSizes[arc] = max(archiveSizes[arc], end)
-            lastArchive = arc
-            lastEnd = end
-            trusted += 1
         }
+        resumed.sort()
         // Forget records whose data never reached disk, or new writes would
         // land after them and a later replay would trust overwritten bytes.
-        try journal.truncate(atOffset: UInt64(16 + trusted * size))
+        try journal.truncate(atOffset: UInt64(16 + (header + trusted) * size))
         try journal.seekToEnd()
-        guard lastArchive >= 0 else { return }
-        // Drop anything written after the last journaled blob, then keep appending.
-        archive = lastArchive
-        archiveEnd = lastEnd
-        let handle = try FileHandle(forWritingTo: archiveURL(lastArchive))
-        try handle.truncate(atOffset: lastEnd)
-        try handle.seek(toOffset: lastEnd)
+        if lastArchive >= 0 {
+            archive = lastArchive
+            archiveEnd = lastEnd
+        }
+        guard archive >= 0 else { return }
+        // Drop anything written after that point, then keep appending.
+        let handle = try FileHandle(forWritingTo: archiveURL(archive))
+        try handle.truncate(atOffset: archiveEnd)
+        try handle.seek(toOffset: archiveEnd)
         archiveHandle = handle
+    }
+}
+
+/// The 9-byte keys a local storage holds, sorted per index bucket and
+/// searched by bisection: 16 bytes a key, a fraction of a `Set`'s cost.
+public struct StoredKeys: Sendable {
+    var buckets: [[Key9]]
+
+    public var count: Int { buckets.reduce(0) { $0 + $1.count } }
+    public func contains(_ key: Key9) -> Bool { buckets[key.bucket].sortedContains(key) }
+    public func contains(_ key: Key16) -> Bool { contains(key.prefix9) }
+
+    /// Nil when the folder holds no storage.
+    public static func load(_ directory: URL) throws -> StoredKeys? {
+        guard let state = try CASC.scanStorage(directory) else { return nil }
+        var buckets = [[Key9]](repeating: [], count: 16)
+        for bucket in 0..<16 {
+            var keys = try CASC.loadBucket(directory, bucket: bucket, version: state.versions[bucket]).compactMap { Key9($0.key) }
+            keys.sort()
+            var unique: [Key9] = []
+            unique.reserveCapacity(keys.count)
+            for key in keys where unique.last != key { unique.append(key) }
+            buckets[bucket] = unique
+        }
+        return StoredKeys(buckets: buckets)
+    }
+}
+
+extension CASC {
+    /// One `.idx` file: its sorted entries, then the changes its update
+    /// section records, oldest first (status 0: stored; anything else: gone
+    /// or not resident).
+    struct ParsedIndex {
+        var bucket: Int
+        var entries: [IndexEntry]
+        var updates: [(entry: IndexEntry, status: UInt8)]
+    }
+
+    /// Reads a v7 index file, checking its lookup3 hashes. The update
+    /// section (24-byte records in 512-byte pages after the sorted entries,
+    /// each guarded by `hashlittle(record[4..<23]) | 0x80000000`) is read too:
+    /// the game and the Agent append there before merging.
+    static func parseIndexFile(_ data: Data) throws -> ParsedIndex {
+        try data.withUnsafeBytes { raw -> ParsedIndex in
+            let b = raw.bindMemory(to: UInt8.self)
+            func u32(_ at: Int) -> UInt32 { UInt32(b[at]) | UInt32(b[at + 1]) << 8 | UInt32(b[at + 2]) << 16 | UInt32(b[at + 3]) << 24 }
+            func entry(_ at: Int) -> IndexEntry {
+                let so = (0..<5).reduce(UInt64(0)) { $0 << 8 | UInt64(b[at + 9 + $1]) }
+                return IndexEntry(key: Data(b[at..<at + 9]), archive: Int(so >> UInt64(offsetBits)),
+                                  offset: so & ((1 << UInt64(offsetBits)) - 1), size: u32(at + 14))
+            }
+            guard b.count >= 0x28 else { throw TACTError.malformed("index file") }
+            let headerSize = Int(u32(0))
+            guard headerSize >= 16, 8 + headerSize <= b.count,
+                  Lookup3.hashlittle(Array(b[8..<8 + headerSize]), 0) == u32(4) else { throw TACTError.malformed("index header") }
+            let revision = UInt16(b[8]) | UInt16(b[9]) << 8
+            guard revision == 7, b[0x0C] == 4, b[0x0D] == 5, b[0x0E] == 9, b[0x0F] == UInt8(offsetBits) else {
+                throw TACTError.unsupported("index format \(revision) (sizes \(b[0x0C])/\(b[0x0D])/\(b[0x0E]))")
+            }
+            let blockStart = (8 + headerSize + 15) & ~15
+            guard blockStart + 8 <= b.count else { throw TACTError.malformed("index file") }
+            let blockSize = Int(u32(blockStart))
+            let entriesStart = blockStart + 8
+            guard blockSize % 18 == 0, entriesStart + blockSize <= b.count else { throw TACTError.malformed("index entries") }
+            var entries: [IndexEntry] = []
+            entries.reserveCapacity(blockSize / 18)
+            var pc: UInt32 = 0, pb: UInt32 = 0
+            for at in stride(from: entriesStart, to: entriesStart + blockSize, by: 18) {
+                (pc, pb) = Lookup3.hashlittle2(Array(b[at..<at + 18]), pc, pb)
+                entries.append(entry(at))
+            }
+            guard pc == u32(blockStart + 4) else { throw TACTError.checksumMismatch("index file for bucket \(b[0x0A])") }
+
+            var updates: [(IndexEntry, UInt8)] = []
+            var page = (entriesStart + blockSize + 0x1FF) & ~0x1FF
+            while page + 0x200 <= b.count {
+                for slot in 0..<(0x200 / 24) {
+                    let at = page + slot * 24
+                    let guardValue = u32(at)
+                    if guardValue == 0 { break }
+                    guard guardValue & 0x8000_0000 != 0,
+                          Lookup3.hashlittle(Array(b[at + 4..<at + 23]), 0) | 0x8000_0000 == guardValue else { continue }
+                    updates.append((entry(at + 4), b[at + 22]))
+                }
+                page += 0x200
+            }
+            return ParsedIndex(bucket: Int(b[0x0A]), entries: entries, updates: updates)
+        }
+    }
+
+    /// One bucket's entries from its index file, update section applied.
+    static func loadBucket(_ directory: URL, bucket: Int, version: UInt32) throws -> [IndexEntry] {
+        let url = directory.appendingPathComponent(indexFileName(bucket: bucket, version: version))
+        let parsed = try parseIndexFile(Data(contentsOf: url, options: .alwaysMapped))
+        guard parsed.bucket == bucket else { throw TACTError.malformed("\(url.lastPathComponent) is for bucket \(parsed.bucket)") }
+        var entries = parsed.entries
+        for (entry, status) in parsed.updates {
+            entries.removeAll { $0.key == entry.key }
+            if status == 0 { entries.append(entry) }
+        }
+        return entries
+    }
+
+    /// A storage's shape, without its entries.
+    struct StorageState {
+        /// Newest index file version per bucket.
+        var versions: [UInt32]
+        /// Size of every data.### file, by archive number.
+        var archiveSizes: [UInt64]
+        /// Bytes 3–15 of the segment-header keys; the rest is per archive.
+        var baseKey: Data?
+    }
+
+    /// Nil when the folder holds no storage.
+    static func scanStorage(_ directory: URL) throws -> StorageState? {
+        let fm = FileManager.default
+        let files = (try? fm.contentsOfDirectory(atPath: directory.path)) ?? []
+        var latest: [Int: UInt32] = [:]
+        for name in files where name.count == 14 && name.hasSuffix(".idx") {
+            guard let bucket = Int(name.prefix(2), radix: 16), bucket < 16,
+                  let version = UInt32(name.dropFirst(2).prefix(8), radix: 16) else { continue }
+            latest[bucket] = max(latest[bucket] ?? 0, version)
+        }
+        let archiveNumbers = files.compactMap { name in name.wholeMatch(of: /data\.(\d{3})/).flatMap { Int($0.1) } }
+        guard !latest.isEmpty || !archiveNumbers.isEmpty else { return nil }
+        guard latest.count == 16 else { throw TACTError.malformed("storage in \(directory.path) has \(latest.count) of 16 index files") }
+        var state = StorageState(versions: (0..<16).map { latest[$0] ?? 0 }, archiveSizes: [], baseKey: nil)
+        if let highest = archiveNumbers.max() {
+            state.archiveSizes = (0...highest).map { archive in
+                let path = directory.appendingPathComponent(String(format: "data.%03d", archive)).path
+                return (try? fm.attributesOfItem(atPath: path)[.size] as? UInt64) ?? 0
+            }
+        }
+        if let handle = try? FileHandle(forReadingFrom: directory.appendingPathComponent("data.000")) {
+            defer { try? handle.close() }
+            if let head = try? handle.read(upToCount: 16), head.count == 16 { state.baseKey = Data(head.reversed()) }
+        }
+        return state
     }
 }

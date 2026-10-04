@@ -86,7 +86,7 @@ final class AppModel {
     }
 
     func canUpdate(_ game: Game) -> Bool {
-        GameUpdater.canUpdate(game.family) && game.appURL != nil && !running.contains(game.id) && !isBusy(game)
+        GameUpdate.canUpdate(game.install) && game.appURL != nil && !running.contains(game.id) && !isBusy(game)
     }
 
     /// Asks Blizzard's version service which build is live. Cheap (one small
@@ -94,9 +94,9 @@ final class AppModel {
     func checkForUpdates(force: Bool = false) async {
         if !force, let last = lastUpdateCheck, Date().timeIntervalSince(last) < 15 * 60 { return }
         lastUpdateCheck = Date()
-        for game in games where game.family != .other && game.appURL != nil {
+        for game in games where (game.family != .other || GameUpdate.canUpdate(game.install)) && game.appURL != nil {
             do {
-                let check = try await GameUpdater(install: game.install).check()
+                let check = try await GameUpdate(install: game.install).check()
                 updates[game.id] = check
                 Log.info(.gameUpdate, "checked", nil, ["uid": game.id, "installed": game.install.version ?? "?",
                                                        "latest": check.latest.name, "update_available": check.isUpdateAvailable])
@@ -110,12 +110,15 @@ final class AppModel {
     /// every file and repairs what's broken.
     func update(_ game: Game, verify: Bool = false) async {
         guard canUpdate(game) else { return }
+        defer { ProcessMemory.releaseFreed() }
         Log.info(.gameUpdate, "requested", nil, ["uid": game.id, "verify": verify])
         phases[game.id] = .updating(nil)
         do {
-            let updater = GameUpdater(install: game.install)
+            let updater = GameUpdate(install: game.install)
             let plan = try await updater.plan(target: updates[game.id]?.latest, verify: verify)
-            if !plan.isEmpty {
+            // A CASC game's new build can need no new files and still have to
+            // be recorded (configs, .build.info).
+            if !plan.isEmpty || plan.target.buildConfig != game.install.buildConfig {
                 try await updater.apply(plan) { [weak self] progress in
                     Task { @MainActor in
                         if case .updating = self?.phases[game.id] { self?.phases[game.id] = .updating(progress) }
@@ -142,10 +145,12 @@ final class AppModel {
 
     /// What a fresh install would download, for the install sheet.
     func installSize(_ product: InstallableProduct, folder: URL, region: Region, language: String) async throws -> UInt64 {
-        try await GameInstaller(product: product, folder: folder, region: region, language: language).plan().downloadSize
+        defer { ProcessMemory.releaseFreed() }
+        return try await GameInstaller(product: product, folder: folder, region: region, language: language).plan().downloadSize
     }
 
     func install(_ product: InstallableProduct, folder: URL, region: Region, language: String) async {
+        defer { ProcessMemory.releaseFreed() }
         guard !isBusy(uid: product.uid) else { return }
         Log.notice(.install, "requested", nil, ["uid": product.uid, "path": folder.path, "region": region.rawValue, "language": language])
         phases[product.uid] = .updating(nil)

@@ -144,19 +144,39 @@ func matchesAgentWrittenStorage() throws {
 // MARK: - Installer pieces
 
 @Test func batchesMergeNeighboursAndSplitOnGapsAndSize() {
-    func item(_ archive: String, _ offset: UInt64, _ size: UInt64) -> StorageItem {
-        StorageItem(encodedKey: Data([UInt8(offset & 0xFF)]), size: size,
-                    location: ArchiveLocation(archive: archive, offset: offset, size: size), fullKey: false)
+    // Archive 0 is "a", 1 is "b".
+    func item(_ archive: Int32, _ offset: UInt32, _ size: UInt64) -> StorageItem {
+        var item = StorageItem(key: Key16(hi: UInt64(archive), lo: UInt64(offset)), size: size, fullKey: false)
+        item.archive = archive
+        item.offset = offset
+        return item
     }
-    let loose = StorageItem(encodedKey: Data([9]), size: 5, location: nil, fullKey: false)
-    let items = [item("b", 0, 100), item("a", 300, 100), item("a", 0, 100), item("a", 100, 100),
-                 item("a", 10_000, 100), loose]
+    let loose = StorageItem(key: Key16(hi: 9, lo: 9), size: 5, fullKey: false)
+    let items = [item(1, 0, 100), item(0, 300, 100), item(0, 0, 100), item(0, 100, 100), item(0, 10_000, 100), loose]
     let batches = CASCInstaller.batches(items, maxBytes: 1_000, maxGap: 500)
-    #expect(batches.map(\.archive) == ["a", "a", "b", nil])
-    #expect(batches[0].items.count == 3)       // 0, 100 and 300 (gap 100)
+    #expect(batches.map(\.archive) == [0, 0, 1, -1])
+    #expect(batches[0].items == [2, 3, 1])     // offsets 0, 100 and 300 (gap 100)
     #expect((batches[0].start, batches[0].end) == (0, 400))
     #expect(batches[1].start == 10_000)          // gap too big
-    #expect(CASCInstaller.batches(items, maxBytes: 250, maxGap: 500).filter { $0.archive == "a" }.count == 3)
+    #expect(batches[3].items == [5])
+    #expect(CASCInstaller.batches(items, maxBytes: 250, maxGap: 500).filter { $0.archive == 0 }.count == 3)
+    // Already stored items are left out.
+    #expect(CASCInstaller.batches(items, maxBytes: 1_000, maxGap: 500) { $0.offset == 100 }[0].items == [2, 1])
+}
+
+/// Keys as integers keep the byte order, and the bucket matches the Data path.
+@Test func compactKeysMatchTheirBytes() {
+    let bytes = Data((0..<16).map { UInt8(truncatingIfNeeded: $0 * 17 + 3) })
+    let key = Key16(bytes)!
+    #expect(key.data == bytes)
+    #expect(key.hex == bytes.hex)
+    #expect(key.prefix9 == Key9(bytes)!)
+    #expect(key.prefix9.data == bytes.prefix(9))
+    #expect(key.prefix9.bucket == CASC.bucket(of: bytes))
+    let smaller = Key16(Data([0x00] + [UInt8](repeating: 0xFF, count: 15)))!, larger = Key16(Data([0x01] + [UInt8](repeating: 0, count: 15)))!
+    #expect(smaller < larger)
+    #expect([Key9(hi: 1, lo: 0), Key9(hi: 1, lo: 5), Key9(hi: 2, lo: 0)].sortedContains(Key9(hi: 1, lo: 5)))
+    #expect(![Key9(hi: 1, lo: 0), Key9(hi: 2, lo: 0)].sortedContains(Key9(hi: 1, lo: 5)))
 }
 
 @Test func verifiesBlobsWithoutDecodingThem() throws {
@@ -232,4 +252,141 @@ func matchesAgentWrittenStorage() throws {
     #expect(try Data(contentsOf: archive) == before)
     #expect(try fm.contentsOfDirectory(atPath: dir.path).filter { $0.hasSuffix(".idx") }.count == 16)
     #expect(!fm.fileExists(atPath: dir.appendingPathComponent(".waypoint-journal").path))
+}
+
+// MARK: - Updates (adding to a finished storage)
+
+private func storageKey(_ i: Int) -> Data { Data((0..<16).map { UInt8(truncatingIfNeeded: $0 &* 13 &+ i &* 29 &+ 1) }) }
+private func storageBlob(_ i: Int) -> Data { Data(repeating: UInt8(truncatingIfNeeded: i), count: 200 + i) }
+
+/// Every key's index entry points at its header and blob in the archive.
+private func expectStored(_ keys: Range<Int>, in dir: URL, version: UInt32) throws {
+    let fm = FileManager.default
+    let indexes = try fm.contentsOfDirectory(atPath: dir.path).filter { $0.hasSuffix(".idx") }.sorted()
+    #expect(indexes == (0..<16).map { CASC.indexFileName(bucket: $0, version: version) })
+    var entries: [Data: CASC.IndexEntry] = [:]
+    for bucket in 0..<16 {
+        for entry in parseIndex(try Data(contentsOf: dir.appendingPathComponent(CASC.indexFileName(bucket: bucket, version: version))))
+        where entry.size != 30 {
+            #expect(entries[entry.key] == nil, "one entry per key")
+            entries[entry.key] = entry
+        }
+    }
+    #expect(entries.count == keys.count)
+    for i in keys {
+        let entry = try #require(entries[storageKey(i).prefix(9)])
+        let archive = try Data(contentsOf: dir.appendingPathComponent(String(format: "data.%03d", entry.archive)))
+        let start = Int(entry.offset)
+        #expect(archive.subdata(in: start..<start + 30)
+                == CASC.entryHeader(encodedKey: storageKey(i), blobSize: storageBlob(i).count, archive: entry.archive, offset: entry.offset, fullKey: false))
+        #expect(archive.subdata(in: start + 30..<start + Int(entry.size)) == storageBlob(i))
+    }
+    let shmem = try Data(contentsOf: dir.appendingPathComponent("shmem"))
+    #expect((0..<16).allSatisfy { shmem[0x110 + 4 * $0] == UInt8(version) })
+    #expect(!fm.fileExists(atPath: dir.appendingPathComponent(".waypoint-journal").path))
+}
+
+@Test func updateAppendsToAFinishedStorage() throws {
+    let fm = FileManager.default
+    let dir = fm.temporaryDirectory.appendingPathComponent("waypoint-casc-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: dir) }
+    let first = try CASCStorageWriter(directory: dir)
+    for i in 0..<20 { try first.append(encodedKey: storageKey(i), blob: storageBlob(i), fullKey: false) }
+    try first.finish()
+    let before = try Data(contentsOf: dir.appendingPathComponent("data.000"))
+    try expectStored(0..<20, in: dir, version: 1)
+
+    let update = try CASCStorageWriter(directory: dir, allowExisting: true)
+    #expect(update.isUpdate)
+    #expect(update.contains(storageKey(7)))
+    for i in 15..<30 { try update.append(encodedKey: storageKey(i), blob: storageBlob(i), fullKey: false) } // 15..<20 are skipped
+    try update.finish()
+
+    try expectStored(0..<30, in: dir, version: 2)
+    let after = try Data(contentsOf: dir.appendingPathComponent("data.000"))
+    #expect(after.prefix(before.count) == before, "existing data is never rewritten")
+    #expect(after.count == before.count + (20..<30).reduce(0) { $0 + 30 + storageBlob($1).count })
+
+    // A second update with nothing new still leaves a consistent storage.
+    let noop = try CASCStorageWriter(directory: dir, allowExisting: true)
+    try noop.finish()
+    try expectStored(0..<30, in: dir, version: 3)
+}
+
+@Test func interruptedUpdateResumesAndKeepsOldData() throws {
+    let fm = FileManager.default
+    let dir = fm.temporaryDirectory.appendingPathComponent("waypoint-casc-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: dir) }
+    let first = try CASCStorageWriter(directory: dir)
+    for i in 0..<10 { try first.append(encodedKey: storageKey(i), blob: storageBlob(i), fullKey: false) }
+    try first.finish()
+    let archive0 = dir.appendingPathComponent("data.000")
+    let before = try Data(contentsOf: archive0)
+
+    func addGarbage() throws {
+        let handle = try FileHandle(forWritingTo: archive0)
+        try handle.seekToEnd()
+        try handle.write(contentsOf: Data(repeating: 0xEE, count: 333))
+        try handle.close()
+    }
+    // Crash before anything was written: the garbage after the old end goes.
+    var update: CASCStorageWriter? = try CASCStorageWriter(directory: dir, allowExisting: true)
+    update = nil
+    try addGarbage()
+    // Crash midway: the old index files are still the complete old storage.
+    update = try CASCStorageWriter(directory: dir, allowExisting: true)
+    for i in 10..<15 { try update!.append(encodedKey: storageKey(i), blob: storageBlob(i), fullKey: false) }
+    update = nil
+    try addGarbage()
+    try expectStoredIndexesOnly(dir, version: 1)
+
+    let resumed = try CASCStorageWriter(directory: dir, allowExisting: false) // a journal: resuming needs no permission
+    #expect(resumed.isUpdate)
+    #expect(resumed.contains(storageKey(12)) && resumed.contains(storageKey(3)))
+    for i in 15..<20 { try resumed.append(encodedKey: storageKey(i), blob: storageBlob(i), fullKey: false) }
+    try resumed.finish()
+
+    try expectStored(0..<20, in: dir, version: 2)
+    let after = try Data(contentsOf: archive0)
+    #expect(after.prefix(before.count) == before)
+    #expect(after.count == before.count + (10..<20).reduce(0) { $0 + 30 + storageBlob($1).count })
+}
+
+private func expectStoredIndexesOnly(_ dir: URL, version: UInt32) throws {
+    let names = try FileManager.default.contentsOfDirectory(atPath: dir.path).filter { $0.hasSuffix(".idx") }.sorted()
+    #expect(names == (0..<16).map { CASC.indexFileName(bucket: $0, version: version) })
+}
+
+/// The update section the game and the Agent append to before merging:
+/// later records win, and a non-zero status removes the key.
+@Test func loadsIndexUpdateSection() throws {
+    let fm = FileManager.default
+    let dir = fm.temporaryDirectory.appendingPathComponent("waypoint-casc-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: dir) }
+    try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+    let a = Data(repeating: 0x11, count: 9), b = Data(repeating: 0x22, count: 9), c = Data(repeating: 0x33, count: 9)
+    var index = [UInt8](CASC.indexFile(bucket: 0, entries: [
+        CASC.IndexEntry(key: a, archive: 0, offset: 0x1E0, size: 100),
+        CASC.IndexEntry(key: b, archive: 0, offset: 0x244, size: 100),
+    ]))
+    func record(_ key: Data, offset: UInt64, size: UInt32, status: UInt8) -> [UInt8] {
+        var body = [UInt8](key) + (0..<5).reversed().map { UInt8(truncatingIfNeeded: offset >> (8 * UInt64($0))) }
+        body += CASC.le32(size) + [status]
+        let guardValue = Lookup3.hashlittle(body, 0) | 0x8000_0000
+        return CASC.le32(guardValue) + body + [0]
+    }
+    let page = (0x28 + 2 * 18 + 0x1FF) & ~0x1FF
+    let updates = record(c, offset: 0x2A8, size: 50, status: 0) + record(b, offset: 0x244, size: 100, status: 3)
+    index.replaceSubrange(page..<page + updates.count, with: updates)
+    try Data(index).write(to: dir.appendingPathComponent(CASC.indexFileName(bucket: 0, version: 5)))
+    for bucket in 1..<16 {
+        try CASC.indexFile(bucket: bucket, entries: []).write(to: dir.appendingPathComponent(CASC.indexFileName(bucket: bucket, version: 5)))
+    }
+    let state = try #require(try CASC.scanStorage(dir))
+    #expect(state.versions == [UInt32](repeating: 5, count: 16))
+    let entries = try CASC.loadBucket(dir, bucket: 0, version: 5)
+    #expect(Set(entries.map(\.key)) == [a, c])
+    #expect(entries.first { $0.key == c }?.size == 50)
+    let keys = try #require(try StoredKeys.load(dir))
+    #expect(keys.count == 2)
 }

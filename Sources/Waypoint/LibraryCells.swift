@@ -79,7 +79,7 @@ final class GameCell: NSView {
             detail.textColor = .systemRed
         default:
             if state.update != nil, !state.isRunning {
-                detail.stringValue = GameUpdater.canUpdate(game.family) ? "Update available" : "Update available in Battle.net"
+                detail.stringValue = GameUpdate.canUpdate(game.install) ? "Update available" : "Update available in Battle.net"
                 detail.textColor = .systemOrange
             } else {
                 detail.stringValue = Self.summary(of: game)
@@ -103,7 +103,7 @@ final class GameCell: NSView {
             case .updating:
                 break
             case .idle, .failed:
-                let updates = state.update != nil && GameUpdater.canUpdate(game.family)
+                let updates = state.update != nil && GameUpdate.canUpdate(game.install)
                 button.title = updates ? "Update" : "Play"
                 button.isEnabled = updates ? state.canUpdate : state.canPlay
                 button.isHidden = false
@@ -125,7 +125,7 @@ final class GameCell: NSView {
     @objc private func primaryAction() {
         guard let state, let model else { return }
         let game = state.game
-        if state.update != nil, GameUpdater.canUpdate(game.family) {
+        if state.update != nil, GameUpdate.canUpdate(game.install) {
             Task { await model.update(game) }
         } else {
             Task { await model.play(game) }
@@ -144,7 +144,7 @@ final class GameCell: NSView {
             menu.addItem(ActionItem("Play Without Updating") { Task { await model.play(game) } })
         }
         menu.addItem(ActionItem("Sign In Again and Play") { Task { await model.play(game, forceSignIn: true) } })
-        if GameUpdater.canUpdate(game.family) {
+        if GameUpdate.canUpdate(game.install) {
             menu.addItem(.separator())
             menu.addItem(ActionItem("Verify Files") { Task { await model.update(game, verify: true) } })
         }
