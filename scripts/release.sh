@@ -82,7 +82,8 @@ if (( publish )); then
     git merge-base --is-ancestor HEAD origin/main || fail "HEAD is not on origin/main; push it first"
     gh auth status >/dev/null 2>&1 || fail "gh is not logged in"
     command -v aws >/dev/null || fail "aws CLI not found (brew install awscli)"
-    s3 ls "s3://$s3_bucket/$s3_prefix/" >/dev/null || fail "can't reach s3://$s3_bucket/$s3_prefix/; check the S3 credentials"
+    # List the bucket, not the prefix: `aws s3 ls` exits 1 on an empty prefix (the first release).
+    s3 ls "s3://$s3_bucket/" >/dev/null || fail "can't reach s3://$s3_bucket/; check the S3 credentials"
 fi
 
 step "Testing"
