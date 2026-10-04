@@ -204,6 +204,10 @@ final class LoginWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler {
     /// see this login's session, so it can't say the BattleTag or email.
     private(set) var typedAccountName: String?
 
+    /// WebKit lets only browsers and the site's own apps use passkeys, so
+    /// Blizzard's passkey sign-in can't finish in this window.
+    private static let passkeyNotice = "Passkeys don’t work in Waypoint. If Battle.net asks for one, sign in with your password instead."
+
     private static let accountNameHandler = "waypointAccountName"
     /// Reports the login form's account name (`#accountName`) when it's
     /// submitted, however the page submits it.
@@ -261,28 +265,24 @@ final class LoginWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler {
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 480, height: 640),
                                   styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
             window.title = title
-            if let notice {
-                let label = NSTextField(wrappingLabelWithString: notice)
-                label.textColor = .secondaryLabelColor
-                label.font = .preferredFont(forTextStyle: .subheadline)
-                let container = NSView()
-                for view in [label, webView] {
-                    view.translatesAutoresizingMaskIntoConstraints = false
-                    container.addSubview(view)
-                }
-                NSLayoutConstraint.activate([
-                    label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
-                    label.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
-                    label.topAnchor.constraint(equalTo: container.topAnchor, constant: 12),
-                    webView.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 12),
-                    webView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
-                    webView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
-                    webView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
-                ])
-                window.contentView = container
-            } else {
-                window.contentView = webView
+            let label = NSTextField(wrappingLabelWithString: [notice, Self.passkeyNotice].compactMap { $0 }.joined(separator: "\n\n"))
+            label.textColor = .secondaryLabelColor
+            label.font = .preferredFont(forTextStyle: .subheadline)
+            let container = NSView()
+            for view in [label, webView] {
+                view.translatesAutoresizingMaskIntoConstraints = false
+                container.addSubview(view)
             }
+            NSLayoutConstraint.activate([
+                label.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+                label.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
+                label.topAnchor.constraint(equalTo: container.topAnchor, constant: 12),
+                webView.topAnchor.constraint(equalTo: label.bottomAnchor, constant: 12),
+                webView.leadingAnchor.constraint(equalTo: container.leadingAnchor),
+                webView.trailingAnchor.constraint(equalTo: container.trailingAnchor),
+                webView.bottomAnchor.constraint(equalTo: container.bottomAnchor),
+            ])
+            window.contentView = container
             window.isReleasedWhenClosed = false
             window.delegate = self
             window.center()
