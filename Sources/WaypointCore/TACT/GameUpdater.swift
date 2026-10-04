@@ -175,7 +175,10 @@ public struct GameUpdater: Sendable {
 
     /// Downloads and installs a plan. Nothing in the game folder changes until
     /// every file has been downloaded and verified; interrupted runs resume.
-    public func apply(_ plan: UpdatePlan, progress: @escaping @Sendable (UpdateProgress) -> Void = { _ in }) async throws {
+    /// `record: false` leaves the install records alone (CASC installs use this
+    /// for their loose files and record the whole install themselves).
+    public func apply(_ plan: UpdatePlan, record: Bool = true,
+                      progress: @escaping @Sendable (UpdateProgress) -> Void = { _ in }) async throws {
         let started = Date()
         guard RunningProcesses.inside(root).isEmpty else {
             Log.warning(.gameUpdate, "apply_refused", "game is running", ["uid": install.uid])
@@ -237,8 +240,10 @@ public struct GameUpdater: Sendable {
         for path in plan.deletions {
             try? fm.removeItem(at: try safeURL(path))
         }
-        try store.record(uid: install.uid, InstalledBuild(buildConfig: plan.target.buildConfig, version: plan.target.name,
-                                                          install: plan.install))
+        if record {
+            try store.record(uid: install.uid, InstalledBuild(buildConfig: plan.target.buildConfig, version: plan.target.name,
+                                                              install: plan.install))
+        }
         try? fm.removeItem(at: stagingDirectory)
         Log.notice(.gameUpdate, "apply_finished", nil, ["uid": install.uid, "version": plan.target.name, "files": plan.files.count,
                                                        "deletions": plan.deletions.count, "duration_ms": Int(Date().timeIntervalSince(started) * 1000)])

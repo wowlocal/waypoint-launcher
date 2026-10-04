@@ -23,8 +23,9 @@ public struct Game: Identifiable, Equatable, Sendable {
     public var runsNatively: Bool { architectures.contains(.arm64) }
 
     /// Whether Waypoint knows how to log this game in without Battle.net.
+    /// Intel-only games run through Rosetta when it's installed.
     public var isSupported: Bool {
-        family != .other && appURL != nil && runsNatively
+        InstallableProduct.forProduct(install.productCode) != nil && appURL != nil && (runsNatively || Rosetta.isInstalled)
     }
 }
 
@@ -73,8 +74,8 @@ public enum GameCatalog {
     public static func game(for install: ProductInstall, fileManager: FileManager = .default) -> Game {
         let family = family(for: install.productCode)
         let root = URL(fileURLWithPath: install.installPath, isDirectory: true)
-        let appURL: URL?
-        let name: String
+        var appURL: URL?
+        var name: String
 
         switch family {
         case .hearthstone:
@@ -89,6 +90,12 @@ public enum GameCatalog {
                 .compactMap { firstApp(in: root.appendingPathComponent($0), prefix: nil, fileManager) }
                 .first
             name = otherNames[install.productCode] ?? install.productCode
+        }
+
+        // Known products: the exact app the product config names.
+        if let product = InstallableProduct.forProduct(install.productCode) {
+            name = product.displayName
+            if let exact = existing(root.appendingPathComponent(product.appPath), fileManager) { appURL = exact }
         }
 
         return Game(
@@ -180,5 +187,11 @@ public struct GameLibrary {
 
     public func games() -> [Game] {
         installs().map { GameCatalog.game(for: $0, fileManager: fileManager) }
+    }
+}
+
+public enum Rosetta {
+    public static var isInstalled: Bool {
+        FileManager.default.fileExists(atPath: "/Library/Apple/usr/libexec/oah/libRosettaRuntime")
     }
 }

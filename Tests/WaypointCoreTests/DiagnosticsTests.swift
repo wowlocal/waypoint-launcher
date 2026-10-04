@@ -58,11 +58,32 @@ private func tempDir() throws -> URL {
     #expect(log.events().last?.event == "event_199")
 }
 
-@Test func freshInstallTagsMatchBattleNetShape() {
-    let tags = InstallableProduct.hearthstone.tagString(region: .eu, language: "ruRU")
-    #expect(tags.hasPrefix("OSX adventure base bgs dbf"))
-    #expect(tags.contains("EU? ruRU speech?:OSX"))
-    #expect(tags.hasSuffix("EU? ruRU text?"))
+@Test func readsProductConfigsLikeTheAgent() throws {
+    let hearthstone = try ProductConfig(json: Data("""
+    {"all":{"config":{"data_dir":"Data/","supported_locales":["enUS","ruRU"]}},
+     "platform":{"mac":{"config":{"update_method":"containerless ngdp","tags":["OSX","manifest","base"],
+       "binaries":{"game":{"relative_path":"Hearthstone.app","launch_arguments":["-launch"]}}}}}}
+    """.utf8))
+    #expect(hearthstone.isContainerless)
+    #expect(hearthstone.subfolder == "")
+    #expect(hearthstone.tagString(region: .eu, language: "ruRU") == "OSX manifest base EU? ruRU speech?:OSX manifest base EU? ruRU text?")
+
+    let wow = try ProductConfig(json: Data("""
+    {"all":{"config":{"data_dir":"Data/","shared_container_default_subfolder":"_classic_era_"}},
+     "platform":{"mac":{"config":{"tags":["OSX"],"tags_64bit":["x86_64"],
+       "binaries":{"game":{"relative_path":"World of Warcraft Classic.app","launch_arguments":[]}}}}}}
+    """.utf8))
+    #expect(!wow.isContainerless)
+    #expect(wow.subfolder == "_classic_era_")
+    #expect(wow.tagString(region: .us, language: "enUS").hasPrefix("OSX x86_64 arm64 US? enUS speech?"))
+
+    let starcraft = try ProductConfig(json: Data("""
+    {"all":{"config":{"data_dir":"Data/","noigr_tags":["noigr"]}},
+     "platform":{"mac":{"config":{"tags":["OSX"],"binaries":{"game":{"relative_path":"x86/StarCraft.app",
+       "relative_path_64":"x86_64/StarCraft.app","launch_arguments":["-launch"]}}}}}}
+    """.utf8))
+    #expect(starcraft.gameBinary == "x86_64/StarCraft.app")
+    #expect(starcraft.extraTags == ["noigr"])
 }
 
 @Test func mapsSystemLanguagesToGameLanguages() {
@@ -86,7 +107,7 @@ private func tempDir() throws -> URL {
     let store = InstallStateStore(file: dir.appendingPathComponent("installs.json"))
     let folder = dir.appendingPathComponent("Hearthstone")
     try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-    let install = InstallableProduct.hearthstone.install(at: folder, region: .eu, language: "enUS")
+    let install = InstallableProduct.hearthstone.install(at: folder, region: .eu, language: "enUS", tagString: "OSX EU? enUS speech?:OSX EU? enUS text?")
     try store.record(uid: install.uid, InstalledBuild(buildConfig: "abc", version: "36.6.3", install: install))
 
     let library = GameLibrary(agentDatabase: dir.appendingPathComponent("missing.db"), searchRoots: [], stateStore: store)

@@ -1,51 +1,78 @@
 import Foundation
 
-/// A game Waypoint can install from scratch. Installing is the updater run
-/// against an empty folder: the same manifest, tag selection, download and
-/// verification, with every file missing.
-///
-/// Only games stored as loose files qualify. WoW keeps its data in a CASC
-/// archive store, which Waypoint can't write yet.
+/// A Battle.net game with a macOS client: what Waypoint needs to install and
+/// launch it. Layout facts come from each product's Blizzard product config
+/// (see ProductConfig); tags and folders are re-read from it at install
+/// time, so this only pins down what doesn't change between builds.
 public struct InstallableProduct: Sendable, Identifiable, Equatable {
     public var id: String { uid }
+    /// Battle.net's install uid; also what `-uid` passes to the game.
     public var uid: String
     public var productCode: String
     public var displayName: String
-    /// Folder name under the chosen location, e.g. /Applications/Hearthstone.
+    /// Default folder under /Applications. WoW flavors share one.
     public var folderName: String
+    /// `Launch Options/<codename>/…` in the net.battle preferences, and the
+    /// web login's `app=` value.
+    public var codename: String
+    /// The game's `.app`, relative to the install root (flavor folder included).
+    public var appPath: String
+    /// Arguments from the product config; Waypoint adds `-uid <uid>`.
+    public var launchArguments: [String]
+    /// Run from the flavor folder rather than the install root.
+    public var flavorFolder: String?
+    /// Stored as loose files only, with no local CASC storage (Hearthstone).
+    public var isContainerless: Bool
     /// Game languages, as Blizzard locale codes.
     public var languages: [String]
-    /// Content tags Battle.net selects for a full install. Taken from the
-    /// `active_tag_string` of a Battle.net install, which selects exactly the
-    /// files it puts on disk.
-    var contentTags: [String]
+
+    static let commonLanguages = ["enUS", "deDE", "esES", "esMX", "frFR", "itIT", "koKR", "plPL", "ptBR", "ruRU", "zhCN", "zhTW"]
 
     public static let hearthstone = InstallableProduct(
-        uid: "hs_beta",
-        productCode: "hsb",
-        displayName: "Hearthstone",
-        folderName: "Hearthstone",
-        languages: ["enUS", "deDE", "esES", "esMX", "frFR", "itIT", "jaJP", "koKR",
-                    "plPL", "ptBR", "ruRU", "thTH", "zhCN", "zhTW"],
-        contentTags: ["adventure", "base", "bgs", "dbf", "essential", "heromusic", "initial", "manifest",
-                      "merc", "musicexpansion", "playsound", "porthigh", "portpremium", "soundlegend",
-                      "soundmission", "soundotherminion", "strings"]
-    )
+        uid: "hs_beta", productCode: "hsb", displayName: "Hearthstone", folderName: "Hearthstone", codename: "WTCG",
+        appPath: "Hearthstone.app", launchArguments: ["-launch"], flavorFolder: nil, isContainerless: true,
+        languages: commonLanguages + ["jaJP", "thTH"])
 
-    public static let all: [InstallableProduct] = [.hearthstone]
+    public static let all: [InstallableProduct] = [
+        .hearthstone,
+        InstallableProduct(uid: "wow", productCode: "wow", displayName: "World of Warcraft", folderName: "World of Warcraft",
+                           codename: "WoW", appPath: "_retail_/World of Warcraft.app", launchArguments: ["-launcherlogin"],
+                           flavorFolder: "_retail_", isContainerless: false, languages: commonLanguages.filter { $0 != "plPL" }),
+        InstallableProduct(uid: "wow_classic", productCode: "wow_classic", displayName: "WoW Classic", folderName: "World of Warcraft",
+                           codename: "WoW", appPath: "_classic_/World of Warcraft Classic.app", launchArguments: ["-launcherlogin"],
+                           flavorFolder: "_classic_", isContainerless: false,
+                           languages: ["enUS", "deDE", "esES", "frFR", "koKR", "ruRU", "zhCN", "zhTW"]),
+        InstallableProduct(uid: "wow_classic_era", productCode: "wow_classic_era", displayName: "WoW Classic Era", folderName: "World of Warcraft",
+                           codename: "WoW", appPath: "_classic_era_/World of Warcraft Classic.app", launchArguments: ["-launcherlogin"],
+                           flavorFolder: "_classic_era_", isContainerless: false,
+                           languages: ["enUS", "deDE", "esES", "esMX", "frFR", "koKR", "ptBR", "ruRU", "zhCN", "zhTW"]),
+        InstallableProduct(uid: "wow_anniversary", productCode: "wow_anniversary", displayName: "WoW Classic Anniversary", folderName: "World of Warcraft",
+                           codename: "WoW", appPath: "_anniversary_/World of Warcraft Classic.app",
+                           launchArguments: ["-launcherlogin", "-initialgamemode=bccfresh"],
+                           flavorFolder: "_anniversary_", isContainerless: false, languages: commonLanguages + ["jaJP", "thTH"]),
+        InstallableProduct(uid: "s2", productCode: "s2", displayName: "StarCraft II", folderName: "StarCraft II", codename: "S2",
+                           appPath: "Support/SC2Switcher.app", launchArguments: ["-launch"], flavorFolder: nil, isContainerless: false,
+                           languages: commonLanguages),
+        InstallableProduct(uid: "s1", productCode: "s1", displayName: "StarCraft", folderName: "StarCraft", codename: "S1",
+                           appPath: "x86_64/StarCraft.app", launchArguments: ["-launch"], flavorFolder: nil, isContainerless: false,
+                           languages: commonLanguages),
+        InstallableProduct(uid: "d3", productCode: "d3", displayName: "Diablo III", folderName: "Diablo III", codename: "D3",
+                           appPath: "Diablo III.app", launchArguments: ["-launch"], flavorFolder: nil, isContainerless: false,
+                           languages: commonLanguages.filter { $0 != "zhCN" }),
+        InstallableProduct(uid: "w3", productCode: "w3", displayName: "Warcraft III", folderName: "Warcraft III", codename: "W3",
+                           appPath: "_retail_/x86_64/Warcraft III.app", launchArguments: ["-launch"], flavorFolder: "_retail_",
+                           isContainerless: false, languages: commonLanguages),
+        InstallableProduct(uid: "hero", productCode: "hero", displayName: "Heroes of the Storm", folderName: "Heroes of the Storm",
+                           codename: "Hero", appPath: "Support/HeroesSwitcher.app", launchArguments: ["-launch"], flavorFolder: nil,
+                           isContainerless: false, languages: commonLanguages),
+    ]
 
-    /// The tag string Battle.net would record for this install: one group for
-    /// speech and one for text, both in the chosen language.
-    public func tagString(region: Region, language: String) -> String {
-        let common = (["OSX"] + contentTags + ["\(region.launchOptionValue)?", language]).joined(separator: " ")
-        return "\(common) speech?:\(common) text?"
-    }
+    public static func forProduct(_ code: String) -> InstallableProduct? { all.first { $0.productCode == code } }
 
     /// The install record for a fresh install into `folder`.
-    public func install(at folder: URL, region: Region, language: String) -> ProductInstall {
+    public func install(at folder: URL, region: Region, language: String, tagString: String) -> ProductInstall {
         ProductInstall(uid: uid, productCode: productCode, installPath: folder.standardizedFileURL.path,
-                       region: region.rawValue, textLanguage: language,
-                       tagString: tagString(region: region, language: language))
+                       region: region.rawValue, textLanguage: language, tagString: tagString)
     }
 
     /// The game language closest to the user's preferred languages.

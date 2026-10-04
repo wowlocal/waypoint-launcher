@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 import Testing
 @testable import WaypointCore
@@ -138,4 +139,37 @@ func matchesAgentWrittenStorage() throws {
     // Nothing but whole entries: the garbage was cut off.
     let expectedSize = CASC.segmentHeadersSize + (0..<30).reduce(0) { $0 + 30 + blob($1).count }
     #expect(archive.count == expectedSize)
+}
+
+// MARK: - Installer pieces
+
+@Test func batchesMergeNeighboursAndSplitOnGapsAndSize() {
+    func item(_ archive: String, _ offset: UInt64, _ size: UInt64) -> StorageItem {
+        StorageItem(encodedKey: Data([UInt8(offset & 0xFF)]), size: size,
+                    location: ArchiveLocation(archive: archive, offset: offset, size: size), fullKey: false)
+    }
+    let loose = StorageItem(encodedKey: Data([9]), size: 5, location: nil, fullKey: false)
+    let items = [item("b", 0, 100), item("a", 300, 100), item("a", 0, 100), item("a", 100, 100),
+                 item("a", 10_000, 100), loose]
+    let batches = CASCInstaller.batches(items, maxBytes: 1_000, maxGap: 500)
+    #expect(batches.map(\.archive) == ["a", "a", "b", nil])
+    #expect(batches[0].items.count == 3)       // 0, 100 and 300 (gap 100)
+    #expect((batches[0].start, batches[0].end) == (0, 400))
+    #expect(batches[1].start == 10_000)          // gap too big
+    #expect(CASCInstaller.batches(items, maxBytes: 250, maxGap: 500).filter { $0.archive == "a" }.count == 3)
+}
+
+@Test func verifiesBlobsWithoutDecodingThem() throws {
+    let chunk = Data("N".utf8) + Data("hello".utf8)
+    var blob = Data("BLTE".utf8) + Data([0, 0, 0, 36, 0x0F, 0, 0, 1])
+    blob += Data([0, 0, 0, UInt8(chunk.count), 0, 0, 0, 5]) + Data(Insecure.MD5.hash(data: chunk))
+    blob += chunk
+    let key = Data(Insecure.MD5.hash(data: blob.prefix(36)))
+    try BLTE.verify(blob, encodedKey: key)
+
+    var badChunk = blob
+    badChunk[badChunk.count - 1] ^= 1
+    #expect(throws: TACTError.self) { try BLTE.verify(badChunk, encodedKey: key) }
+    #expect(throws: TACTError.self) { try BLTE.verify(blob, encodedKey: Data(repeating: 0, count: 16)) }
+    #expect(throws: TACTError.self) { try BLTE.verify(blob + Data([0]), encodedKey: key) }
 }

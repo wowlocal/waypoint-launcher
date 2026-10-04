@@ -92,3 +92,24 @@ private func makeFakeApp(at url: URL, executable: String, arch: String = "arm64"
     let missing = GameCatalog.game(for: ProductInstall(uid: "wow", productCode: "wow", installPath: "/nonexistent"))
     #expect(throws: LaunchError.self) { try GameLauncher.plan(for: missing) }
 }
+
+@Test func warcraftAndStarCraftLaunchLikeTheirProductConfigs() throws {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("waypoint-casc-games-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: root) }
+    try makeFakeApp(at: root.appendingPathComponent("_retail_/x86_64/Warcraft III.app"), executable: "Warcraft III")
+    try makeFakeApp(at: root.appendingPathComponent("Support/SC2Switcher.app"), executable: "SC2Switcher")
+
+    let w3 = GameCatalog.game(for: ProductInstall(uid: "w3", productCode: "w3", installPath: root.path, region: "eu", textLanguage: "enUS"))
+    #expect(w3.displayName == "Warcraft III")
+    let w3Plan = try GameLauncher.plan(for: w3)
+    #expect(w3Plan.arguments == ["-launch", "-uid", "w3"])
+    #expect(w3Plan.workingDirectory.lastPathComponent == "_retail_")
+    #expect(w3Plan.codename == "W3")
+
+    let s2 = GameCatalog.game(for: ProductInstall(uid: "s2", productCode: "s2", installPath: root.path, region: "us"))
+    #expect(s2.appURL?.lastPathComponent == "SC2Switcher.app")
+    let s2Plan = try GameLauncher.plan(for: s2)
+    #expect(s2Plan.codename == "S2")
+    #expect(s2Plan.workingDirectory.standardizedFileURL == root.standardizedFileURL)
+}

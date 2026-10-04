@@ -29,6 +29,36 @@ public enum BLTE {
         return Data(md5.finalize())
     }
 
+    /// Checks a blob exactly as served by the CDN, without decoding it: the
+    /// encoded key is the MD5 of the BLTE header (or of the whole blob when
+    /// there's no chunk table), and every chunk carries its own MD5.
+    public static func verify(_ blob: Data, encodedKey: Data) throws {
+        var r = ByteReader(blob)
+        guard blob.count >= 8, try r.bytes(4) == Data("BLTE".utf8) else { throw TACTError.malformed("BLTE magic") }
+        let headerSize = Int(try r.uintBE(4))
+        let key = encodedKey.prefix(16)
+        guard headerSize > 0 else {
+            guard Data(Insecure.MD5.hash(data: blob)) == key else { throw TACTError.checksumMismatch(key.hex) }
+            return
+        }
+        guard headerSize <= blob.count,
+              Data(Insecure.MD5.hash(data: blob.subdata(in: blob.startIndex..<blob.startIndex + headerSize))) == key
+        else { throw TACTError.checksumMismatch(key.hex) }
+        _ = try r.u8() // flags
+        let chunkCount = Int(try r.uintBE(3))
+        var offset = headerSize
+        for index in 0..<chunkCount {
+            let compressed = Int(try r.uintBE(4))
+            _ = try r.uintBE(4)
+            let md5 = try r.bytes(16)
+            guard offset + compressed <= blob.count else { throw TACTError.malformed("BLTE chunk \(index) of \(key.hex)") }
+            let chunk = blob.subdata(in: blob.startIndex + offset..<blob.startIndex + offset + compressed)
+            guard Data(Insecure.MD5.hash(data: chunk)) == md5 else { throw TACTError.checksumMismatch("\(key.hex) chunk \(index)") }
+            offset += compressed
+        }
+        guard offset == blob.count else { throw TACTError.malformed("BLTE length of \(key.hex)") }
+    }
+
     private static func decode<S: BLTESource>(_ source: inout S, emit: (Data) throws -> Void) throws {
         var header = ByteReader(try source.read(8))
         guard try header.bytes(4) == Data("BLTE".utf8) else { throw TACTError.malformed("BLTE magic") }

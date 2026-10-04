@@ -70,9 +70,10 @@ func fetch(_ args: [String]) async {
 }
 
 /// `install <uid> <dir> [--language xxXX] [--region eu] [--only regex] [--dry-run] [--state file]`:
-/// installs a game from scratch into `<dir>` (the game's own folder).
+/// installs a game from scratch into `<dir>` (its install root, e.g. /Applications/World of Warcraft).
 func install(_ args: [String]) async {
     let usage = "usage: waypoint-cli install <uid> <dir> [--language enUS] [--region eu|us|kr|cn] [--only regex] [--dry-run] [--state file]"
+        + "\n  uids: " + InstallableProduct.all.map(\.uid).joined(separator: " ")
     var positional: [String] = []
     var options: [String: String] = [:]
     var flags: Set<String> = []
@@ -95,24 +96,30 @@ func install(_ args: [String]) async {
     let pattern = options["--only"]
     if let pattern, (try? NSRegularExpression(pattern: pattern)) == nil { fail("bad regex") }
 
-    let install = product.install(at: URL(fileURLWithPath: positional[1]), region: region, language: language)
     let store = options["--state"].map { InstallStateStore(file: URL(fileURLWithPath: $0)) } ?? InstallStateStore()
-    let updater = GameUpdater(install: install, store: store)
-    print("\(product.displayName) → \(install.installPath) (\(region.displayName), \(language))")
+    let installer = GameInstaller(product: product, folder: URL(fileURLWithPath: positional[1]).standardizedFileURL,
+                                  region: region, language: language, store: store)
+    print("\(product.displayName) → \(installer.folder.path) (\(region.displayName), \(language))")
     do {
-        try FileManager.default.createDirectory(atPath: install.installPath, withIntermediateDirectories: true)
         var only: (@Sendable (String) -> Bool)?
         if let pattern {
             only = { path in path.range(of: pattern, options: .regularExpression) != nil }
         }
-        let plan = try await updater.plan(only: only, log: log)
-        print("download: \(plan.files.count) files, \(byteString(plan.downloadSize))")
-        guard !flags.contains("--dry-run"), !plan.isEmpty else { return }
-        try await updater.apply(plan) { p in
-            log(String(format: "%.1f%%  %@ / %@  (%d/%d files)", p.fraction * 100,
-                       byteString(p.completedBytes), byteString(p.totalBytes), p.completedFiles, p.totalFiles))
+        let plan = try await installer.plan(only: only, log: log)
+        switch plan {
+        case .loose(let p):
+            print("version \(p.target.name): \(p.files.count) files, \(byteString(p.downloadSize))")
+        case .casc(let p):
+            print("version \(p.target.name): \(p.storage.count) files into \(p.config.dataDirectory)data "
+                  + "(\(byteString(p.storage.reduce(0) { $0 + $1.size }))), \(p.loose.files.count) loose files "
+                  + "(\(byteString(p.loose.downloadSize))); \(p.storage.filter { $0.location == nil }.count) outside archives")
         }
-        print("installed \(plan.target.name)")
+        guard !flags.contains("--dry-run") else { return }
+        let started = Date()
+        try await installer.apply(plan) { p in
+            log(String(format: "%.1f%%  %@ / %@", p.fraction * 100, byteString(p.completedBytes), byteString(p.totalBytes)))
+        }
+        print("installed \(plan.version) in \(Int(Date().timeIntervalSince(started)))s")
     } catch {
         fail("\(error)")
     }

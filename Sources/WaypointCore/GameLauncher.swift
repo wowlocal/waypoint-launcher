@@ -29,19 +29,10 @@ public enum LaunchError: Error, CustomStringConvertible {
 }
 
 public enum GameLauncher {
-    public static func codename(for family: GameFamily) -> String? {
-        switch family {
-        case .hearthstone: "WTCG"
-        // Every WoW flavor shares one entry; the flavor is picked with -uid.
-        case .worldOfWarcraft: "WoW"
-        case .other: nil
-        }
-    }
-
     public static func plan(for game: Game, region override: Region? = nil) throws -> LaunchPlan {
         guard let appURL = game.appURL else { throw LaunchError.notInstalled(game.displayName) }
-        guard game.runsNatively else { throw LaunchError.intelOnly(game.displayName) }
-        guard let codename = codename(for: game.family),
+        guard game.runsNatively || Rosetta.isInstalled else { throw LaunchError.intelOnly(game.displayName) }
+        guard let product = InstallableProduct.forProduct(game.install.productCode),
               let executable = Bundle(url: appURL)?.executableURL
         else { throw LaunchError.unsupported(game.displayName) }
 
@@ -50,28 +41,20 @@ public enum GameLauncher {
             ?? .us
 
         // Battle.net starts Hearthstone as `Hearthstone -launch -uid hs_beta`
-        // from the install folder (observed with ps/lsof). `-launch` is what
-        // stops the game from bouncing back to the Battle.net app.
-        // For WoW it passes `-launcherlogin -uid <flavor>` (seen in client
-        // crash logs on Windows; not yet observed on macOS).
-        let arguments: [String]
-        let workingDirectory: URL
-        switch game.family {
-        case .hearthstone:
-            arguments = ["-launch", "-uid", game.install.uid]
-            workingDirectory = URL(fileURLWithPath: game.install.installPath, isDirectory: true)
-        case .worldOfWarcraft:
-            arguments = ["-launcherlogin", "-uid", game.install.uid]
-            workingDirectory = appURL.deletingLastPathComponent()
-        case .other:
-            throw LaunchError.unsupported(game.displayName)
-        }
+        // from the install folder (observed with ps/lsof); `-launch` is the
+        // product config's argument and stops the game from bouncing back to
+        // the Battle.net app. Other games get their product config's
+        // arguments plus `-uid` the same way. WoW gets `-launcherlogin -uid
+        // <flavor>` (seen in Windows client crash logs) and runs from its
+        // flavor folder.
+        let root = URL(fileURLWithPath: game.install.installPath, isDirectory: true)
+        let workingDirectory = product.flavorFolder.map { root.appendingPathComponent($0, isDirectory: true) } ?? root
 
         return LaunchPlan(
             executable: executable,
-            arguments: arguments,
+            arguments: product.launchArguments + ["-uid", game.install.uid],
             workingDirectory: workingDirectory,
-            codename: codename,
+            codename: product.codename,
             region: region,
             locale: game.install.textLanguage
         )

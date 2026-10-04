@@ -137,8 +137,7 @@ final class AppModel {
 
     /// What a fresh install would download, for the install sheet.
     func installSize(_ product: InstallableProduct, folder: URL, region: Region, language: String) async throws -> UInt64 {
-        let install = product.install(at: folder, region: region, language: language)
-        return try await GameUpdater(install: install).plan().downloadSize
+        try await GameInstaller(product: product, folder: folder, region: region, language: language).plan().downloadSize
     }
 
     func install(_ product: InstallableProduct, folder: URL, region: Region, language: String) async {
@@ -146,15 +145,14 @@ final class AppModel {
         Log.notice(.install, "requested", nil, ["uid": product.uid, "path": folder.path, "region": region.rawValue, "language": language])
         phases[product.uid] = .updating(nil)
         do {
-            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
-            let updater = GameUpdater(install: product.install(at: folder, region: region, language: language))
-            let plan = try await updater.plan()
-            try await updater.apply(plan) { [weak self] progress in
+            let installer = GameInstaller(product: product, folder: folder, region: region, language: language)
+            let plan = try await installer.plan()
+            try await installer.apply(plan) { [weak self] progress in
                 Task { @MainActor in
                     if case .updating = self?.phases[product.uid] { self?.phases[product.uid] = .updating(progress) }
                 }
             }
-            Log.notice(.install, "finished", nil, ["uid": product.uid, "version": plan.target.name, "path": folder.path])
+            Log.notice(.install, "finished", nil, ["uid": product.uid, "version": plan.version, "path": folder.path])
             phases[product.uid] = .idle
             reload()
             await checkForUpdates(force: true)
