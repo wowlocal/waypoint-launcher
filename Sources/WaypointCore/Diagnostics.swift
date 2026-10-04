@@ -120,8 +120,13 @@ public final class Diagnostics: @unchecked Sendable {
     private func append(_ line: Data) {
         do {
             if handle == nil { try open() }
+            // Before writing, so the current file always exists afterwards. A
+            // failed rotation (two in the same millisecond) keeps the line.
+            if let size = try? handle?.offset(), size > maxFileBytes {
+                try? rotate()
+                if handle == nil { try open() }
+            }
             handle?.write(line)
-            if let size = try? handle?.offset(), size > maxFileBytes { try rotate() }
         } catch {
             // Logging must never take the app down; the unified log still has it.
             handle = nil

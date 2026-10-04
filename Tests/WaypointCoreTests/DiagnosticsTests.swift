@@ -56,6 +56,11 @@ private func tempDir() throws -> URL {
     #expect(files.contains { $0.lastPathComponent == "test.jsonl" })
     // The newest events survive rotation.
     #expect(log.events().last?.event == "event_199")
+    // A line past the limit on its own still leaves a current file.
+    log.log(.info, .app, "big", String(repeating: "y", count: 3_000))
+    log.flush()
+    #expect(log.logFiles().contains { $0.lastPathComponent == "test.jsonl" })
+    #expect(log.events().last?.event == "big")
 }
 
 @Test func readsProductConfigsLikeTheAgent() throws {
