@@ -6,10 +6,10 @@ import WaypointCore
 struct WaypointApp: App {
     @NSApplicationDelegateAdaptor private var appDelegate: AppDelegate
     @Environment(\.openWindow) private var openWindow
-    @State private var model = AppModel()
-    @State private var appUpdater = AppUpdater()
-    /// The menu bar item is opt-in: most menu bars are crowded already.
-    @AppStorage("showsMenuBarItem") private var showsMenuBarItem = false
+    @AppStorage(MenuBarItem.defaultsKey) private var showsMenuBarItem = false
+
+    private var model: AppModel { appDelegate.model }
+    private var appUpdater: AppUpdater { appDelegate.appUpdater }
 
     var body: some Scene {
         let _ = appDelegate.openWindow = openWindow
@@ -38,29 +38,6 @@ struct WaypointApp: App {
                     NSWorkspace.shared.activateFileViewerSelecting([Diagnostics.shared.directory])
                 }
             }
-        }
-
-        MenuBarExtra("Waypoint", systemImage: "gamecontroller", isInserted: $showsMenuBarItem) {
-            ForEach(model.games.filter(\.isSupported)) { game in
-                if let update = model.availableUpdate(for: game), GameUpdater.canUpdate(game.family) {
-                    Button("Update \(game.displayName) to \(update.latest.name)") {
-                        Task { await model.update(game) }
-                    }
-                    .disabled(!model.canUpdate(game))
-                } else {
-                    Button(model.running.contains(game.id) ? "\(game.displayName) (running)" : "Play \(game.displayName)") {
-                        Task { await model.play(game) }
-                    }
-                    .disabled(!model.canPlay(game))
-                }
-            }
-            Divider()
-            if let version = appUpdater.readyVersion {
-                Button("Restart to Update Waypoint \(version)") { appUpdater.restartToUpdate() }
-            }
-            Button("Check for Updates") { checkForUpdates() }
-            Button("Rescan Games") { model.reload() }
-            Button("Quit Waypoint") { NSApp.terminate(nil) }.keyboardShortcut("q")
         }
     }
 

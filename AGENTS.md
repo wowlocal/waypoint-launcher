@@ -39,6 +39,9 @@ To check memory yourself:
 
 ## The menu bar item is opt-in
 
-Waypoint must not add a menu bar item by default: most people's menu bars are
-crowded already. Today it is off until the user turns on Waypoint ▸ Show in
-Menu Bar (the `showsMenuBarItem` default). Keep it that way.
+Lots of apps add a menu bar item by default, even ones as basic as Waypoint,
+and people's menu bars are crowded with them. Waypoint must not do that. By
+default it creates no status item at all, not even a hidden one: no
+`NSStatusItem`, no SwiftUI `MenuBarExtra`. `MenuBarItem.swift` creates it only
+after the user turns on Waypoint ▸ Show in Menu Bar (the `showsMenuBarItem`
+default), and removes it again when they turn it off. Keep it that way.
