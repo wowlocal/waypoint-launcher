@@ -93,12 +93,17 @@ struct LibraryView: View {
     var body: some View {
         @Bindable var model = model
         VStack(spacing: 0) {
-            if model.games.isEmpty {
+            if model.games.isEmpty && model.installable.isEmpty {
                 ContentUnavailableView("No games found", systemImage: "gamecontroller",
                                        description: Text("Install a game, then rescan."))
             } else {
-                List(model.games) { game in
-                    GameRow(game: game)
+                List {
+                    ForEach(model.games) { game in GameRow(game: game) }
+                    if !model.installable.isEmpty {
+                        Section("Available to install") {
+                            ForEach(model.installable) { product in InstallableRow(product: product) }
+                        }
+                    }
                 }
                 .listStyle(.inset)
             }

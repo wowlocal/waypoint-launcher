@@ -126,6 +126,51 @@ final class AppModel {
         }
     }
 
+    // MARK: Installs
+
+    /// Games Waypoint can install that aren't installed yet.
+    var installable: [InstallableProduct] {
+        InstallableProduct.all.filter { product in !games.contains { $0.install.uid == product.uid } }
+    }
+
+    func phase(of product: InstallableProduct) -> Phase { phases[product.uid] ?? .idle }
+
+    /// What a fresh install would download, for the install sheet.
+    func installSize(_ product: InstallableProduct, folder: URL, region: Region, language: String) async throws -> UInt64 {
+        let install = product.install(at: folder, region: region, language: language)
+        return try await GameUpdater(install: install).plan().downloadSize
+    }
+
+    func install(_ product: InstallableProduct, folder: URL, region: Region, language: String) async {
+        guard !isBusy(uid: product.uid) else { return }
+        Log.notice(.install, "requested", nil, ["uid": product.uid, "path": folder.path, "region": region.rawValue, "language": language])
+        phases[product.uid] = .updating(nil)
+        do {
+            try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
+            let updater = GameUpdater(install: product.install(at: folder, region: region, language: language))
+            let plan = try await updater.plan()
+            try await updater.apply(plan) { [weak self] progress in
+                Task { @MainActor in
+                    if case .updating = self?.phases[product.uid] { self?.phases[product.uid] = .updating(progress) }
+                }
+            }
+            Log.notice(.install, "finished", nil, ["uid": product.uid, "version": plan.target.name, "path": folder.path])
+            phases[product.uid] = .idle
+            reload()
+            await checkForUpdates(force: true)
+        } catch {
+            Log.error(.install, "failed", nil, ["uid": product.uid, "path": folder.path, "error": error])
+            phases[product.uid] = .failed(String(describing: error))
+        }
+    }
+
+    private func isBusy(uid: String) -> Bool {
+        switch phases[uid] ?? .idle {
+        case .signingIn, .launching, .updating: true
+        default: false
+        }
+    }
+
     func phase(of game: Game) -> Phase { phases[game.id] ?? .idle }
 
     func isBusy(_ game: Game) -> Bool {
