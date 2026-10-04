@@ -109,7 +109,7 @@ public struct CDNClient: Sendable {
     }
 
     public enum Kind: String, Sendable {
-        case config, data
+        case config, data, patch
         /// Directly under `path`, as product configs are.
         case raw = ""
     }

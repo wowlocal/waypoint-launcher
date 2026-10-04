@@ -9,6 +9,10 @@ public struct StorageItem: Sendable {
     public var location: ArchiveLocation?
     /// Build-config files get their whole key in the entry header, like the Agent writes them.
     public var fullKey: Bool
+    /// Where on the CDN it lives when it isn't in an archive.
+    public var kind: CDNClient.Kind = .data
+    /// Stored as is rather than BLTE (the patch manifest); checked by size.
+    public var isRaw = false
 }
 
 public struct CASCInstallPlan: Sendable {
@@ -104,7 +108,8 @@ public struct CASCInstaller: Sendable {
         let looseKeys = Set(looseFiles.map(\.encodedKey))
 
         // Build-config files (encoding, install, download, patch index, VFS)
-        // and root live in storage too, with full keys. The size manifest doesn't.
+        // live in storage with full keys in their headers; root too, but with
+        // the short key like bulk content. The size manifest isn't stored.
         var storage: [StorageItem] = []
         var seen = Set<Data>()
         func isHash(_ s: String) -> Bool { s.count == 32 && s.allSatisfy(\.isHexDigit) }
@@ -114,8 +119,14 @@ public struct CASCInstaller: Sendable {
             let size = buildConfig["\(name)-size"].last.flatMap(UInt64.init) ?? 0
             storage.append(StorageItem(encodedKey: key, size: size, location: nil, fullKey: true))
         }
+        // The patch manifest: a raw file on the CDN's patch path, stored as is
+        // with its full key (matched against an Agent-written storage).
+        if let patch = buildConfig["patch"].first, buildConfig["patch"].count == 1, let key = Data(hex: patch), seen.insert(key).inserted {
+            let size = buildConfig["patch-size"].first.flatMap(UInt64.init) ?? 0
+            storage.append(StorageItem(encodedKey: key, size: size, location: nil, fullKey: true, kind: .patch, isRaw: true))
+        }
         if let rootKey, let rootEncoded = encoding.entries[rootKey], seen.insert(rootEncoded.encodedKey).inserted {
-            storage.append(StorageItem(encodedKey: rootEncoded.encodedKey, size: 0, location: nil, fullKey: true))
+            storage.append(StorageItem(encodedKey: rootEncoded.encodedKey, size: 0, location: nil, fullKey: false))
         }
         for entry in downloadEntries where !looseKeys.contains(entry.encodedKey) && seen.insert(entry.encodedKey).inserted {
             storage.append(StorageItem(encodedKey: entry.encodedKey, size: entry.size, location: nil, fullKey: false))
@@ -261,7 +272,7 @@ public struct CASCInstaller: Sendable {
         if let archive = batch.archive {
             file = try await cdn.download(.data, archive, range: batch.start...(batch.end - 1))
         } else {
-            file = try await cdn.download(.data, batch.items[0].encodedKey.hex)
+            file = try await cdn.download(batch.items[0].kind, batch.items[0].encodedKey.hex)
         }
         defer { try? FileManager.default.removeItem(at: file) }
         let data = try Data(contentsOf: file, options: .alwaysMapped)
@@ -274,7 +285,11 @@ public struct CASCInstaller: Sendable {
             } else {
                 blob = Data(data)
             }
-            try BLTE.verify(blob, encodedKey: item.encodedKey)
+            if item.isRaw {
+                guard item.size == 0 || UInt64(blob.count) == item.size else { throw TACTError.malformed("size of \(item.encodedKey.hex)") }
+            } else {
+                try BLTE.verify(blob, encodedKey: item.encodedKey)
+            }
             return (item, blob)
         }
     }

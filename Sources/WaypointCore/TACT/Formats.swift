@@ -78,7 +78,7 @@ extension Data {
         self.init(bytes)
     }
 
-    var hex: String { map { String(format: "%02x", $0) }.joined() }
+    public var hex: String { map { String(format: "%02x", $0) }.joined() }
 }
 
 // MARK: - BPSV (the versions / cdns tables)

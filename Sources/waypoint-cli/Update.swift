@@ -79,7 +79,7 @@ func install(_ args: [String]) async {
     var flags: Set<String> = []
     var i = 0
     while i < args.count {
-        if ["--language", "--region", "--only", "--state"].contains(args[i]), i + 1 < args.count {
+        if ["--language", "--region", "--only", "--state", "--dump-keys"].contains(args[i]), i + 1 < args.count {
             options[args[i]] = args[i + 1]
             i += 2
             continue
@@ -113,6 +113,11 @@ func install(_ args: [String]) async {
             print("version \(p.target.name): \(p.storage.count) files into \(p.config.dataDirectory)data "
                   + "(\(byteString(p.storage.reduce(0) { $0 + $1.size }))), \(p.loose.files.count) loose files "
                   + "(\(byteString(p.loose.downloadSize))); \(p.storage.filter { $0.location == nil }.count) outside archives")
+        }
+        // Debugging aid: the encoded keys a CASC install would store, one hex per line.
+        if let dump = options["--dump-keys"], case .casc(let p) = plan {
+            try p.storage.map { $0.encodedKey.hex + ($0.fullKey ? " full" : "") }.joined(separator: "\n")
+                .write(toFile: dump, atomically: true, encoding: .utf8)
         }
         guard !flags.contains("--dry-run") else { return }
         let started = Date()
