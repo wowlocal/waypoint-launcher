@@ -11,6 +11,7 @@ app=build/Waypoint.app
 rm -rf "$app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
 cp "$bin" "$app/Contents/MacOS/Waypoint"
+cp Resources/AppIcon.icns "$app/Contents/Resources/AppIcon.icns"
 version="$(git describe --tags --always 2>/dev/null || echo 0.1.0)"
 
 cat > "$app/Contents/Info.plist" <<PLIST
@@ -22,6 +23,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
     <key>CFBundleIdentifier</key><string>dev.waypoint.launcher</string>
     <key>CFBundleName</key><string>Waypoint</string>
     <key>CFBundleDisplayName</key><string>Waypoint</string>
+    <key>CFBundleIconFile</key><string>AppIcon</string>
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>0.1.0</string>
     <key>CFBundleVersion</key><string>${version}</string>
