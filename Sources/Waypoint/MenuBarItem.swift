@@ -86,7 +86,7 @@ final class MenuBarItem: NSObject, NSMenuDelegate {
 }
 
 /// A menu item that runs a closure.
-private final class ActionItem: NSMenuItem {
+final class ActionItem: NSMenuItem {
     private let handler: @MainActor () -> Void
 
     init(_ title: String, enabled: Bool = true, handler: @escaping @MainActor () -> Void) {

@@ -2,8 +2,8 @@
 
 ## TODO
 
-- [ ] **Remove SwiftUI.** Rewrite the app's UI (`Sources/Waypoint`) in AppKit
-  and drop `import SwiftUI` everywhere. See the rule below for why.
+- [x] **Remove SwiftUI.** The app's UI (`Sources/Waypoint`) is AppKit now; no
+  file imports SwiftUI. See the rule below for why.
 
 ## Never use SwiftUI
 
@@ -25,9 +25,14 @@ The gap grows with every view. In the SwiftUI library window, SwiftUI's own
 view-graph bookkeeping was ~4.3 MB of live heap. Waypoint's own objects (the
 games, the model, Sparkle's controller) were ~50 KB.
 
-The current UI predates this rule and is still SwiftUI, until the TODO above
-is done. Until then, keep SwiftUI edits to the minimum a fix needs, and write
-new UI in AppKit.
+`@Observable` models (`AppModel`, `AppUpdater`) are fine: Observation is its
+own framework, not SwiftUI. Views follow them with `observeChanges`
+(`Observe.swift`), which re-runs a render function whenever anything it read
+changes.
+
+SwiftUI.framework still shows up among the loaded libraries. That's Apple's
+WebKit, which links it on macOS 27; Waypoint uses WebKit for the Battle.net
+sign-in. No Waypoint code calls SwiftUI.
 
 To check memory yourself:
 
