@@ -7,6 +7,7 @@
 **A tiny native launcher for Blizzard games on Apple Silicon Macs.**<br>
 No Battle.net app. No Rosetta. Just press Play.
 
+[![Latest release](https://img.shields.io/github/v/release/wowlocal/waypoint-launcher?color=2ea44f)](https://github.com/wowlocal/waypoint-launcher/releases/latest)
 [![macOS 14+](https://img.shields.io/badge/macOS-14%2B-111?logo=apple&logoColor=white)](#build)
 [![Apple Silicon native](https://img.shields.io/badge/Apple%20Silicon-native-2ea44f)](#why)
 [![Swift 6](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)](#build)
@@ -189,7 +190,7 @@ WAYPOINT_NETWORK_TESTS=1 xcrun swift test --filter liveUpdate  # real update, 36
 - [ ] World of Warcraft tested on macOS
 - [ ] World of Warcraft updates (its data lives in CASC storage)
 - [ ] Install games from scratch
-- [ ] Prebuilt, notarized releases
+- [x] Prebuilt, notarized releases
 - [x] App icon
 
 ## Disclaimer
