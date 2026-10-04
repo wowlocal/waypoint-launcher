@@ -1,4 +1,5 @@
 import AppKit
+import UniformTypeIdentifiers
 import WaypointCore
 
 /// What a game row shows, read from the model in one go: the library
@@ -20,26 +21,23 @@ extension GameRowState {
     }
 }
 
+/// A game being installed, or whose install failed.
 struct InstallableRowState {
     var product: InstallableProduct
     var phase: AppModel.Phase
 }
 
-/// An installed game: icon, name, version and region, an update or progress
-/// line, and Play or Update on the right. Right-click for the other ways to
-/// play.
+/// An installed game: icon, name, one quiet line of status, and Play or
+/// Update on the right. Right-click for the other ways to play.
 @MainActor
 final class GameCell: NSView {
     static let identifier = NSUserInterfaceItemIdentifier("game")
 
     private let icon = NSImageView()
     private let name = NSTextField.label(.headline)
-    private let subtitle = NSTextField.label(.caption1, color: .secondaryLabelColor)
-    private let failure = NSTextField.label(.caption1, color: .systemRed)
     private let progress = NSProgressIndicator.bar()
-    private let progressText = NSTextField.label(.caption2, color: .secondaryLabelColor, monospacedDigits: true)
-    private let note = NSTextField.label(.caption1, color: .systemOrange)
-    private let status = NSTextField.label(.callout, color: .secondaryLabelColor)
+    private let detail = NSTextField.label(.subheadline, color: .secondaryLabelColor, monospacedDigits: true)
+    private let status = NSTextField.label(.body, color: .secondaryLabelColor)
     private let spinner = NSProgressIndicator.spinner()
     private let button = NSButton(title: "Play", target: nil, action: nil)
     private var iconPath: String?
@@ -51,12 +49,7 @@ final class GameCell: NSView {
         identifier = Self.identifier
         button.target = self
         button.action = #selector(primaryAction)
-        button.bezelColor = .controlAccentColor
-        let text = NSStackView.column([name, subtitle, failure, progress, progressText, note])
-        layOutRow(in: self, icon: icon, text: text, trailing: [status, spinner, button])
-        let barWidth = progress.widthAnchor.constraint(equalToConstant: 220)
-        barWidth.priority = .defaultHigh
-        NSLayoutConstraint.activate([barWidth, progress.widthAnchor.constraint(lessThanOrEqualTo: text.widthAnchor)])
+        layOutRow(in: self, icon: icon, text: [name, progress, detail], trailing: [status, spinner, button])
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
@@ -67,30 +60,30 @@ final class GameCell: NSView {
         let game = state.game
         if icon.image == nil || iconPath != game.appURL?.path {
             iconPath = game.appURL?.path
-            icon.image = iconPath.map { NSWorkspace.shared.icon(forFile: $0) } ?? .symbol("questionmark.app", pointSize: 30)
+            icon.image = iconPath.map { NSWorkspace.shared.icon(forFile: $0) } ?? NSWorkspace.shared.icon(for: .applicationBundle)
         }
         name.stringValue = game.displayName
-        subtitle.stringValue = Self.subtitle(of: game)
+        toolTip = game.install.version.map { "Version \($0)" }
 
-        failure.isHidden = true
         progress.isHidden = true
-        progressText.isHidden = true
-        note.isHidden = true
-        if case .failed(let message) = state.phase {
-            failure.stringValue = message
-            failure.toolTip = message
-            failure.isHidden = false
-        }
-        if case .updating(let update) = state.phase {
+        detail.textColor = .secondaryLabelColor
+        detail.toolTip = nil
+        switch state.phase {
+        case .updating(let update):
             progress.doubleValue = update?.fraction ?? 0
-            progressText.stringValue = progressDescription(update, waiting: "Checking files…")
             progress.isHidden = false
-            progressText.isHidden = false
-        } else if let update = state.update {
-            note.stringValue = GameUpdater.canUpdate(game.family)
-                ? "Update available: \(update.latest.name)"
-                : "Update \(update.latest.name) available in Battle.net"
-            note.isHidden = false
+            detail.stringValue = progressDescription(update, waiting: "Checking files…")
+        case .failed(let message):
+            detail.stringValue = message
+            detail.toolTip = message
+            detail.textColor = .systemRed
+        default:
+            if state.update != nil, !state.isRunning {
+                detail.stringValue = GameUpdater.canUpdate(game.family) ? "Update available" : "Update available in Battle.net"
+                detail.textColor = .systemOrange
+            } else {
+                detail.stringValue = Self.summary(of: game)
+            }
         }
 
         status.isHidden = true
@@ -108,7 +101,7 @@ final class GameCell: NSView {
             case .launching:
                 showSpinner("Starting…")
             case .updating:
-                show(status: "Updating…")
+                break
             case .idle, .failed:
                 let updates = state.update != nil && GameUpdater.canUpdate(game.family)
                 button.title = updates ? "Update" : "Play"
@@ -158,16 +151,20 @@ final class GameCell: NSView {
         return menu
     }
 
-    private static func subtitle(of game: Game) -> String {
+    /// "36.6.3 · EU", plus "Intel" for games that need Rosetta. The full
+    /// version is in the row's tooltip.
+    private static func summary(of game: Game) -> String {
         var parts: [String] = []
-        if let version = game.install.version { parts.append(version) }
+        if let version = game.install.version {
+            parts.append(version.split(separator: ".").prefix(3).joined(separator: "."))
+        }
         if let region = game.install.region { parts.append(region.uppercased()) }
-        if game.appURL != nil { parts.append(game.runsNatively ? "Apple silicon" : "Intel only") }
+        if game.appURL != nil, !game.runsNatively { parts.append("Intel") }
         return parts.joined(separator: " · ")
     }
 }
 
-/// A game that isn't installed yet: Install…, then progress.
+/// A game being installed (progress), or whose install failed (Try Again).
 @MainActor
 final class InstallableCell: NSView {
     static let identifier = NSUserInterfaceItemIdentifier("installable")
@@ -175,28 +172,18 @@ final class InstallableCell: NSView {
     private let icon = NSImageView()
     private let name = NSTextField.label(.headline)
     private let progress = NSProgressIndicator.bar()
-    private let progressText = NSTextField.label(.caption2, color: .secondaryLabelColor, monospacedDigits: true)
-    private let notInstalled = NSTextField.label(.caption1, color: .secondaryLabelColor)
-    private let failure = NSTextField.label(.caption1, color: .systemRed)
-    private let status = NSTextField.label(.callout, color: .secondaryLabelColor)
-    private let button = NSButton(title: "Install…", target: nil, action: nil)
+    private let detail = NSTextField.label(.subheadline, color: .secondaryLabelColor, monospacedDigits: true)
+    private let button = NSButton(title: "Try Again…", target: nil, action: nil)
     private var state: InstallableRowState?
     private var model: AppModel?
 
     init() {
         super.init(frame: .zero)
         identifier = Self.identifier
-        icon.image = .symbol("arrow.down.app", pointSize: 30)
-        icon.contentTintColor = .secondaryLabelColor
-        notInstalled.stringValue = "Not installed"
-        status.stringValue = "Installing…"
+        icon.image = NSWorkspace.shared.icon(for: .applicationBundle)
         button.target = self
         button.action = #selector(install)
-        let text = NSStackView.column([name, progress, progressText, notInstalled, failure])
-        layOutRow(in: self, icon: icon, text: text, trailing: [status, button])
-        let barWidth = progress.widthAnchor.constraint(equalToConstant: 220)
-        barWidth.priority = .defaultHigh
-        NSLayoutConstraint.activate([barWidth, progress.widthAnchor.constraint(lessThanOrEqualTo: text.widthAnchor)])
+        layOutRow(in: self, icon: icon, text: [name, progress, detail], trailing: [button])
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
@@ -205,27 +192,21 @@ final class InstallableCell: NSView {
         self.state = state
         self.model = model
         name.stringValue = state.product.displayName
-        progress.isHidden = true
-        progressText.isHidden = true
-        notInstalled.isHidden = false
-        failure.isHidden = true
-        switch state.phase {
-        case .updating(let update):
+        if case .failed(let message) = state.phase {
+            progress.isHidden = true
+            detail.stringValue = message
+            detail.toolTip = message
+            detail.textColor = .systemRed
+            button.isHidden = false
+        } else {
+            let update: UpdateProgress? = if case .updating(let update) = state.phase { update } else { nil }
             progress.doubleValue = update?.fraction ?? 0
-            progressText.stringValue = progressDescription(update, waiting: "Preparing…")
             progress.isHidden = false
-            progressText.isHidden = false
-            notInstalled.isHidden = true
-        case .failed(let message):
-            failure.stringValue = message
-            failure.toolTip = message
-            failure.isHidden = false
-        default:
-            break
+            detail.stringValue = progressDescription(update, waiting: "Preparing…")
+            detail.toolTip = nil
+            detail.textColor = .secondaryLabelColor
+            button.isHidden = true
         }
-        let installing = if case .updating = state.phase { true } else { false }
-        status.isHidden = !installing
-        button.isHidden = installing
     }
 
     @objc private func install() {
@@ -234,46 +215,28 @@ final class InstallableCell: NSView {
     }
 }
 
-/// "Available to install", above the games that aren't installed yet.
-@MainActor
-final class HeaderCell: NSView {
-    static let identifier = NSUserInterfaceItemIdentifier("header")
-
-    let title = NSTextField.label(.subheadline, color: .secondaryLabelColor)
-
-    init() {
-        super.init(frame: .zero)
-        identifier = Self.identifier
-        title.font = .systemFont(ofSize: title.font?.pointSize ?? 11, weight: .semibold)
-        title.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(title)
-        NSLayoutConstraint.activate([
-            title.leadingAnchor.constraint(equalTo: leadingAnchor),
-            title.trailingAnchor.constraint(equalTo: trailingAnchor),
-            title.topAnchor.constraint(equalTo: topAnchor, constant: 8),
-            title.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2),
-        ])
-    }
-
-    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
-}
-
 /// A library row: a 40-point icon, a column of text that takes the free
 /// width, and whatever of `trailing` is showing on the right.
 @MainActor
-private func layOutRow(in cell: NSView, icon: NSImageView, text: NSStackView, trailing: [NSView]) {
+private func layOutRow(in cell: NSView, icon: NSImageView, text views: [NSView], trailing: [NSView]) {
     icon.imageScaling = .scaleProportionallyUpOrDown
+    let text = NSStackView.column(views, spacing: 3)
     text.setContentHuggingPriority(.init(1), for: .horizontal)
     let row = NSStackView(views: [icon, text] + trailing)
     row.orientation = .horizontal
     row.alignment = .centerY
     row.distribution = .fill
-    row.spacing = 12
+    row.spacing = 10
     row.detachesHiddenViews = true
-    row.edgeInsets = NSEdgeInsets(top: 4, left: 0, bottom: 4, right: 0)
+    row.edgeInsets = NSEdgeInsets(top: 6, left: 0, bottom: 6, right: 0)
     row.translatesAutoresizingMaskIntoConstraints = false
     cell.addSubview(row)
-    NSLayoutConstraint.activate([
+    let barWidth = views.compactMap { $0 as? NSProgressIndicator }.map { bar in
+        let width = bar.widthAnchor.constraint(equalToConstant: 200)
+        width.priority = .defaultHigh
+        return [width, bar.widthAnchor.constraint(lessThanOrEqualTo: text.widthAnchor)]
+    }
+    NSLayoutConstraint.activate(barWidth.flatMap { $0 } + [
         row.leadingAnchor.constraint(equalTo: cell.leadingAnchor),
         row.trailingAnchor.constraint(equalTo: cell.trailingAnchor),
         row.topAnchor.constraint(equalTo: cell.topAnchor),

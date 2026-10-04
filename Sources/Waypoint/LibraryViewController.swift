@@ -1,20 +1,18 @@
 import AppKit
 import WaypointCore
 
-/// The library window: installed games with Play and Update, games
-/// available to install, Waypoint's own update status, and a footer with the
-/// region and the update buttons.
+/// The library window: installed games with Play and Update, games being
+/// installed, a + toolbar menu to install more, and Waypoint's own update
+/// status when it has something to say.
 @MainActor
-final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate {
+final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSToolbarDelegate {
     private enum Row {
         case game(GameRowState)
-        case header(String)
         case installable(InstallableRowState)
 
         var id: String {
             switch self {
             case .game(let row): "game \(row.game.id)"
-            case .header(let title): "header \(title)"
             case .installable(let row): "installable \(row.product.uid)"
             }
         }
@@ -34,7 +32,16 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
     private let updateText = NSTextField.label(.callout, color: .secondaryLabelColor)
     private let restartButton = NSButton(title: "Restart to Update", target: nil,
                                          action: #selector(AppDelegate.restartToUpdate(_:)))
-    private let regionPopup = NSPopUpButton()
+    private let installMenu = NSMenu()
+    private var installItem: NSMenuToolbarItem?
+
+    private(set) lazy var toolbar: NSToolbar = {
+        let toolbar = NSToolbar(identifier: "Library")
+        toolbar.delegate = self
+        toolbar.displayMode = .iconOnly
+        toolbar.allowsUserCustomization = false
+        return toolbar
+    }()
 
     init(model: AppModel, appUpdater: AppUpdater) {
         self.model = model
@@ -52,24 +59,24 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
         table.style = .inset
         table.headerView = nil
         table.usesAutomaticRowHeights = true
-        table.floatsGroupRows = false
         table.selectionHighlightStyle = .none
         table.dataSource = self
         table.delegate = self
         scrollView.documentView = table
         scrollView.hasVerticalScroller = true
         scrollView.autohidesScrollers = true
+        scrollView.drawsBackground = false
 
-        let emptyIcon = NSImageView(image: .symbol("gamecontroller", pointSize: 40) ?? NSImage())
-        emptyIcon.contentTintColor = .secondaryLabelColor
-        let emptyTitle = NSTextField.label(.title2)
-        emptyTitle.font = .boldSystemFont(ofSize: emptyTitle.font?.pointSize ?? 17)
-        emptyTitle.stringValue = "No games found"
+        let emptyIcon = NSImageView(image: .symbol("gamecontroller", pointSize: 36) ?? NSImage())
+        emptyIcon.contentTintColor = .tertiaryLabelColor
+        let emptyTitle = NSTextField.label(.title3)
+        emptyTitle.font = .boldSystemFont(ofSize: emptyTitle.font?.pointSize ?? 15)
+        emptyTitle.stringValue = "No Games"
         let emptyDetail = NSTextField.label(.body, color: .secondaryLabelColor)
-        emptyDetail.stringValue = "Install a game, then rescan."
+        emptyDetail.stringValue = "Install one with the + button."
         emptyState.setViews([emptyIcon, emptyTitle, emptyDetail], in: .center)
         emptyState.orientation = .vertical
-        emptyState.spacing = 8
+        emptyState.spacing = 6
 
         let content = NSView()
         for view in [scrollView, emptyState] as [NSView] {
@@ -94,21 +101,9 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
         updateBar.setViews([restartButton], in: .trailing)
         updateBar.spacing = 8
         updateBar.detachesHiddenViews = true
-        updateBar.edgeInsets = NSEdgeInsets(top: 6, left: 10, bottom: 6, right: 10)
+        updateBar.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
 
-        regionPopup.addItem(withTitle: "Region: as installed")
-        regionPopup.addItems(withTitles: Region.allCases.map(\.displayName))
-        regionPopup.target = self
-        regionPopup.action = #selector(regionChanged)
-        let checkButton = NSButton(title: "Check for Updates", target: nil,
-                                   action: #selector(AppDelegate.checkForUpdates(_:)))
-        let rescanButton = NSButton(title: "Rescan", target: self, action: #selector(rescan))
-        let footer = NSStackView()
-        footer.setViews([regionPopup], in: .leading)
-        footer.setViews([checkButton, rescanButton], in: .trailing)
-        footer.edgeInsets = NSEdgeInsets(top: 10, left: 10, bottom: 10, right: 10)
-
-        let root = NSStackView(views: [content, NSBox.separator(), updateBar, updateSeparator, footer])
+        let root = NSStackView(views: [content, updateSeparator, updateBar])
         root.orientation = .vertical
         root.distribution = .fill
         root.spacing = 0
@@ -125,12 +120,17 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
     /// calls this again whenever any of it changes.
     private func render() {
         var rows = model.games.map { Row.game(GameRowState($0, model: model)) }
-        let installable = model.installable
-        if !installable.isEmpty {
-            rows.append(.header("Available to install"))
-            rows += installable.map { .installable(InstallableRowState(product: $0, phase: model.phase(of: $0))) }
+        var installMenuItems: [NSMenuItem] = []
+        for product in model.installable {
+            let phase = model.phase(of: product)
+            if phase != .idle { rows.append(.installable(InstallableRowState(product: product, phase: phase))) }
+            if case .updating = phase { continue }
+            installMenuItems.append(ActionItem(product.displayName) { [weak self] in self?.install(product) })
         }
         show(rows)
+
+        installMenu.items = installMenuItems.isEmpty ? [] : [.sectionHeader(title: "Install a Game")] + installMenuItems
+        installItem?.isEnabled = !installMenuItems.isEmpty
 
         let ready = appUpdater.readyVersion != nil
         updateBar.isHidden = appUpdater.status == nil && !ready
@@ -143,9 +143,6 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
         updateIcon.image = .symbol(ready ? "arrow.down.circle.fill" : "info.circle")
         updateIcon.contentTintColor = ready ? .controlAccentColor : .secondaryLabelColor
         restartButton.isHidden = !ready
-
-        let region = model.regionOverride.flatMap { Region.allCases.firstIndex(of: $0) }
-        regionPopup.selectItem(at: region.map { $0 + 1 } ?? 0)
     }
 
     private func show(_ newRows: [Row]) {
@@ -172,26 +169,41 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
         switch row {
         case .game(let state): (view as? GameCell)?.configure(state, model: model)
         case .installable(let state): (view as? InstallableCell)?.configure(state, model: model)
-        case .header(let title): (view as? HeaderCell)?.title.stringValue = title
         }
     }
 
-    @objc private func regionChanged() {
-        let index = regionPopup.indexOfSelectedItem
-        model.regionOverride = index > 0 ? Region.allCases[index - 1] : nil
+    private func install(_ product: InstallableProduct) {
+        presentAsSheet(InstallSheet(product: product, model: model))
     }
 
-    @objc private func rescan() {
-        model.reload()
+    // MARK: NSToolbarDelegate
+
+    func toolbar(_ toolbar: NSToolbar, itemForItemIdentifier identifier: NSToolbarItem.Identifier,
+                 willBeInsertedIntoToolbar flag: Bool) -> NSToolbarItem? {
+        guard identifier == .install else { return nil }
+        let item = NSMenuToolbarItem(itemIdentifier: identifier)
+        item.image = .symbol("plus")
+        item.label = "Install"
+        item.toolTip = "Install a game"
+        item.showsIndicator = false
+        item.autovalidates = false
+        item.menu = installMenu
+        item.isEnabled = !installMenu.items.isEmpty
+        installItem = item
+        return item
+    }
+
+    func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [.flexibleSpace, .install]
+    }
+
+    func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
+        [.flexibleSpace, .install]
     }
 
     // MARK: NSTableViewDataSource, NSTableViewDelegate
 
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
-
-    func tableView(_ tableView: NSTableView, isGroupRow row: Int) -> Bool {
-        if case .header = rows[row] { true } else { false }
-    }
 
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool { false }
 
@@ -199,9 +211,12 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
         let view: NSView = switch rows[row] {
         case .game: tableView.makeView(withIdentifier: GameCell.identifier, owner: nil) ?? GameCell()
         case .installable: tableView.makeView(withIdentifier: InstallableCell.identifier, owner: nil) ?? InstallableCell()
-        case .header: tableView.makeView(withIdentifier: HeaderCell.identifier, owner: nil) ?? HeaderCell()
         }
         configure(view, as: rows[row])
         return view
     }
+}
+
+private extension NSToolbarItem.Identifier {
+    static let install = Self("install")
 }

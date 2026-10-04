@@ -7,6 +7,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     let model = AppModel()
     let appUpdater = AppUpdater()
     private var libraryWindow: NSWindow?
+    private var settingsWindow: NSWindow?
     private var menuBarItem: MenuBarItem?
 
     static func main() {
@@ -41,10 +42,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     private func makeLibraryWindow() -> NSWindow {
-        let window = NSWindow(contentViewController: LibraryViewController(model: model, appUpdater: appUpdater))
+        let library = LibraryViewController(model: model, appUpdater: appUpdater)
+        let window = NSWindow(contentViewController: library)
         window.title = "Waypoint"
-        window.contentMinSize = NSSize(width: 420, height: 260)
-        window.setContentSize(NSSize(width: 460, height: 380))
+        window.toolbar = library.toolbar
+        window.toolbarStyle = .unified
+        window.contentMinSize = NSSize(width: 360, height: 200)
+        window.setContentSize(NSSize(width: 420, height: 300))
         window.isReleasedWhenClosed = false
         // Window ▸ Waypoint reopens it; no second entry for the open window.
         window.isExcludedFromWindowsMenu = true
@@ -52,6 +56,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         if !window.setFrameUsingName("Library") { window.center() }
         window.setFrameAutosaveName("Library")
         return window
+    }
+
+    @objc func showSettings(_ sender: Any?) {
+        let window = settingsWindow ?? NSWindow(contentViewController: SettingsViewController(model: model))
+        window.styleMask = [.titled, .closable]
+        window.isReleasedWhenClosed = false
+        if settingsWindow == nil { window.center() }
+        settingsWindow = window
+        window.makeKeyAndOrderFront(nil)
     }
 
     /// A closed library is let go, views and all; reopening builds a new one.
@@ -72,9 +85,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         appUpdater.restartToUpdate()
     }
 
-    @objc func toggleMenuBarItem(_ sender: Any?) {
-        let defaults = UserDefaults.standard
-        defaults.set(!defaults.bool(forKey: MenuBarItem.defaultsKey), forKey: MenuBarItem.defaultsKey)
+    @objc func rescan(_ sender: Any?) {
+        model.reload()
     }
 
     @objc func signOut(_ sender: Any?) {
@@ -112,8 +124,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
             case #selector(restartToUpdate(_:)):
                 item.isHidden = ready == nil
                 item.title = "Restart to Update Waypoint \(ready ?? "")"
-            case #selector(toggleMenuBarItem(_:)):
-                item.state = UserDefaults.standard.bool(forKey: MenuBarItem.defaultsKey) ? .on : .off
             default:
                 break
             }

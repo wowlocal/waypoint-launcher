@@ -11,7 +11,8 @@ enum MainMenu {
         app.addItem(withTitle: "Check for Updates…", action: #selector(AppDelegate.checkForUpdates(_:)), keyEquivalent: "")
         app.addItem(withTitle: "Restart to Update Waypoint", action: #selector(AppDelegate.restartToUpdate(_:)), keyEquivalent: "")
         app.addItem(.separator())
-        app.addItem(withTitle: "Show in Menu Bar", action: #selector(AppDelegate.toggleMenuBarItem(_:)), keyEquivalent: "")
+        app.addItem(withTitle: "Settings…", action: #selector(AppDelegate.showSettings(_:)), keyEquivalent: ",")
+        app.addItem(.separator())
         app.addItem(withTitle: "Sign Out of Battle.net", action: #selector(AppDelegate.signOut(_:)), keyEquivalent: "")
         app.addItem(.separator())
         let services = NSMenu(title: "Services")
@@ -26,6 +27,8 @@ enum MainMenu {
         app.addItem(withTitle: "Quit Waypoint", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
 
         let file = NSMenu(title: "File")
+        file.addItem(withTitle: "Rescan Games", action: #selector(AppDelegate.rescan(_:)), keyEquivalent: "r")
+        file.addItem(.separator())
         file.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")
 
         // The login window's fields need copy and paste.

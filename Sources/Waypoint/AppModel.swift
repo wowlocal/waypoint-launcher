@@ -60,9 +60,14 @@ final class AppModel {
                 MainActor.assumeIsolated { self?.refreshRunning() }
             })
         }
+        // Coming back to Waypoint picks up games installed or removed
+        // meanwhile, and checks for updates (throttled).
         observers.append(NotificationCenter.default.addObserver(
             forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { _ = Task { await self?.checkForUpdates() } }
+            MainActor.assumeIsolated {
+                self?.reload()
+                _ = Task { await self?.checkForUpdates() }
+            }
         })
         Task { await checkForUpdates(force: true) }
     }

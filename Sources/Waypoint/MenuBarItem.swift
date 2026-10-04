@@ -2,8 +2,8 @@ import AppKit
 import WaypointCore
 
 /// The menu bar item: Play and Update without opening the window. Opt-in
-/// (Waypoint ▸ Show in Menu Bar): until someone turns it on, no status item
-/// exists at all, not even a hidden one.
+/// (Settings ▸ Show Waypoint in the menu bar): until someone turns it on, no
+/// status item exists at all, not even a hidden one.
 @MainActor
 final class MenuBarItem: NSObject, NSMenuDelegate {
     static let defaultsKey = "showsMenuBarItem"
