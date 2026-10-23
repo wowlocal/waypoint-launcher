@@ -80,7 +80,7 @@ public struct GameInstaller: Sendable {
     public func apply(_ plan: GameInstallPlan, progress: @escaping @Sendable (UpdateProgress) -> Void = { _ in }) async throws {
         guard plan.install.platform == platform, plan.install.uid == product.uid,
               plan.install.productCode == product.productCode,
-              URL(fileURLWithPath: plan.install.installPath).resolvingSymlinksInPath().standardizedFileURL == folder.resolvingSymlinksInPath().standardizedFileURL
+              URL(fileURLWithPath: plan.install.installPath).resolvingSymlinksInPath().standardizedFileURL.path == folder.resolvingSymlinksInPath().standardizedFileURL.path
         else { throw TACTError.malformed("Install plan belongs to another installation") }
         try platform.validate(install: plan.install)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
