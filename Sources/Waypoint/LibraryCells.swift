@@ -440,14 +440,15 @@ private func layOutRow(in cell: NSView, icon: NSView, text views: [NSView], trai
     row.distribution = .fill
     row.spacing = 10
     row.detachesHiddenViews = true
-    row.edgeInsets = NSEdgeInsets(top: 6, left: 0, bottom: 6, right: 0)
     row.translatesAutoresizingMaskIntoConstraints = false
     cell.addSubview(row)
+    // Reserve padding outside the stack so automatic table row heights
+    // include it even when the edition picker or download adds lines.
     NSLayoutConstraint.activate([
         row.leadingAnchor.constraint(equalTo: cell.leadingAnchor),
         row.trailingAnchor.constraint(equalTo: cell.trailingAnchor),
-        row.topAnchor.constraint(equalTo: cell.topAnchor),
-        row.bottomAnchor.constraint(equalTo: cell.bottomAnchor),
+        row.topAnchor.constraint(equalTo: cell.topAnchor, constant: 8),
+        row.bottomAnchor.constraint(equalTo: cell.bottomAnchor, constant: -8),
         icon.widthAnchor.constraint(equalToConstant: 40),
         icon.heightAnchor.constraint(equalToConstant: 40),
     ])
