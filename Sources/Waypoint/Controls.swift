@@ -35,6 +35,28 @@ extension NSProgressIndicator {
     }
 }
 
+extension NSButton {
+    static func downloadKeepAwake() -> NSButton {
+        let button = NSButton()
+        button.setButtonType(.pushOnPushOff)
+        button.bezelStyle = .recessed
+        button.controlSize = .small
+        button.imagePosition = .imageOnly
+        button.showKeepAwake(false)
+        button.imageScaling = .scaleProportionallyDown
+        button.setAccessibilityLabel("Keep Mac awake during this download")
+        button.toolTip = "Keep Mac awake until this download finishes. The display can still turn off."
+        button.widthAnchor.constraint(equalToConstant: 24).isActive = true
+        return button
+    }
+
+    func showKeepAwake(_ enabled: Bool) {
+        state = enabled ? .on : .off
+        image = .symbol(enabled ? "cup.and.saucer.fill" : "cup.and.saucer")
+        contentTintColor = enabled ? .controlAccentColor : .secondaryLabelColor
+    }
+}
+
 extension NSStackView {
     /// Views stacked top to bottom, left-aligned; hidden ones take no space.
     static func column(_ views: [NSView], spacing: CGFloat = 2) -> NSStackView {

@@ -1,7 +1,7 @@
 import Foundation
 
 /// A game's text and spoken language, as Blizzard locale codes (`enUS`, `deDE`).
-public struct GameLanguages: Sendable, Equatable, Hashable {
+public struct GameLanguages: Sendable, Equatable, Hashable, Codable {
     public var text: String
     public var speech: String
 

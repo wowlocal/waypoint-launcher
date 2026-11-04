@@ -74,9 +74,10 @@ final class MenuBarItem: NSObject, NSMenuDelegate {
             }
         }
         for product in model.installable {
-            if let item = downloadItem(uid: product.uid, name: product.displayName, phase: model.phase(of: product)) {
+            let uid = model.installKey(for: product)
+            if let item = downloadItem(uid: uid, name: product.displayName, phase: model.phase(of: product)) {
                 menu.addItem(item)
-                addCancelDownload(to: menu, uid: product.uid, name: product.displayName)
+                addCancelDownload(to: menu, uid: uid, name: product.displayName)
             }
         }
         menu.addItem(.separator())

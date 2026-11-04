@@ -6,6 +6,7 @@ final class DownloadTransfer: NSObject, URLSessionDownloadDelegate, @unchecked S
     private let limiter: DownloadBandwidthLimiter
     private let progress: @Sendable (Int64, Int64) -> Void
     private let maximumBytes: Int64?
+    private let speed = DownloadSpeed.current
     private let lock = NSLock()
     private var task: URLSessionDownloadTask?
     private var continuation: CheckedContinuation<(URL, URLResponse), Error>?
@@ -58,6 +59,7 @@ final class DownloadTransfer: NSObject, URLSessionDownloadDelegate, @unchecked S
     func urlSession(_ session: URLSession, downloadTask: URLSessionDownloadTask,
                     didWriteData bytesWritten: Int64, totalBytesWritten: Int64, totalBytesExpectedToWrite: Int64) {
         limiter.received(bytesWritten, from: downloadTask)
+        speed?.record(bytesWritten)
         if let maximumBytes, totalBytesWritten > maximumBytes {
             lock.withLock { fileError = URLError(.dataLengthExceedsMaximum) }
             downloadTask.cancel()

@@ -35,11 +35,12 @@ final class GameCell: NSView {
 
     private let icon = GameIconView()
     private let name = NSTextField.label(.headline)
-    private let progress = NSProgressIndicator.bar()
+    private let progress = DownloadProgressIndicator()
     private let detail = NSTextField.label(.subheadline, color: .secondaryLabelColor, monospacedDigits: true)
     private let status = NSTextField.label(.body, color: .secondaryLabelColor)
     private let spinner = NSProgressIndicator.spinner()
     private let button = NSButton(title: "Play", target: nil, action: nil)
+    private let keepAwakeButton = NSButton.downloadKeepAwake()
     private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
     private let edition = NSPopUpButton()
     private var iconPath: String?
@@ -51,6 +52,8 @@ final class GameCell: NSView {
         identifier = Self.identifier
         button.target = self
         button.action = #selector(primaryAction)
+        keepAwakeButton.target = self
+        keepAwakeButton.action = #selector(toggleKeepAwake)
         cancelButton.target = self
         cancelButton.action = #selector(cancelDownload)
         cancelButton.toolTip = "Stop this download. Downloaded data is kept for next time."
@@ -60,7 +63,7 @@ final class GameCell: NSView {
         edition.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         edition.target = self
         edition.action = #selector(changeEdition)
-        layOutRow(in: self, icon: icon, text: [name, edition, progress, detail], trailing: [status, spinner, cancelButton, button])
+        layOutRow(in: self, icon: icon, text: [name, edition, progress, detail], trailing: [status, spinner, keepAwakeButton, cancelButton, button])
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
@@ -92,27 +95,32 @@ final class GameCell: NSView {
         edition.isEnabled = !state.isRunning && !model.isSigningIn && state.phase != .launching && !isUninstalling
         toolTip = game.install.version.map { "Version \($0)" }
 
-        progress.isHidden = true
+        var showsProgress = false
+        var downloadTooltip: (() -> String)?
         detail.textColor = .secondaryLabelColor
         detail.toolTip = nil
         switch state.phase {
         case .preparingWindows(let update):
             if let update {
                 progress.doubleValue = update.fraction
-                progress.isHidden = false
+                showsProgress = true
                 detail.stringValue = "Windows components: " + progressDescription(update, waiting: "Downloading…")
             } else {
                 detail.stringValue = "Preparing Windows version…"
             }
         case .updating(let update):
             progress.doubleValue = update?.fraction ?? 0
-            progress.isHidden = false
+            showsProgress = true
             detail.stringValue = progressDescription(update, waiting: "Checking files…")
+            downloadTooltip = { [weak model] in
+                downloadDetails(update, bytesPerSecond: model?.downloadBytesPerSecond(uid: game.id), status: "Downloading…")
+            }
         case .pausing(let update), .paused(let update):
             progress.doubleValue = update?.fraction ?? 0
-            progress.isHidden = false
+            showsProgress = true
             let pausing = if case .pausing = state.phase { true } else { false }
             detail.stringValue = downloadStatus(update, label: pausing ? "Pausing…" : "Paused")
+            downloadTooltip = { downloadDetails(update, bytesPerSecond: nil, status: pausing ? "Pausing…" : "Paused") }
         case .uninstalling(let step):
             detail.stringValue = step
         case .failed(let message):
@@ -128,6 +136,14 @@ final class GameCell: NSView {
             }
         }
 
+        progress.isHidden = !showsProgress
+        progress.details = downloadTooltip
+        switch state.phase {
+        case .updating, .pausing, .paused: keepAwakeButton.isHidden = false
+        default: keepAwakeButton.isHidden = true
+        }
+        keepAwakeButton.showKeepAwake(model.keepsMacAwake(uid: game.id))
+        keepAwakeButton.isEnabled = model.canPauseDownload(uid: game.id) || model.canResumeDownload(uid: game.id)
         status.isHidden = true
         spinner.isHidden = true
         spinner.stopAnimation(nil)
@@ -224,6 +240,12 @@ final class GameCell: NSView {
         model.cancelDownload(uid: state.game.id)
     }
 
+    @objc private func toggleKeepAwake() {
+        guard let state, let model else { return }
+        model.toggleKeepAwake(uid: state.game.id)
+        keepAwakeButton.showKeepAwake(model.keepsMacAwake(uid: state.game.id))
+    }
+
     override func menu(for event: NSEvent) -> NSMenu? {
         guard let state, let model, !state.isRunning else { return nil }
         switch state.phase {
@@ -251,10 +273,10 @@ final class GameCell: NSView {
             menu.addItem(ActionItem("Sign In Again and Play") { Task { await model.play(game, forceSignIn: true) } })
             if GameUpdate.canUpdate(game.install) {
                 menu.addItem(.separator())
-                menu.addItem(ActionItem("Change Language…") { [weak self] in
+                menu.addItem(ActionItem("Change Language…", enabled: state.canUpdate) { [weak self] in
                     self?.window?.contentViewController?.presentAsSheet(LanguageSheet(game: game, model: model))
                 })
-                menu.addItem(ActionItem("Verify Files") { Task { await model.update(game, verify: true) } })
+                menu.addItem(ActionItem("Verify Files", enabled: state.canUpdate) { Task { await model.update(game, verify: true) } })
             }
         }
         // Unsupported games too: removing one is the one thing left to do with it.
@@ -297,9 +319,10 @@ final class InstallableCell: NSView {
 
     private let icon = NSImageView()
     private let name = NSTextField.label(.headline)
-    private let progress = NSProgressIndicator.bar()
+    private let progress = DownloadProgressIndicator()
     private let detail = NSTextField.label(.subheadline, color: .secondaryLabelColor, monospacedDigits: true)
     private let button = NSButton(title: "Try Again…", target: nil, action: nil)
+    private let keepAwakeButton = NSButton.downloadKeepAwake()
     private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
     private var state: InstallableRowState?
     private var model: AppModel?
@@ -310,10 +333,12 @@ final class InstallableCell: NSView {
         icon.image = NSWorkspace.shared.icon(for: .applicationBundle)
         button.target = self
         button.action = #selector(install)
+        keepAwakeButton.target = self
+        keepAwakeButton.action = #selector(toggleKeepAwake)
         cancelButton.target = self
         cancelButton.action = #selector(cancelDownload)
         cancelButton.toolTip = "Stop this download. Downloaded data is kept for next time."
-        layOutRow(in: self, icon: icon, text: [name, progress, detail], trailing: [cancelButton, button])
+        layOutRow(in: self, icon: icon, text: [name, progress, detail], trailing: [keepAwakeButton, cancelButton, button])
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
@@ -326,6 +351,7 @@ final class InstallableCell: NSView {
         detail.toolTip = nil
         detail.textColor = .secondaryLabelColor
         progress.isHidden = false
+        var downloadTooltip: (() -> String)?
         button.isHidden = false
         switch state.phase {
         case .failed(let message):
@@ -339,16 +365,29 @@ final class InstallableCell: NSView {
             let pausing = if case .pausing = state.phase { true } else { false }
             progress.doubleValue = update?.fraction ?? 0
             detail.stringValue = downloadStatus(update, label: pausing ? "Pausing…" : "Paused")
+            downloadTooltip = { downloadDetails(update, bytesPerSecond: nil, status: pausing ? "Pausing…" : "Paused") }
             button.title = pausing ? "Pausing…" : "Resume"
             button.isEnabled = !pausing && model.canResumeDownload(uid: model.installKey(for: state.product))
         case .updating(let update):
             progress.doubleValue = update?.fraction ?? 0
             detail.stringValue = progressDescription(update, waiting: "Preparing…")
+            let uid = model.installKey(for: state.product)
+            downloadTooltip = { [weak model] in
+                downloadDetails(update, bytesPerSecond: model?.downloadBytesPerSecond(uid: uid), status: "Downloading…")
+            }
             button.title = "Pause"
             button.isEnabled = model.canPauseDownload(uid: model.installKey(for: state.product))
         default:
             button.isHidden = true
         }
+        progress.details = downloadTooltip
+        switch state.phase {
+        case .updating, .pausing, .paused: keepAwakeButton.isHidden = false
+        default: keepAwakeButton.isHidden = true
+        }
+        let uid = model.installKey(for: state.product)
+        keepAwakeButton.showKeepAwake(model.keepsMacAwake(uid: uid))
+        keepAwakeButton.isEnabled = model.canPauseDownload(uid: uid) || model.canResumeDownload(uid: uid)
     }
 
     @objc private func install() {
@@ -368,6 +407,13 @@ final class InstallableCell: NSView {
     @objc private func cancelDownload() {
         guard let state, let model else { return }
         model.cancelDownload(uid: model.installKey(for: state.product))
+    }
+
+    @objc private func toggleKeepAwake() {
+        guard let state, let model else { return }
+        let uid = model.installKey(for: state.product)
+        model.toggleKeepAwake(uid: uid)
+        keepAwakeButton.showKeepAwake(model.keepsMacAwake(uid: uid))
     }
 }
 

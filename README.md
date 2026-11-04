@@ -135,9 +135,13 @@ The window's subtitle shows the account games launch as. To switch, click the pe
 
 Rejected logins, CAPTCHA and two-factor prompts pause automatic login and open the same Battle.net page for you to continue. **Update Saved Login…** replaces the saved credentials and enables automatic login again; **Forget Saved Login** disables it and deletes the password. Sign Out deletes it too. Temporary failures wait 5 minutes, then 15 minutes between attempts, with at most three consecutive attempts before pausing. Attempts happen only when you launch a game; the limit survives app restarts. Waypoint cannot observe a token rejection inside an already running game: close it, then use **Sign In Again…** in the account menu or **Sign In Again and Play**.
 
-To install a game, click **+** in the toolbar and pick it. Choose where it goes (`/Applications` by default), the language and the region; the sheet shows the real download size. Progress shows in the game's row.
+To install a game, click **+** in the toolbar and pick it. Choose where it goes (`/Applications` by default), the language and the region; the sheet shows the real download size. Progress shows in the game's row. Hover over the progress bar for the recent download speed, exact downloaded and total bytes, and remaining size.
 
 Click **Pause** beside an install or update to stop downloading. The row shows **Pausing…** until active requests and file writes have stopped, then **Paused** with its progress and a **Resume** button. Resume keeps the same folder, language, region and verification options, reusing completed files and stored game data. These actions are also available in the optional menu bar item.
+
+Unfinished installs, updates and language changes survive quitting, a crash, and updating Waypoint itself. They return paused with their saved progress and a **Resume** button. Normal quit and **Restart to Update** stop active downloads and save their state first. Saved jobs live in `~/Library/Application Support/Waypoint/Downloads/`; downloaded game data stays in the game's folder. Finishing or cancelling removes the job from the queue. Older unfinished CASC installs can be recovered from their download journals and Waypoint's install logs.
+
+The small cup button beside a download keeps the Mac awake while that download runs, with the display free to turn off. It starts off for each new download. Pausing or an error releases the sleep hold; Resume restores it if the button is still on. Finishing the installation releases it automatically. Choosing Sleep or closing the lid still follows macOS's normal behavior.
 
 To stop an unfinished download, pause it and click **Cancel**. Downloaded data is kept for a later attempt, and an installed game returns to its normal Play/Update controls.
 

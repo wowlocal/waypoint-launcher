@@ -200,7 +200,7 @@ private actor FailingWork {
     await finish.open()
     #expect(await run.value == .failed("Quit the game before updating"))
     #expect(job.canResume)
-    #expect(!job.canCancel)
+    #expect(job.canCancel)
 }
 
 @Test(.enabled(if: (try? BattleNet.ensureNotRunning()) != nil))

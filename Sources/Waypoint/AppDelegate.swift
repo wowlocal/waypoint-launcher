@@ -9,6 +9,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var libraryWindow: NSWindow?
     private var settingsWindow: NSWindow?
     private var menuBarItem: MenuBarItem?
+    private var isTerminating = false
 
     static func main() {
         let app = NSApplication.shared
@@ -20,9 +21,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        appUpdater.prepareForRestart = { [weak model] in await model?.prepareToQuit() ?? true }
         NSApp.mainMenu = MainMenu.make(for: self)
         menuBarItem = MenuBarItem(model: model, appUpdater: appUpdater)
         showLibrary(nil)
+    }
+
+    func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
+        guard model.hasActiveDownloads || isTerminating else { return .terminateNow }
+        if !isTerminating {
+            isTerminating = true
+            Task {
+                let ready = await model.prepareToQuit()
+                isTerminating = ready
+                sender.reply(toApplicationShouldTerminate: ready)
+            }
+        }
+        return .terminateLater
     }
 
     /// Closing the window doesn't quit (AppKit's default): game downloads and

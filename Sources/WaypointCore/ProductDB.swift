@@ -1,7 +1,7 @@
 import Foundation
 
 /// One installed product as recorded by the Battle.net Agent.
-public struct ProductInstall: Equatable, Sendable {
+public struct ProductInstall: Equatable, Sendable, Codable {
     public let platform: InstallPlatform
     public var key: String { platform.installKey(uid: uid) }
 

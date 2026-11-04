@@ -155,10 +155,11 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
         accountItem?.image = .account(model.activeAccount)
 
         let ready = appUpdater.readyVersion != nil
-        updateBar.isHidden = appUpdater.status == nil && !ready
+        let recoveryError = model.downloadRecoveryError
+        updateBar.isHidden = appUpdater.status == nil && !ready && recoveryError == nil
         updateSeparator.isHidden = updateBar.isHidden
-        updateText.stringValue = appUpdater.status ?? ""
-        updateText.toolTip = appUpdater.status
+        updateText.stringValue = appUpdater.status ?? recoveryError ?? ""
+        updateText.toolTip = appUpdater.status ?? recoveryError
         updateSpinner.isHidden = !appUpdater.isBusy
         if appUpdater.isBusy { updateSpinner.startAnimation(nil) } else { updateSpinner.stopAnimation(nil) }
         updateIcon.isHidden = appUpdater.isBusy

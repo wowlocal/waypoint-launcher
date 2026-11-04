@@ -36,16 +36,22 @@ final class AppModel {
     private var lastCatalogAttempt: Date?
     private var lastCatalogRegion: Region?
     private var discoveredGames: [Game] = []
-    private var pendingHeroesInstall: ProductInstall?
+    private var pendingHeroesInstall: ProductInstall? {
+        downloads.values.compactMap(\.request).first { $0.install.productCode == "hero" }?.install
+    }
     private var heroesPlatform = UserDefaults.standard.string(forKey: "heroesPlatform").flatMap(InstallPlatform.init(rawValue:)) ?? .windows
     @ObservationIgnored private var windowsSessions: [String: WindowsGameSession] = [:]
     @ObservationIgnored private var windowsObservers: [Int32: any DispatchSourceProcess] = [:]
     /// Game uid -> phase, so each row shows its own progress.
     private(set) var phases: [String: Phase] = [:]
     /// Each job owns its task and retains the original install/update options.
-    private var downloads: [String: DownloadJob] = [:]
+    private let downloadQueue = DownloadQueue()
+    private var downloads: [String: DownloadJob] { downloadQueue.jobs }
+    private(set) var isPreparingToQuit = false
     /// Job uid -> the install folder it writes to.
-    @ObservationIgnored private var jobFolders: [String: String] = [:]
+    private var jobFolders: [String: String] {
+        downloads.compactMapValues { $0.request.map { Self.folderKey($0.install.installPath) } }
+    }
     /// Install folders a game is being uninstalled from: nothing else may
     /// touch them meanwhile (WoW versions share one).
     private var uninstallingFolders: Set<String> = []
@@ -104,6 +110,7 @@ final class AppModel {
             Diagnostics.shared.flush()
         })
         regionOverride = UserDefaults.standard.string(forKey: "regionOverride").flatMap(Region.init(rawValue:))
+        downloadQueue.recoverLegacyInstalls(events: Diagnostics.shared.events())
         reload()
         let center = NSWorkspace.shared.notificationCenter
         for name in [NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didTerminateApplicationNotification] {
@@ -131,6 +138,7 @@ final class AppModel {
     }
 
     func reload() {
+        downloadQueue.restoreAvailableJobs()
         // Battle.net's records outlive a game whose files are gone (moved to
         // the Trash, or uninstalled here): only what's on disk is listed.
         let found = library.games()
@@ -146,7 +154,8 @@ final class AppModel {
         }
         let heroes = all.filter { $0.install.uid == "heroes" }
         let preferred = WindowsHeroes.isAvailable ? heroesPlatform : .macOS
-        let selected = heroes.first { $0.install.platform == preferred } ?? heroes.first
+        let selected = heroes.first { $0.id == pendingHeroesInstall?.key }
+            ?? heroes.first { $0.install.platform == preferred } ?? heroes.first
         var addedHeroes = false
         games = all.filter { game in
             guard game.install.uid == "heroes" else { return true }
@@ -170,6 +179,9 @@ final class AppModel {
     }
 
     func defaultPlatform(for product: InstallableProduct) -> InstallPlatform {
+        if let pending = downloads.values.compactMap(\.request).first(where: { $0.install.uid == product.uid }) {
+            return pending.install.platform
+        }
         if product.productCode == "hero" {
             return pendingHeroesInstall?.platform ?? (WindowsHeroes.isAvailable ? .windows : .macOS)
         }
@@ -189,7 +201,7 @@ final class AppModel {
     }
 
     func canUpdate(_ game: Game) -> Bool {
-        GameUpdate.canUpdate(game.install) && game.isInstalled && !isRunning(game) && !isBusy(game) &&
+        !isPreparingToQuit && downloads[game.id] == nil && GameUpdate.canUpdate(game.install) && game.isInstalled && !isRunning(game) && !isBusy(game) &&
             !cleaningFolders.contains(Self.folderKey(game.install.installPath))
     }
 
@@ -216,21 +228,8 @@ final class AppModel {
         guard canUpdate(game) else { return }
         defer { ProcessMemory.releaseFreed() }
         Log.info(.gameUpdate, "requested", nil, ["uid": game.id, "verify": verify])
-        let target = updates[game.id]?.latest
-        let job = DownloadJob(uid: game.id, category: .gameUpdate) { progress in
-            try BattleNet.ensureNotRunning() // ask before downloading anything
-            let updater = GameUpdate(install: game.install)
-            let plan = try await updater.plan(target: target, verify: verify)
-            // A CASC game's new build can need no new files and still have to
-            // be recorded (configs, .build.info).
-            if !plan.isEmpty || plan.target.buildConfig != game.install.buildConfig {
-                try await updater.apply(plan, progress: progress)
-            }
-        }
-        phases.removeValue(forKey: game.id)
-        downloads[game.id] = job
-        jobFolders[game.id] = Self.folderKey(game.install.installPath)
-        await runDownload(job, uid: game.id)
+        await startDownload(DownloadRequest(kind: .update, install: game.install,
+            product: InstallableProduct.forProduct(game.install.productCode), target: updates[game.id]?.latest, verify: verify))
     }
 
     // MARK: Languages
@@ -258,16 +257,8 @@ final class AppModel {
         Log.notice(.gameUpdate, "languages_requested", nil, ["uid": game.id, "text": languages.text, "speech": languages.speech,
                                                             "from_text": game.install.languages.text,
                                                             "from_speech": game.install.languages.speech])
-        let target = updates[game.id]?.latest
-        let job = DownloadJob(uid: game.id, category: .gameUpdate) { progress in
-            try BattleNet.ensureNotRunning() // ask before downloading anything
-            let updater = GameUpdate(install: game.install)
-            try await updater.apply(try await updater.plan(target: target, languages: languages), progress: progress)
-        }
-        phases.removeValue(forKey: game.id)
-        downloads[game.id] = job
-        jobFolders[game.id] = Self.folderKey(game.install.installPath)
-        await runDownload(job, uid: game.id)
+        await startDownload(DownloadRequest(kind: .languages, install: game.install,
+            product: InstallableProduct.forProduct(game.install.productCode), target: updates[game.id]?.latest, languages: languages))
     }
 
     // MARK: Installs
@@ -295,9 +286,13 @@ final class AppModel {
     /// Games Waypoint can install that aren't installed yet.
     var installable: [InstallableProduct] {
         _ = catalogRevision
-        return InstallableProduct.available(for: regionOverride ?? Region.preferred(games: games)).filter { product in
+        var products = InstallableProduct.available(for: regionOverride ?? Region.preferred(games: games))
+        for request in downloads.values.compactMap(\.request) {
+            if let product = request.product, !products.contains(where: { $0.uid == product.uid }) { products.append(product) }
+        }
+        return products.filter { product in
             !games.contains { $0.install.uid == product.uid } &&
-            (product.supportedPlatforms != [.windows] || WindowsTitle(rawValue: product.productCode)?.isAvailable == true)
+            (downloads[installKey(for: product)] != nil || product.supportedPlatforms != [.windows] || WindowsTitle(rawValue: product.productCode)?.isAvailable == true)
         }
     }
 
@@ -328,34 +323,32 @@ final class AppModel {
         defer { ProcessMemory.releaseFreed() }
         let uid = platform.installKey(uid: product.uid)
         let folderKey = Self.folderKey(folder.path)
-        guard !isBusy(uid: uid), !uninstallingFolders.contains(folderKey), !cleaningFolders.contains(folderKey) else { return }
+        guard !isPreparingToQuit, downloads[uid] == nil, !isBusy(uid: uid), !uninstallingFolders.contains(folderKey), !cleaningFolders.contains(folderKey) else { return }
         guard platform != .windows || acceptGraphicsLicense(for: WindowsTitle(rawValue: product.productCode)) else { return }
         if product.productCode == "hero" {
             guard !isBusy(uid: "heroes"), !isBusy(uid: "heroes@windows") else { return }
-            pendingHeroesInstall = product.install(at: folder, region: region, languages: languages,
-                tagString: "\(platform.manifestTag) \(region.launchOptionValue) \(languages.text) text \(languages.speech) speech", platform: platform)
-            selectHeroesEdition(platform)
         }
         Log.notice(.install, "requested", nil, ["uid": product.uid, "path": folder.path, "region": region.rawValue,
                                                 "language": languages.text, "speech_language": languages.speech])
-        let job = DownloadJob(uid: uid, category: .install) { progress in
-            try BattleNet.ensureNotRunning() // ask before downloading anything
-            try await ProductCatalog.shared.validateDownload(product, region: region, platform: platform)
-            let installer = GameInstaller(product: product, folder: folder, region: region, languages: languages, platform: platform)
-            let plan = try await installer.plan()
-            try await installer.apply(plan, progress: progress)
-            Log.notice(.install, "finished", nil, ["uid": product.uid, "version": plan.version, "path": folder.path])
-        }
-        phases.removeValue(forKey: uid)
-        downloads[uid] = job
-        jobFolders[uid] = Self.folderKey(folder.path)
-        await runDownload(job, uid: uid)
+        let install = product.install(at: folder, region: region, languages: languages,
+            tagString: "\(platform.manifestTag) \(region.launchOptionValue) \(languages.text) text \(languages.speech) speech", platform: platform)
+        await startDownload(DownloadRequest(kind: .install, install: install, product: product))
     }
 
-    private func runDownload(_ job: DownloadJob, uid: String) async {
-        if await job.run() == .completed, downloads[uid] === job {
-            downloads.removeValue(forKey: uid)
-            if pendingHeroesInstall?.key == uid { pendingHeroesInstall = nil }
+    private func startDownload(_ request: DownloadRequest) async {
+        do {
+            try downloadQueue.enqueue(request)
+            phases.removeValue(forKey: request.key)
+            if request.kind == .install, request.install.productCode == "hero" { selectHeroesEdition(request.install.platform) }
+            await runDownload(uid: request.key)
+        } catch {
+            Log.error(.cdn, "enqueue_failed", nil, ["uid": request.key, "error": error])
+            NSAlert(error: error).runModal()
+        }
+    }
+
+    private func runDownload(uid: String) async {
+        if await downloadQueue.run(key: uid) == .completed {
             reload()
             await checkForUpdates(force: true)
         }
@@ -365,27 +358,59 @@ final class AppModel {
 
     func pauseDownload(uid: String) { downloads[uid]?.pause() }
 
+    func downloadBytesPerSecond(uid: String) -> Double? { downloads[uid]?.bytesPerSecond }
+
+    func keepsMacAwake(uid: String) -> Bool { downloads[uid]?.keepsMacAwake == true }
+
+    func toggleKeepAwake(uid: String) {
+        guard let job = downloads[uid], job.canPause || job.canResume else { return }
+        job.keepsMacAwake.toggle()
+    }
+
     func canCancelDownload(uid: String) -> Bool { downloads[uid]?.canCancel == true && !isUninstalling(uid: uid) }
 
     /// Stop tracking a paused job. Its verified data stays available for a
     /// later install/update; no writer is active when canCancel is true.
     func cancelDownload(uid: String) {
         guard canCancelDownload(uid: uid) else { return }
-        downloads.removeValue(forKey: uid)
-        if pendingHeroesInstall?.key == uid { pendingHeroesInstall = nil; reload() }
+        guard discardDownload(uid: uid) else { return }
+        reload()
         phases.removeValue(forKey: uid)
         Log.notice(.cdn, "cancelled", "keeping downloaded data", ["uid": uid])
     }
 
     func canResumeDownload(uid: String) -> Bool {
-        downloads[uid]?.canResume == true && !running.contains(uid) && !isUninstalling(uid: uid)
+        !isPreparingToQuit && downloads[uid]?.canResume == true && !running.contains(uid) && !isUninstalling(uid: uid)
     }
 
     func resumeDownload(uid: String) async {
-        guard canResumeDownload(uid: uid), let job = downloads[uid] else { return }
+        guard canResumeDownload(uid: uid) else { return }
         defer { ProcessMemory.releaseFreed() }
         Log.notice(.cdn, "resume_requested", nil, ["uid": uid])
-        await runDownload(job, uid: uid)
+        await runDownload(uid: uid)
+    }
+
+    @discardableResult
+    private func discardDownload(uid: String) -> Bool {
+        do { try downloadQueue.remove(key: uid); return true }
+        catch { NSAlert(error: error).runModal(); return false }
+    }
+
+    var hasActiveDownloads: Bool { downloadQueue.hasActiveJobs }
+    var downloadRecoveryError: String? {
+        downloadQueue.restoreErrors.first.map { "Some unfinished downloads could not be restored. \($0)" }
+    }
+
+    func prepareToQuit() async -> Bool {
+        isPreparingToQuit = true
+        do {
+            try await downloadQueue.pauseAll()
+            return true
+        } catch {
+            isPreparingToQuit = false
+            NSAlert(error: error).runModal()
+            return false
+        }
     }
 
     // MARK: Uninstalling
@@ -437,12 +462,12 @@ final class AppModel {
                 // No row can say it: the game is gone all the same (putting it
                 // back failed), or its row shows a failed download's message.
                 phases.removeValue(forKey: game.id)
-                if gone { downloads.removeValue(forKey: game.id) }
+                if gone { discardDownload(uid: game.id) }
                 NSAlert(error: error).runModal()
             }
             return
         }
-        downloads.removeValue(forKey: game.id)
+        discardDownload(uid: game.id)
         uninstallingFolders.remove(folder)
         var cleanupError: Error?
         if plan.sharesStorage {
@@ -507,7 +532,7 @@ final class AppModel {
     }
 
     func canPlay(_ game: Game) -> Bool {
-        game.isSupported && !isRunning(game) && !isBusy(game) && !isSigningIn
+        !isPreparingToQuit && game.isSupported && !isRunning(game) && !isBusy(game) && !isSigningIn
     }
 
     /// `forceSignIn` skips the saved token, for when the game rejects it.
@@ -525,7 +550,7 @@ final class AppModel {
         }
         Log.info(.launch, "requested", nil, ["uid": game.id, "version": game.install.version ?? "?",
                                              "force_sign_in": forceSignIn, "play_as": accountID != nil])
-        downloads.removeValue(forKey: game.id)
+        guard discardDownload(uid: game.id) else { return }
         do {
             let screen = NSScreen.main ?? NSScreen.screens.first
             let displayID = (screen?.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? CGMainDisplayID()

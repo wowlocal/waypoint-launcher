@@ -18,11 +18,13 @@ final class AppUpdater: NSObject {
     private(set) var isBusy = false
     /// A downloaded update waiting for Waypoint to restart.
     private(set) var readyVersion: String?
+    @ObservationIgnored var prepareForRestart: (@MainActor () async -> Bool)?
 
     @ObservationIgnored private var controller: SPUStandardUpdaterController?
     @ObservationIgnored private var installNow: (() -> Void)?
     @ObservationIgnored private var userInitiated = false
     @ObservationIgnored private var clearTask: Task<Void, Never>?
+    @ObservationIgnored private var isRestarting = false
 
     var isEnabled: Bool { controller != nil }
 
@@ -59,10 +61,18 @@ final class AppUpdater: NSObject {
     /// Installs the downloaded update now; Sparkle quits and relaunches Waypoint.
     /// Games keep running, they don't depend on Waypoint.
     func restartToUpdate() {
-        guard let installNow else { return }
+        guard let installNow, !isRestarting else { return }
+        isRestarting = true
         Log.notice(.selfUpdate, "restart_to_update", nil, ["version": readyVersion ?? "?"])
         show("Installing update…", busy: true)
-        installNow()
+        Task {
+            guard await prepareForRestart?() ?? true else {
+                isRestarting = false
+                show("Could not save downloads. Try restarting again.")
+                return
+            }
+            installNow()
+        }
     }
 
     private func show(_ text: String?, busy: Bool = false, clearAfter seconds: Double? = nil) {

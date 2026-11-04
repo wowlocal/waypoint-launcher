@@ -490,6 +490,24 @@ public final class CASCStorageWriter {
         _ = trustedRecords(records, skipping: start == nil ? 0 : 1, from: start?.archive ?? -1, in: directory) { key, _, _ in body(key) }
     }
 
+    /// Read-only recovery of pre-checkpoint installs. Ignore incomplete journal
+    /// records and blobs whose archive bytes never reached disk.
+    public static func journaledBytes(in directory: URL) -> UInt64 {
+        guard let saved = try? Data(contentsOf: directory.appendingPathComponent(journalName), options: .alwaysMapped),
+              saved.count >= 16 else { return 0 }
+        let records = saved.dropFirst(16)
+        let start = marker(in: records)
+        let skip = start == nil ? 0 : 1
+        let count = trustedRecords(records, skipping: skip, from: start?.archive ?? -1, in: directory) { _, _, _ in }
+        return records.withUnsafeBytes { raw in
+            (skip..<(skip + count)).reduce(UInt64(0)) { total, i in
+                let p = i * journalRecordSize + 26
+                let size = (0..<4).reduce(UInt32(0)) { $0 | UInt32(raw[p + $1]) << (8 * UInt32($1)) }
+                return total + UInt64(size > CASC.headerSize ? size - UInt32(CASC.headerSize) : 0)
+            }
+        }
+    }
+
     private func sync() throws {
         try archiveHandle?.synchronize()
         try journal.synchronize()
