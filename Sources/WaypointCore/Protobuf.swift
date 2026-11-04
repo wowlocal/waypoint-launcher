@@ -74,6 +74,39 @@ struct ProtoReader {
         return result
     }
 
+    /// Transform a length-delimited field while retaining every other wire
+    /// byte, including unknown fields and their original ordering.
+    func mappingBytes(_ field: Int, _ transform: (Data) throws -> Data) throws -> Data {
+        var reader = self
+        var result = Data()
+        while !reader.isAtEnd {
+            let start = reader.offset
+            guard let entry = try reader.next() else { break }
+            if entry.field == field {
+                guard case .bytes(let bytes) = entry.value else { throw TACTError.malformed("protobuf field \(field)") }
+                let updated = try transform(bytes)
+                if updated == bytes { result.append(data[start..<reader.offset]) }
+                else {
+                    var writer = ProtoWriter()
+                    writer.bytes(field, updated)
+                    result.append(writer.data)
+                }
+            } else { result.append(data[start..<reader.offset]) }
+        }
+        return result
+    }
+
+    func replacingBytes(_ field: Int, with bytes: Data) throws -> Data {
+        var found = false
+        var result = try mappingBytes(field) { _ in found = true; return bytes }
+        if !found {
+            var writer = ProtoWriter()
+            writer.bytes(field, bytes)
+            result.append(writer.data)
+        }
+        return result
+    }
+
     private mutating func readVarint() throws -> UInt64 {
         var result: UInt64 = 0
         var shift: UInt64 = 0

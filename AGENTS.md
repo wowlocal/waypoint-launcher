@@ -1,5 +1,11 @@
 # Waypoint: notes for agents
 
+## Review changes
+
+Before committing code changes, run an independent sub-agent review and address
+its findings. Include installation/update migrations and real client behavior
+in the review when a change affects downloaded content or Battle.net metadata.
+
 ## TODO
 
 - [x] **Remove SwiftUI.** The app's UI (`Sources/Waypoint`) is AppKit now; no

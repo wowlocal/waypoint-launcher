@@ -3,8 +3,9 @@ import Darwin
 
 /// Battle.net's Locate reads a ProductInstall from `<root>/.product.db`.
 /// Shared WoW roots still have just one such file; each edition needs its
-/// own entry in the Agent's central database as well. Only fill missing
-/// records, never replace state or unknown fields written by the Agent.
+/// own entry in the Agent's central database as well. Fill missing records
+/// and synchronize completed HighRes selections without replacing other
+/// state or unknown fields written by the Agent.
 public enum BattleNetInstallMetadata {
     @discardableResult
     public static func repair(store: InstallStateStore = InstallStateStore(),
@@ -43,6 +44,16 @@ public enum BattleNetInstallMetadata {
             if try create(record, at: root.appendingPathComponent(".product.db")) {
                 added += 1
                 Log.notice(.install, "battlenet_folder_record_repaired", nil, ["uid": install.uid, "path": root.path])
+            } else {
+                let file = root.appendingPathComponent(".product.db")
+                let before = try Data(contentsOf: file)
+                let after = try updatingContentSelection(before, for: install)
+                if after != before {
+                    try ensureNotRunning()
+                    guard try Data(contentsOf: file) == before else { throw UpdateError.storageChanged }
+                    try after.write(to: file, options: .atomic)
+                    added += 1
+                }
             }
             if original != nil, registeredUIDs.insert(install.uid).inserted {
                 var writer = ProtoWriter()
@@ -50,6 +61,8 @@ public enum BattleNetInstallMetadata {
                 database.append(writer.data)
                 added += 1
             }
+            let updated = try updatingContentSelection(database, for: install)
+            if updated != database { database = updated; added += 1 }
         }
         if let original, database != original {
             try ensureNotRunning()
@@ -61,6 +74,40 @@ public enum BattleNetInstallMetadata {
             Log.notice(.install, "battlenet_install_list_repaired")
         }
         return added
+    }
+
+    /// Only a completed, matching build can advertise HighRes. The Agent
+    /// derives its desired selection from UserSettings.additional_tags (9),
+    /// not just the cached active_tag_string (17). Agent-written folder
+    /// records can be Database envelopes containing several WoW editions.
+    static func updatingContentSelection(_ data: Data, for completed: ProductInstall) throws -> Data {
+        guard completed.platform == .macOS,
+              GameCatalog.family(for: completed.productCode) == .worldOfWarcraft,
+              !InstallContent.needsUpdate(completed), let tags = completed.tagString else { return data }
+        func updateRecord(_ record: Data) throws -> Data {
+            guard let current = try? ProductDB.parseInstallFile(record),
+                  current.isSameInstallation(as: completed) else { return record }
+            let settingsUpdated = try ProtoReader(record).mappingBytes(3) { settings in
+                let additional = try ProtoReader(settings).fields()[9]?.first?.string ?? ""
+                let selected = additional.split(whereSeparator: \.isWhitespace).contains { $0 == "HighRes" || $0 == "HighRes?" }
+                let value = selected ? additional : additional + (additional.isEmpty ? "" : " ") + "HighRes"
+                return try ProtoReader(settings).replacingBytes(9, with: Data(value.utf8))
+            }
+            // The Agent can still cache the previous build or languages.
+            // Set its desired package now, but do not claim that its cached
+            // active build already has the new selection.
+            guard current.buildConfig == completed.buildConfig, let currentTags = current.tagString,
+                  InstallContent.tags(for: current, from: currentTags) == tags else { return settingsUpdated }
+            return try ProtoReader(settingsUpdated).mappingBytes(4) { cached in
+                try ProtoReader(cached).mappingBytes(1) { state in
+                    try ProtoReader(state).replacingBytes(17, with: Data(tags.utf8))
+                }
+            }
+        }
+        if (try? ProductDB.parseInstallFile(data)) != nil { return try updateRecord(data) }
+        // Leave opaque or unfamiliar folder files untouched.
+        guard (try? ProductDB.parseDatabase(data))?.isEmpty == false else { return data }
+        return try ProtoReader(data).mappingBytes(1, updateRecord)
     }
 
     /// Match the Agent's own CASC folder mode. Its adoption pass applies a
@@ -160,6 +207,9 @@ public enum BattleNetInstallMetadata {
             let text = install.textLanguage ?? "enUS", speech = install.speechLanguage ?? text
             settings.string(6, text)
             settings.string(7, speech)
+            if GameCatalog.family(for: install.productCode) == .worldOfWarcraft, !InstallContent.needsUpdate(install) {
+                settings.string(9, "HighRes")
+            }
             for language in Set([text, speech]).sorted() {
                 settings.message(8) {
                     $0.string(1, language)

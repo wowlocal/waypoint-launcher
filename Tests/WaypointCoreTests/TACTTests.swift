@@ -218,6 +218,26 @@ private func selectFixture(_ tagString: String) -> [String] {
         #expect(im.select(tagString: query).map(\.path) == expected.map { paths[$0] })
         #expect(dm.select(tagString: query).map(\.size) == expected.map { UInt64($0 + 1) })
     }
+    let wow = ProductInstall(uid: "wowf", productCode: "wowf", installPath: "/unused")
+    let fullQuality = InstallContent.tags(for: wow, from: "OSX enUS speech?:OSX enUS text?")
+    #expect(im.select(tagString: fullQuality).map(\.path) == ["base", "hires"])
+    #expect(dm.select(tagString: fullQuality).map(\.size) == [1, 2])
+    #expect(InstallContent.tags(for: wow, from: fullQuality) == fullQuality)
+    let anniversary = InstallContent.tags(for: wow, from: "OSX Alternate")
+    #expect(im.select(tagString: anniversary).map(\.path) == ["base", "hires", "alternate", "both"])
+    #expect(InstallContent.tags(for: .init(uid: "s2", productCode: "s2", installPath: "/unused"), from: "OSX code") == "OSX code")
+}
+
+@Test func sameBuildWoWOffersHighResBackfillUntilTagsAreCommitted() {
+    var install = ProductInstall(uid: "wowf", productCode: "wowf", installPath: "/unused", version: "1.0", buildConfig: "a",
+                                 tagString: "OSX EU? enUS speech?:OSX EU? ruRU text?")
+    let latest = ProductVersion(region: "eu", buildConfig: "a", cdnConfig: "b", buildID: 1, name: "1.0")
+    #expect(UpdateCheck(installedBuild: "a", installedVersion: "1.0", latest: latest,
+                        needsContentUpdate: InstallContent.needsUpdate(install)).isUpdateAvailable)
+    install.tagString = InstallContent.tags(for: install, from: install.tagString!)
+    #expect(install.languages == GameLanguages(text: "ruRU", speech: "enUS"))
+    #expect(!UpdateCheck(installedBuild: "a", installedVersion: "1.0", latest: latest,
+                         needsContentUpdate: InstallContent.needsUpdate(install)).isUpdateAvailable)
 }
 
 private func tagFixtureData() -> Data {

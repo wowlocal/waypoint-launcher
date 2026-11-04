@@ -48,8 +48,10 @@ public struct CASCInstallPlan: Sendable {
     public var storage: [StorageItem]
     /// Loose files from the install manifest, rooted at the flavor folder.
     public var loose: UpdatePlan
-    /// The install's languages are new (an install, or a language change).
+    /// Compatibility name: the selected tags changed (languages or content).
     public var setsLanguages = false
+    /// Content-only selections must not overwrite language choices made in game.
+    var writesLanguageConfig = false
     /// A language change: the tags it replaces.
     public var replacedTags: String?
     /// Bytes of `storage` an interrupted run already wrote: still planned (the
@@ -64,7 +66,7 @@ public struct CASCInstallPlan: Sendable {
         return total - min(storedBytes, total)
     }
     /// Nothing to download or delete (configs and records may still change).
-    public var isEmpty: Bool { storage.isEmpty && loose.isEmpty }
+    public var isEmpty: Bool { storage.isEmpty && loose.isEmpty && !setsLanguages }
 }
 
 /// Installs or updates a game that keeps its data in local CASC storage (WoW,
@@ -120,9 +122,11 @@ public struct CASCInstaller: Sendable {
         let target: ProductVersion
         if let requested { target = requested } else { target = try await versions.latest(product: install.productCode, region: region) }
         let cdn = try await versions.cdn(product: install.productCode, region: region)
-        let installedTags = install.tagString ?? config.tagString(region: region, languages: install.languages)
-        let planned = languages.map { install.with($0, tags: installedTags) } ?? install
-        let tags = planned.tagString ?? installedTags
+        let installedTags = install.tagString.nonEmpty ?? config.tagString(region: region, languages: install.languages)
+        let contentTags = InstallContent.tags(for: install, from: installedTags)
+        var planned = languages.map { install.with($0, tags: contentTags) } ?? install
+        if languages == nil { planned.tagString = contentTags }
+        let tags = planned.tagString ?? contentTags
 
         let buildConfigData = try await cdn.cached(.config, target.buildConfig)
         let cdnConfigData = try await cdn.cached(.config, target.cdnConfig)
@@ -242,6 +246,7 @@ public struct CASCInstaller: Sendable {
         let plan = CASCInstallPlan(install: planned, product: product, config: config, target: target, cdn: cdn,
                                    buildConfig: buildConfigData, cdnConfig: cdnConfigData, archives: archives,
                                    storage: storage, loose: loose, setsLanguages: tags != installedTags || install.buildConfig == nil,
+                                   writesLanguageConfig: install.buildConfig == nil || (languages != nil && languages != install.languages),
                                    replacedTags: tags != installedTags ? installedTags : nil, storedBytes: storedBytes)
         Log.info(.install, "casc_plan_ready", nil, [
             "uid": install.uid, "version": target.name, "storage_files": storage.count,
@@ -367,7 +372,7 @@ public struct CASCInstaller: Sendable {
         // so a language picked in the game survives updates. Best effort:
         // the files are in, and the launch locale gives the text language
         // (a locked Config.wtf mustn't fail every retry).
-        if plan.setsLanguages, GameCatalog.family(for: install.productCode) == .worldOfWarcraft {
+        if plan.writesLanguageConfig, GameCatalog.family(for: install.productCode) == .worldOfWarcraft {
             do {
                 try WoWConfig.setLanguages(plan.install.languages, flavorFolder: looseRoot)
             } catch {

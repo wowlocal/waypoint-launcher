@@ -115,6 +115,78 @@ private struct MetadataFixture {
     #expect(fields[6]?.first?.string == "wow")
 }
 
+@Test func highResMetadataPreservesUnknownFieldsAndOtherEditions() throws {
+    let f = try MetadataFixture(); defer { f.remove() }
+    let old = f.install("wowf")
+    var completed = old
+    completed.tagString = InstallContent.tags(for: old, from: old.tagString!)
+    var record = BattleNetInstallMetadata.encode(old, subfolder: "_forever_")
+    record = try ProtoReader(record).mappingBytes(3) { settings in
+        var opaque = ProtoWriter(); opaque.varint(90, 123)
+        return try ProtoReader(settings + opaque.data).replacingBytes(9, with: Data("OtherContent".utf8))
+    }
+    var extra = ProtoWriter(); extra.string(99, "opaque Agent state")
+    record += extra.data
+    let patched = try BattleNetInstallMetadata.updatingContentSelection(record, for: completed)
+    #expect(patched.suffix(extra.data.count) == extra.data)
+    let settings = try #require(try ProtoReader(patched).fields()[3]?.first?.message?.fields())
+    #expect(settings[9]?.first?.string == "OtherContent HighRes")
+    #expect(settings[90]?.first?.uint == 123)
+    #expect(try ProductDB.parseInstallFile(patched)?.tagString == completed.tagString)
+    #expect(try BattleNetInstallMetadata.updatingContentSelection(patched, for: completed) == patched)
+
+    var envelope = ProtoWriter()
+    let retail = BattleNetInstallMetadata.encode(f.install(), subfolder: "_retail_")
+    envelope.bytes(1, retail); envelope.bytes(1, record); envelope.string(100, "database extension")
+    let updated = try BattleNetInstallMetadata.updatingContentSelection(envelope.data, for: completed)
+    let entries = try ProtoReader(updated).fields()[1] ?? []
+    if case .bytes(let bytes) = entries[0] { #expect(bytes == retail) }
+    if case .bytes(let bytes) = entries[1] { #expect(bytes == patched) }
+    #expect(try ProtoReader(updated).fields()[100]?.first?.string == "database extension")
+
+    var stale = completed; stale.buildConfig = String(repeating: "b", count: 32)
+    let olderAgent = try BattleNetInstallMetadata.updatingContentSelection(record, for: stale)
+    #expect(try ProductDB.parseInstallFile(olderAgent)?.buildConfig == old.buildConfig)
+    #expect(try ProductDB.parseInstallFile(olderAgent)?.tagString == old.tagString)
+    #expect(try ProtoReader(olderAgent).fields()[3]?.first?.message?.fields()[9]?.first?.string == "OtherContent HighRes")
+    var changedLanguage = completed
+    changedLanguage.tagString = TagLanguages.replacing(in: completed.tagString!, with: GameLanguages(text: "deDE"))
+    let languageChange = try BattleNetInstallMetadata.updatingContentSelection(record, for: changedLanguage)
+    #expect(try ProductDB.parseInstallFile(languageChange)?.tagString == old.tagString)
+    #expect(try ProtoReader(languageChange).fields()[3]?.first?.message?.fields()[9]?.first?.string == "OtherContent HighRes")
+    #expect(try BattleNetInstallMetadata.updatingContentSelection(record, for: old) == record)
+    #expect(try ProtoReader(BattleNetInstallMetadata.encode(completed, subfolder: "_forever_")).fields()[3]?.first?.message?.fields()[9]?.first?.string == "HighRes")
+}
+
+@Test func highResAlreadyOnDiskStillCommitsTagsWithoutChangingInGameLanguages() async throws {
+    let f = try MetadataFixture(); defer { f.remove() }
+    let old = f.install("wowf")
+    var selected = old
+    selected.tagString = InstallContent.tags(for: old, from: old.tagString!)
+    let product = try #require(InstallableProduct.forProduct("wowf"))
+    let config = try ProductConfig(json: Data(#"{"all":{"config":{"shared_container_default_subfolder":"_forever_"}}}"#.utf8))
+    let store = InstallStateStore(file: f.root.appendingPathComponent("installs.json"))
+    let target = ProductVersion(region: "eu", buildConfig: f.build, cdnConfig: String(repeating: "b", count: 32),
+                                buildID: 1, name: old.version!)
+    let cdn = CDNClient(product: "wowf", path: "tpr/wow", servers: [])
+    let loose = UpdatePlan(install: selected, target: target, cdn: cdn, files: [], deletions: [])
+    let plan = CASCInstallPlan(install: selected, product: product, config: config, target: target, cdn: cdn,
+                               buildConfig: Data(), cdnConfig: Data(), archives: [], storage: [], loose: loose,
+                               setsLanguages: true, replacedTags: old.tagString)
+    #expect(!plan.isEmpty)
+    let wtf = f.game.appendingPathComponent("_forever_/WTF/Config.wtf")
+    try FileManager.default.createDirectory(at: wtf.deletingLastPathComponent(), withIntermediateDirectories: true)
+    let inGame = Data("SET textLocale \"deDE\"\nSET audioLocale \"frFR\"\n".utf8)
+    try inGame.write(to: wtf)
+    try await CASCInstaller(product: product, install: selected, config: config, store: store).apply(plan)
+    #expect(try Data(contentsOf: wtf) == inGame)
+    #expect(store.apply(to: old).tagString == selected.tagString)
+    #expect(try String(contentsOf: f.game.appendingPathComponent(".build.info"), encoding: .utf8).contains(selected.tagString!))
+    let folder = try Data(contentsOf: f.game.appendingPathComponent(".product.db"))
+    #expect(try ProductDB.parseInstallFile(folder)?.tagString == selected.tagString)
+    #expect(try ProtoReader(folder).fields()[3]?.first?.message?.fields()[9]?.first?.string == "HighRes")
+}
+
 @Test func metadataRepairsOnlyKnownOwnedDataDirectoryModes() throws {
     let f = try MetadataFixture(); defer { f.remove() }
     let fm = FileManager.default

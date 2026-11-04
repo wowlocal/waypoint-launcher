@@ -6,8 +6,10 @@ public struct UpdateCheck: Sendable {
     public var installedBuild: String?
     public var installedVersion: String?
     public var latest: ProductVersion
+    public var needsContentUpdate = false
 
     public var isUpdateAvailable: Bool {
+        if needsContentUpdate { return true }
         if let installedBuild { return installedBuild != latest.buildConfig }
         return installedVersion != latest.name
     }
@@ -105,7 +107,8 @@ public struct GameUpdater: Sendable {
 
     public func check() async throws -> UpdateCheck {
         let latest = try await versions.latest(product: install.productCode, region: region)
-        return UpdateCheck(installedBuild: install.buildConfig, installedVersion: install.version, latest: latest)
+        return UpdateCheck(installedBuild: install.buildConfig, installedVersion: install.version, latest: latest,
+                           needsContentUpdate: InstallContent.needsUpdate(install))
     }
 
     /// Works out what to download and delete. With `verify`, every file is
@@ -505,8 +508,8 @@ public struct InstalledBuild: Codable, Sendable, Equatable {
     public var textLanguage: String?
     public var speechLanguage: String?
     public var tagString: String?
-    /// Waypoint picked these languages (an install or a language change), so
-    /// they win over what Battle.net recorded for the same build…
+    /// Compatibility name: Waypoint picked these tags (languages or content),
+    /// so they win over what Battle.net recorded for the same build…
     public var chosenLanguages: Bool?
     /// …as long as Battle.net's records still show the tags they replaced
     /// (or none): a language picked in Battle.net afterwards wins.
