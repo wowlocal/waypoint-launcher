@@ -64,6 +64,8 @@ final class GameCell: NSView {
         edition.menu?.autoenablesItems = false
         edition.controlSize = .small
         edition.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        edition.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        edition.cell?.lineBreakMode = .byTruncatingTail
         edition.target = self
         edition.action = #selector(changeEdition)
         layOutRow(in: self, icon: icon, text: [name, edition, downloadDetailsView], trailing: [status, spinner, keepAwakeButton, cancelButton, button])
@@ -444,7 +446,7 @@ private func layOutRow(in cell: NSView, icon: NSView, text views: [NSView], trai
     cell.addSubview(row)
     // Reserve padding outside the stack so automatic table row heights
     // include it even when the edition picker or download adds lines.
-    NSLayoutConstraint.activate([
+    NSLayoutConstraint.activate(views.map { $0.widthAnchor.constraint(lessThanOrEqualTo: text.widthAnchor) } + [
         row.leadingAnchor.constraint(equalTo: cell.leadingAnchor),
         row.trailingAnchor.constraint(equalTo: cell.trailingAnchor),
         row.topAnchor.constraint(equalTo: cell.topAnchor, constant: 8),

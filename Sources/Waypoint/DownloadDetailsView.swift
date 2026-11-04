@@ -27,10 +27,12 @@ final class DownloadDetailsView: NSStackView {
         setViews([progress, label], in: .center)
         setContentHuggingPriority(.init(1), for: .horizontal)
         let barWidth = progress.widthAnchor.constraint(equalToConstant: 200)
-        barWidth.priority = .defaultHigh
+        // Shrink the bar before the table cell outgrows a narrow column.
+        barWidth.priority = .defaultLow
         NSLayoutConstraint.activate([
             barWidth,
             progress.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor),
+            label.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor),
         ])
     }
 
