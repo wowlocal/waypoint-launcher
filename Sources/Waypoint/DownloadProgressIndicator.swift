@@ -42,20 +42,15 @@ final class DownloadProgressIndicator: NSProgressIndicator, NSViewToolTipOwner {
 
 func downloadDetails(_ progress: UpdateProgress?, bytesPerSecond: Double?, status: String) -> String {
     guard let progress else { return status }
-    let done = progress.completedBytes
-    let total = progress.totalBytes
-    let remaining = total - min(done, total)
-    var lines = [
-        "\(preciseSize(done)) of \(preciseSize(total)) (\((progress.fraction * 100).formatted(.number.precision(.fractionLength(2))))%)",
-        "\(done.formatted()) of \(total.formatted()) bytes",
-        "Remaining: \(preciseSize(remaining))",
-    ]
+    // A fixed unit makes small advances visible even in a large download.
+    let done = (Double(progress.completedBytes) / 1_000_000).formatted(.number.precision(.fractionLength(2)))
+    let total = (Double(progress.totalBytes) / 1_000_000).formatted(.number.precision(.fractionLength(2)))
+    let downloaded = "\(done) of \(total) MB"
     if let bytesPerSecond {
-        lines.append("Download speed: \(preciseSize(UInt64(max(0, bytesPerSecond))))/s")
+        return "\(preciseSize(UInt64(max(0, bytesPerSecond))))/s\n\(downloaded)"
     } else {
-        lines.insert(status, at: 0)
+        return "\(status)\n\(downloaded)"
     }
-    return lines.joined(separator: "\n")
 }
 
 private func preciseSize(_ bytes: UInt64) -> String {

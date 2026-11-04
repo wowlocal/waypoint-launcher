@@ -11,13 +11,15 @@ struct GameRowState {
     var update: UpdateCheck?
     var canPlay: Bool
     var canUpdate: Bool
+    var showsEdition: Bool
 }
 
 extension GameRowState {
     @MainActor init(_ game: Game, model: AppModel) {
         self.init(game: game, phase: model.phase(of: game), isRunning: model.isRunning(game),
                   update: model.availableUpdate(for: game), canPlay: model.canPlay(game),
-                  canUpdate: model.canUpdate(game))
+                  canUpdate: model.canUpdate(game), showsEdition: game.install.productCode == "hero" &&
+                    (WindowsHeroes.isAvailable || model.heroesEdition(.windows) != nil))
     }
 }
 
@@ -87,18 +89,19 @@ final class GameCell: NSView {
             }
         }
         name.stringValue = game.displayName
-        edition.isHidden = game.install.productCode != "hero" || (!WindowsHeroes.isAvailable && model.heroesEdition(.windows) == nil)
+        edition.isHidden = !state.showsEdition
         edition.item(at: 0)?.title = WindowsHeroes.isAvailable ? "Windows (recommended)" : "Windows"
         edition.item(at: 0)?.isEnabled = WindowsHeroes.isAvailable
         edition.selectItem(at: game.install.platform == .windows ? 0 : 1)
         let isUninstalling = if case .uninstalling = state.phase { true } else { false }
         edition.isEnabled = !state.isRunning && !model.isSigningIn && state.phase != .launching && !isUninstalling
-        toolTip = game.install.version.map { "Version \($0)" }
+        let versionTooltip = game.install.version.map { "Version \($0)" }
+        if toolTip != versionTooltip { toolTip = versionTooltip }
 
         var showsProgress = false
         var downloadTooltip: (() -> String)?
+        var detailTooltip: String?
         detail.textColor = .secondaryLabelColor
-        detail.toolTip = nil
         switch state.phase {
         case .preparingWindows(let update):
             if let update {
@@ -125,7 +128,7 @@ final class GameCell: NSView {
             detail.stringValue = step
         case .failed(let message):
             detail.stringValue = message
-            detail.toolTip = message
+            detailTooltip = message
             detail.textColor = .systemRed
         default:
             if state.update != nil, !state.isRunning {
@@ -136,6 +139,7 @@ final class GameCell: NSView {
             }
         }
 
+        if detail.toolTip != detailTooltip { detail.toolTip = detailTooltip }
         progress.isHidden = !showsProgress
         progress.details = downloadTooltip
         switch state.phase {
@@ -147,7 +151,7 @@ final class GameCell: NSView {
         status.isHidden = true
         spinner.isHidden = true
         spinner.stopAnimation(nil)
-        button.isHidden = true
+        var showsButton = false
         cancelButton.isHidden = !model.canCancelDownload(uid: game.id)
         // Its own progress shows rather than Running or Unsupported.
         let hasDownloadControls: Bool = switch state.phase {
@@ -173,15 +177,15 @@ final class GameCell: NSView {
             case .updating:
                 button.title = "Pause"
                 button.isEnabled = model.canPauseDownload(uid: game.id)
-                button.isHidden = false
+                showsButton = true
             case .pausing:
                 button.title = "Pausing…"
                 button.isEnabled = false
-                button.isHidden = false
+                showsButton = true
             case .paused:
                 button.title = "Resume"
                 button.isEnabled = model.canResumeDownload(uid: game.id)
-                button.isHidden = false
+                showsButton = true
             case .uninstalling(let step):
                 showSpinner(step)
             case .idle, .failed:
@@ -189,9 +193,12 @@ final class GameCell: NSView {
                 let retry = model.canResumeDownload(uid: game.id)
                 button.title = retry ? "Resume" : (updates ? "Update" : "Play")
                 button.isEnabled = retry || (updates ? state.canUpdate : state.canPlay)
-                button.isHidden = false
+                showsButton = true
             }
         }
+        // Do not detach and reattach the button on every progress report:
+        // that needlessly invalidates the surrounding stack's layout.
+        button.isHidden = !showsButton
     }
 
     @objc private func changeEdition() {
@@ -348,7 +355,7 @@ final class InstallableCell: NSView {
         self.model = model
         name.stringValue = state.product.displayName
         cancelButton.isHidden = !model.canCancelDownload(uid: model.installKey(for: state.product))
-        detail.toolTip = nil
+        var detailTooltip: String?
         detail.textColor = .secondaryLabelColor
         progress.isHidden = false
         var downloadTooltip: (() -> String)?
@@ -357,7 +364,7 @@ final class InstallableCell: NSView {
         case .failed(let message):
             progress.isHidden = true
             detail.stringValue = message
-            detail.toolTip = message
+            detailTooltip = message
             detail.textColor = .systemRed
             button.title = model.canResumeDownload(uid: model.installKey(for: state.product)) ? "Resume" : "Try Again…"
             button.isEnabled = true
@@ -380,6 +387,7 @@ final class InstallableCell: NSView {
         default:
             button.isHidden = true
         }
+        if detail.toolTip != detailTooltip { detail.toolTip = detailTooltip }
         progress.details = downloadTooltip
         switch state.phase {
         case .updating, .pausing, .paused: keepAwakeButton.isHidden = false

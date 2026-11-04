@@ -17,6 +17,22 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
             case .installable(let row): "installable \(row.product.uid)"
             }
         }
+
+        /// Labels are single-line; only these optional views change height.
+        var layout: (edition: Bool, progress: Bool) {
+            switch self {
+            case .game(let row):
+                let progress: Bool = switch row.phase {
+                case .preparingWindows(let update): update != nil
+                case .updating, .pausing, .paused: true
+                default: false
+                }
+                return (row.showsEdition, progress)
+            case .installable(let row):
+                if case .failed = row.phase { return (false, false) }
+                return (false, true)
+            }
+        }
     }
 
     private let model: AppModel
@@ -151,7 +167,8 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
         accountMenu.items = [.pullDownPlaceholder()] + AccountMenu.items(model: model)
         subtitle = model.activeAccount?.displayName ?? "Not signed in"
         view.window?.subtitle = subtitle
-        accountItem?.toolTip = model.activeAccount.map { "Signed in as \($0.displayName)" } ?? "Sign in to Battle.net"
+        let accountTooltip = model.activeAccount.map { "Signed in as \($0.displayName)" } ?? "Sign in to Battle.net"
+        if accountItem?.toolTip != accountTooltip { accountItem?.toolTip = accountTooltip }
         accountItem?.image = .account(model.activeAccount)
 
         let ready = appUpdater.readyVersion != nil
@@ -159,7 +176,8 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
         updateBar.isHidden = appUpdater.status == nil && !ready && recoveryError == nil
         updateSeparator.isHidden = updateBar.isHidden
         updateText.stringValue = appUpdater.status ?? recoveryError ?? ""
-        updateText.toolTip = appUpdater.status ?? recoveryError
+        let updateTooltip = appUpdater.status ?? recoveryError
+        if updateText.toolTip != updateTooltip { updateText.toolTip = updateTooltip }
         updateSpinner.isHidden = !appUpdater.isBusy
         if appUpdater.isBusy { updateSpinner.startAnimation(nil) } else { updateSpinner.stopAnimation(nil) }
         updateIcon.isHidden = appUpdater.isBusy
@@ -170,6 +188,7 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
 
     private func show(_ newRows: [Row]) {
         let sameRows = newRows.map(\.id) == rows.map(\.id)
+        let previousRows = rows
         rows = newRows
         scrollView.isHidden = rows.isEmpty
         emptyState.isHidden = !rows.isEmpty
@@ -179,12 +198,16 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
         }
         // Same rows, new content (progress, say): update them in place, so a
         // button under the pointer isn't swapped out mid-click.
+        let resizedRows = IndexSet(rows.indices.filter { rows[$0].layout != previousRows[$0].layout })
         table.enumerateAvailableRowViews { rowView, row in
             configure(rowView.view(atColumn: 0) as? NSView, as: rows[row])
         }
+        // Retiling the table on every progress report interrupts native
+        // tooltips. Only invalidate heights when the row's layout changes.
+        guard !resizedRows.isEmpty else { return }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0
-            table.noteHeightOfRows(withIndexesChanged: IndexSet(integersIn: 0..<rows.count))
+            table.noteHeightOfRows(withIndexesChanged: resizedRows)
         }
     }
 
