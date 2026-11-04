@@ -299,10 +299,11 @@ extension InstallManifest.Tag {
     /// tag for are ignored; a trailing `?` marks a tag as optional, which
     /// amounts to the same thing.
     ///
-    /// Option tags (type bit 0x4000: HotS and SC2's `code`, WoW's
-    /// `Alternate`, `HighRes`) never filter either. They mark extras, not a
-    /// subset to pick: Battle.net's HotS install, tagged `OSX code`, holds
-    /// the game's 16 GB of data, not just the 421 files tagged `code`.
+    /// Option tags (type bit 0x4000: `code`, `Alternate`, `HighRes`) opt in
+    /// extra files. A selected option keeps the base files too; files marked
+    /// with an unselected option are excluded. In particular, an ordinary
+    /// WoW install must not fetch the optional high-resolution package that
+    /// the Agent would discard during its next cleanup.
     static func selectedIndices(_ tagString: String, in tags: [Self], entryCount: Int) -> [Int] {
         let mask = selectionMask(tagString, in: tags, entryCount: entryCount)
         return (0..<entryCount).filter { mask[$0 / 8] & (0x80 >> UInt8($0 % 8)) != 0 }
@@ -329,6 +330,15 @@ extension InstallManifest.Tag {
                     }
                 }
                 for i in 0..<byteCount { selected[i] &= any[i] }
+            }
+            // An empty query explicitly asks for everything. Otherwise,
+            // optional packages require their tag in this query set.
+            if !names.isEmpty {
+                for tag in tags where tag.type & 0x4000 != 0 && !names.contains(tag.name) {
+                    tag.mask.withUnsafeBytes { mask in
+                        for i in 0..<min(byteCount, mask.count) { selected[i] &= ~mask[i] }
+                    }
+                }
             }
             for i in 0..<byteCount { result[i] |= selected[i] }
         }

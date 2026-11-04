@@ -276,6 +276,7 @@ public struct CASCInstaller: Sendable {
         guard RunningProcesses.inside(root).isEmpty else { throw UpdateError.gameRunning }
         try BattleNet.ensureNotRunning()
         try install.platform.claim(install: install)
+        if install.platform == .macOS { try BattleNetInstallMetadata.prepareDataDirectory(dataRoot) }
         let storageDir = dataRoot.appendingPathComponent("data", isDirectory: true)
         // An update (or another product joining a shared storage): afterwards,
         // drop what no installed build needs any more.
@@ -294,7 +295,6 @@ public struct CASCInstaller: Sendable {
         try write(plan.cdnConfig, to: configURL(plan.target.cdnConfig))
         let indexDir = dataRoot.appendingPathComponent("indices", isDirectory: true)
         try fm.createDirectory(at: indexDir, withIntermediateDirectories: true)
-        if install.platform == .macOS { try BattleNetInstallMetadata.prepareDataDirectory(dataRoot) }
         for archive in plan.archives {
             let destination = indexDir.appendingPathComponent("\(archive).index")
             if fm.fileExists(atPath: destination.path) { continue }
@@ -374,6 +374,9 @@ public struct CASCInstaller: Sendable {
                 Log.warning(.install, "config_wtf_skipped", nil, ["uid": install.uid, "error": error])
             }
         }
+        // Include every directory created by this download, particularly
+        // Data/data and the nested config directories, before exporting it.
+        if install.platform == .macOS { try BattleNetInstallMetadata.prepareDataDirectory(dataRoot) }
         var record = plan.install
         record.tagString = plan.install.tagString ?? config.tagString(region: region, languages: plan.install.languages)
         try store.record(install: record, InstalledBuild(buildConfig: plan.target.buildConfig, version: plan.target.name, install: record,

@@ -175,7 +175,7 @@ private func selectFixture(_ tagString: String) -> [String] {
     #expect(selectFixture("") == tagFixturePaths)
 }
 
-@Test func tagSelectionOptionTagsDontFilter() {
+@Test func tagSelectionSelectedOptionsKeepBaseFiles() {
     // HotS tags its code files `code` (type 0x4000) and installs as
     // `OSX code …`; that must not narrow the install to its code files.
     let count = tagFixturePaths.count
@@ -187,6 +187,37 @@ private func selectFixture(_ tagString: String) -> [String] {
     }
     #expect(select("OSX code EU? enUS speech?:OSX code EU? enUS text?") == ["base", "en/speech", "en/text"])
     #expect(select("Windows code") == ["win/base"])
+}
+
+@Test func tagSelectionExcludesUnselectedOptionalPackagesInBothManifests() throws {
+    // Mirrors WoW's ordinary files plus its HighRes and Alternate packages.
+    let paths = ["base", "hires", "alternate", "both", "windows"]
+    let count = paths.count
+    let tags: [(String, UInt16, Set<Int>)] = [
+        ("OSX", 1, [0, 1, 2, 3]), ("Windows", 1, [4]),
+        ("HighRes", 0x4000, [1, 3]), ("Alternate", 0x4000, [2, 3]),
+    ]
+    var tagData = Data()
+    for (name, type, entries) in tags {
+        tagData += Data(name.utf8) + Data([0]) + be(UInt64(type), 2) + tagMask(entries, count: count)
+    }
+    var install = Data("IN".utf8) + Data([1, 16]) + be(UInt64(tags.count), 2) + be(UInt64(count), 4) + tagData
+    var download = Data("DL".utf8) + Data([1, 16, 0]) + be(UInt64(count), 4) + be(UInt64(tags.count), 2)
+    for (i, path) in paths.enumerated() {
+        install += Data(path.utf8) + Data([0]) + key(UInt8(i)) + be(UInt64(i + 1), 4)
+        download += key(UInt8(i)) + be(UInt64(i + 1), 5) + Data([0])
+    }
+    download += tagData
+    let im = try InstallManifest(install), dm = try DownloadManifest(download)
+    let cases: [(String, [Int])] = [
+        ("OSX", [0]), ("OSX HighRes?", [0, 1]), ("OSX Alternate", [0, 2]),
+        ("OSX HighRes Alternate", [0, 1, 2, 3]), ("Windows HighRes", [4]),
+        ("OSX HighRes:OSX Alternate", [0, 1, 2]), ("", [0, 1, 2, 3, 4]),
+    ]
+    for (query, expected) in cases {
+        #expect(im.select(tagString: query).map(\.path) == expected.map { paths[$0] })
+        #expect(dm.select(tagString: query).map(\.size) == expected.map { UInt64($0 + 1) })
+    }
 }
 
 private func tagFixtureData() -> Data {

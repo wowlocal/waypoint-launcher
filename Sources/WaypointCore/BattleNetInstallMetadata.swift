@@ -64,20 +64,32 @@ public enum BattleNetInstallMetadata {
     }
 
     /// Match the Agent's own CASC folder mode. Its adoption pass applies a
-    /// regular-file mode (0666) to an existing 0755 Data directory, stripping
+    /// regular-file mode (0666) to existing 0755 data directories, stripping
     /// traversal and then requesting administrator access. Avoid that pass by
-    /// using the native install mode. Only change the two known legacy modes
-    /// on a real directory owned by this user; respect deliberate restrictions
-    /// and never follow symlinks or change anything recursively.
+    /// using the native install mode throughout the data tree. Only change
+    /// the two known legacy modes on directories owned by this user. Stop at
+    /// symlinks, other owners and deliberately restricted directory modes;
+    /// regular files and directories outside the CASC data tree stay alone.
     @discardableResult
     static func prepareDataDirectory(_ directory: URL) throws -> Bool {
-        var info = stat()
-        guard lstat(directory.path, &info) == 0,
-              info.st_mode & S_IFMT == S_IFDIR, info.st_uid == geteuid(),
-              [mode_t(0o755), mode_t(0o666)].contains(info.st_mode & 0o7777) else { return false }
-        guard chmod(directory.path, 0o777) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
-        Log.notice(.install, "battlenet_data_directory_repaired", nil, ["path": directory.path])
-        return true
+        var pending = [directory]
+        var changed = false
+        while let next = pending.popLast() {
+            var info = stat()
+            guard lstat(next.path, &info) == 0,
+                  info.st_mode & S_IFMT == S_IFDIR, info.st_uid == geteuid() else { continue }
+            let mode = info.st_mode & 0o7777
+            guard [mode_t(0o777), mode_t(0o755), mode_t(0o666)].contains(mode) else { continue }
+            if mode != 0o777 {
+                guard chmod(next.path, 0o777) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+                changed = true
+            }
+            // Repair before enumerating: an Agent-modified 0666 directory
+            // cannot be traversed until its execute bits are restored.
+            pending += try FileManager.default.contentsOfDirectory(at: next, includingPropertiesForKeys: nil)
+        }
+        if changed { Log.notice(.install, "battlenet_data_directory_repaired", nil, ["path": directory.path]) }
+        return changed
     }
 
     /// Called only after a completed install/update has been recorded. The

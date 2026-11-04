@@ -136,3 +136,40 @@ private struct MetadataFixture {
     #expect(try !BattleNetInstallMetadata.prepareDataDirectory(link))
     #expect(try mode(data) == 0o755)
 }
+
+@Test func metadataRepairsNestedDataDirectoriesWithoutChangingFilesOrFollowingLinks() throws {
+    let f = try MetadataFixture(); defer { f.remove() }
+    let fm = FileManager.default
+    let data = f.game.appendingPathComponent("Data")
+    let config = data.appendingPathComponent("config")
+    let nested = config.appendingPathComponent("aa/bb")
+    let storage = data.appendingPathComponent("data")
+    let indices = data.appendingPathComponent("indices")
+    let restricted = data.appendingPathComponent("private")
+    let restrictedChild = restricted.appendingPathComponent("child")
+    let outside = f.root.appendingPathComponent("outside")
+    for directory in [nested, storage, indices, restrictedChild, outside] {
+        try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+    }
+    for directory in [data, config, config.appendingPathComponent("aa"), nested, storage, indices,
+                      restricted, restrictedChild, outside] {
+        try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: directory.path)
+    }
+    let archive = storage.appendingPathComponent("data.000")
+    try Data([1, 2, 3]).write(to: archive)
+    try fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: archive.path)
+    try fm.createSymbolicLink(at: data.appendingPathComponent("external"), withDestinationURL: outside)
+    try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: restricted.path)
+    try fm.setAttributes([.posixPermissions: 0o666], ofItemAtPath: config.path)
+    #expect(try BattleNetInstallMetadata.prepareDataDirectory(data))
+    func mode(_ url: URL) throws -> Int { try #require(fm.attributesOfItem(atPath: url.path)[.posixPermissions] as? Int) }
+    for directory in [data, config, config.appendingPathComponent("aa"), nested, storage, indices] {
+        #expect(try mode(directory) == 0o777)
+    }
+    #expect(try mode(archive) == 0o644)
+    #expect(try Data(contentsOf: archive) == Data([1, 2, 3]))
+    #expect(try mode(outside) == 0o755)
+    #expect(try mode(restricted) == 0o700)
+    #expect(try mode(restrictedChild) == 0o755)
+    #expect(try !BattleNetInstallMetadata.prepareDataDirectory(data))
+}
