@@ -116,7 +116,8 @@ private func queuedRequest(_ directory: URL, uid: String = "hs_beta", platform: 
     #expect(queue.jobs.isEmpty)
 }
 
-@Test @MainActor func aNewQueueResumesVerifiedFilesWithoutDownloadingThemAgain() async throws {
+@Test(.enabled(if: (try? BattleNet.ensureNotRunning()) != nil))
+@MainActor func aNewQueueResumesVerifiedFilesWithoutDownloadingThemAgain() async throws {
     let server = try DownloadServer()
     defer { server.stop() }
     let root = server.directory.appendingPathComponent("game")
