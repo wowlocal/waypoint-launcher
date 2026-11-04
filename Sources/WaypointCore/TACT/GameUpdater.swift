@@ -491,9 +491,9 @@ public enum RunningProcesses {
     }
 }
 
-/// Waypoint's own record of builds it installed. Battle.net's product.db is
-/// left alone; this overrides it when newer. For games Waypoint installed
-/// itself it's the only record, so it also keeps where and how.
+/// Waypoint's own record of builds it installed. This overrides Battle.net's
+/// build details when newer and keeps the paths and install options, so the
+/// library remains available independently of the Agent's database.
 public struct InstalledBuild: Codable, Sendable, Equatable {
     /// Omitted by older/native records; those are macOS installations.
     public var platform: InstallPlatform?
@@ -596,6 +596,7 @@ public struct InstallStateStore: Sendable {
         build.speechLanguage = build.speechLanguage ?? install.speechLanguage
         build.tagString = build.tagString ?? install.tagString
         try record(key: install.key, platform: install.platform, build)
+        BattleNetInstallMetadata.recordCompletedInstall(install, build: build, store: self)
     }
 
     /// Writers load, change and save the files: one at a time, or a download

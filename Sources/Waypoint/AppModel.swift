@@ -95,6 +95,7 @@ final class AppModel {
     private let tokenVault = TokenVault(service: "\(Bundle.main.bundleIdentifier ?? "Waypoint"): Battle.net login tokens")
     private let credentialVault = CredentialVault(service: "\(Bundle.main.bundleIdentifier ?? "Waypoint"): Battle.net passwords")
     private var observers: [NSObjectProtocol] = []
+    @ObservationIgnored private var metadataRepairTask: Task<Void, Never>?
 
     init() {
         let info = Bundle.main.infoDictionary ?? [:]
@@ -137,7 +138,33 @@ final class AppModel {
         Task { await setUpAccounts() }
     }
 
+    private func repairInstallMetadata() {
+        guard BattleNet.running().isEmpty else {
+            // An app update can restart Waypoint while Battle.net is open.
+            // Wait for its background Agent too; never race its database writer.
+            if metadataRepairTask == nil {
+                metadataRepairTask = Task { [weak self] in
+                    while !Task.isCancelled {
+                        do { try await Task.sleep(for: .seconds(5)) } catch { return }
+                        guard let self else { return }
+                        if BattleNet.running().isEmpty {
+                            self.metadataRepairTask = nil
+                            self.reload()
+                            return
+                        }
+                    }
+                }
+            }
+            return
+        }
+        metadataRepairTask?.cancel()
+        metadataRepairTask = nil
+        do { try BattleNetInstallMetadata.repair(store: library.stateStore, agentDatabase: library.agentDatabase) }
+        catch { Log.warning(.install, "battlenet_metadata_repair_failed", nil, ["error": error]) }
+    }
+
     func reload() {
+        repairInstallMetadata()
         downloadQueue.restoreAvailableJobs()
         // Battle.net's records outlive a game whose files are gone (moved to
         // the Trash, or uninstalled here): only what's on disk is listed.

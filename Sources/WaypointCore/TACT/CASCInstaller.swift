@@ -294,6 +294,7 @@ public struct CASCInstaller: Sendable {
         try write(plan.cdnConfig, to: configURL(plan.target.cdnConfig))
         let indexDir = dataRoot.appendingPathComponent("indices", isDirectory: true)
         try fm.createDirectory(at: indexDir, withIntermediateDirectories: true)
+        if install.platform == .macOS { try BattleNetInstallMetadata.prepareDataDirectory(dataRoot) }
         for archive in plan.archives {
             let destination = indexDir.appendingPathComponent("\(archive).index")
             if fm.fileExists(atPath: destination.path) { continue }

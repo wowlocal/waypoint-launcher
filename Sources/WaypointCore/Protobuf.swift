@@ -98,7 +98,7 @@ struct ProtoReader {
     }
 }
 
-/// Tiny protobuf writer, used by tests to build fixtures.
+/// Minimal protobuf writer for install records and test fixtures.
 struct ProtoWriter {
     private(set) var data = Data()
 
@@ -115,6 +115,12 @@ struct ProtoWriter {
     mutating func varint(_ field: Int, _ value: UInt64) {
         writeVarint(UInt64(field << 3))
         writeVarint(value)
+    }
+
+    mutating func fixed64(_ field: Int, _ value: UInt64) {
+        writeVarint(UInt64(field << 3 | 1))
+        var value = value.littleEndian
+        withUnsafeBytes(of: &value) { data.append(contentsOf: $0) }
     }
 
     mutating func bytes(_ field: Int, _ value: Data) {

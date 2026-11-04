@@ -85,11 +85,15 @@ case "logs":
 case "launch":
     launch(Array(args.dropFirst()))
 
+case "repair-install-metadata":
+    do { print("Restored \(try BattleNetInstallMetadata.repair()) metadata records") }
+    catch { fail("\(error)") }
+
 case "diagnose":
     diagnose()
 
 default:
-    fail("usage: waypoint-cli [list | catalog [--refresh] | plan <uid> | check-tokens [GAMEKEY…] | check-updates | update <uid> [--path root] [--state file] [--verify] [--language xxXX [--speech xxXX]] [--dry-run] | cleanup <uid> [--path root] [--state file] [--dry-run] | fetch <uid> <regex> <dir> | install <uid> <dir> [options] | launch <uid> [--state file] [--dry-run] | logs [options] | diagnose]")
+    fail("usage: waypoint-cli [list | catalog [--refresh] | plan <uid> | check-tokens [GAMEKEY…] | check-updates | update <uid> [--path root] [--state file] [--verify] [--language xxXX [--speech xxXX]] [--dry-run] | cleanup <uid> [--path root] [--state file] [--dry-run] | fetch <uid> <regex> <dir> | install <uid> <dir> [options] | launch <uid> [--state file] [--dry-run] | logs [options] | repair-install-metadata | diagnose]")
 }
 
 Diagnostics.shared.flush()
