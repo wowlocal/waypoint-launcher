@@ -137,7 +137,7 @@ private struct MetadataFixture {
     #expect(try mode(data) == 0o755)
 }
 
-@Test func metadataRepairsNestedDataDirectoriesWithoutChangingFilesOrFollowingLinks() throws {
+@Test func metadataRepairsNestedDataAndManagedStoragePermissionsWithoutFollowingLinks() throws {
     let f = try MetadataFixture(); defer { f.remove() }
     let fm = FileManager.default
     let data = f.game.appendingPathComponent("Data")
@@ -156,8 +156,16 @@ private struct MetadataFixture {
         try fm.setAttributes([.posixPermissions: 0o755], ofItemAtPath: directory.path)
     }
     let archive = storage.appendingPathComponent("data.000")
+    let privateArchive = storage.appendingPathComponent("data.001")
+    let index = storage.appendingPathComponent("0000000001.idx")
+    let shmem = storage.appendingPathComponent("shmem")
+    let unrelated = storage.appendingPathComponent("notes.txt")
     try Data([1, 2, 3]).write(to: archive)
     try fm.setAttributes([.posixPermissions: 0o644], ofItemAtPath: archive.path)
+    for file in [privateArchive, index, shmem, unrelated] {
+        try Data([4, 5, 6]).write(to: file)
+        try fm.setAttributes([.posixPermissions: file == unrelated ? 0o644 : 0o600], ofItemAtPath: file.path)
+    }
     try fm.createSymbolicLink(at: data.appendingPathComponent("external"), withDestinationURL: outside)
     try fm.setAttributes([.posixPermissions: 0o700], ofItemAtPath: restricted.path)
     try fm.setAttributes([.posixPermissions: 0o666], ofItemAtPath: config.path)
@@ -166,7 +174,11 @@ private struct MetadataFixture {
     for directory in [data, config, config.appendingPathComponent("aa"), nested, storage, indices] {
         #expect(try mode(directory) == 0o777)
     }
-    #expect(try mode(archive) == 0o644)
+    #expect(try mode(archive) == 0o666)
+    #expect(try mode(index) == 0o666)
+    #expect(try mode(shmem) == 0o666)
+    #expect(try mode(privateArchive) == 0o600)
+    #expect(try mode(unrelated) == 0o644)
     #expect(try Data(contentsOf: archive) == Data([1, 2, 3]))
     #expect(try mode(outside) == 0o755)
     #expect(try mode(restricted) == 0o700)

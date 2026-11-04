@@ -259,7 +259,7 @@ Downloads are staged in `.waypoint-staging` inside the game folder, so an interr
 
 Optional packages such as WoW’s `HighRes` and `Alternate` are downloaded only when their tags are selected. A standard install matches the data Battle.net keeps, instead of downloading extras that its cleanup would discard.
 
-**Finding games.** The list comes from `/Users/Shared/Battle.net/Agent/product.db` (protobuf), or from the `.product.db` inside each game folder, plus the games Waypoint installed itself. On startup, Waypoint restores missing Battle.net records for its completed native installs, including separate entries for WoW editions sharing a folder. It waits until Battle.net and its Agent are closed, preserves existing records, and repairs the known legacy permissions throughout WoW’s CASC data folders so adopting a game does not trigger its administrator repair prompt. New native CASC downloads also prepare their data folders for Battle.net.
+**Finding games.** The list comes from `/Users/Shared/Battle.net/Agent/product.db` (protobuf), or from the `.product.db` inside each game folder, plus the games Waypoint installed itself. On startup, Waypoint restores missing Battle.net records for its completed native installs, including separate entries for WoW editions sharing a folder. It waits until Battle.net and its Agent are closed, preserves existing records, and repairs the known legacy permissions throughout WoW’s CASC data folders and managed storage files so adopting a game does not trigger its administrator repair prompt. New native CASC downloads also prepare their data folders and storage files for Battle.net.
 
 </details>
 

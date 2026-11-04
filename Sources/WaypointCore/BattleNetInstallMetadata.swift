@@ -67,18 +67,33 @@ public enum BattleNetInstallMetadata {
     /// regular-file mode (0666) to existing 0755 data directories, stripping
     /// traversal and then requesting administrator access. Avoid that pass by
     /// using the native install mode throughout the data tree. Only change
-    /// the two known legacy modes on directories owned by this user. Stop at
-    /// symlinks, other owners and deliberately restricted directory modes;
-    /// regular files and directories outside the CASC data tree stay alone.
+    /// the two known legacy modes on directories owned by this user. Managed
+    /// archives, indexes and shmem also need the Agent's 0666 file mode. Stop
+    /// at symlinks, other owners and deliberately restricted directories;
+    /// unrelated files and files outside the CASC data tree stay alone.
     @discardableResult
     static func prepareDataDirectory(_ directory: URL) throws -> Bool {
         var pending = [directory]
         var changed = false
+        let storage = directory.appendingPathComponent("data").standardizedFileURL
         while let next = pending.popLast() {
             var info = stat()
-            guard lstat(next.path, &info) == 0,
-                  info.st_mode & S_IFMT == S_IFDIR, info.st_uid == geteuid() else { continue }
+            guard lstat(next.path, &info) == 0, info.st_uid == geteuid() else { continue }
             let mode = info.st_mode & 0o7777
+            if info.st_mode & S_IFMT == S_IFREG {
+                guard next.deletingLastPathComponent().standardizedFileURL == storage else { continue }
+                let name = next.lastPathComponent
+                let archive = name.wholeMatch(of: /data\.\d{3}/) != nil
+                let index = name.count == 14 && name.hasSuffix(".idx") && name.prefix(10).allSatisfy(\.isHexDigit)
+                // Atomic index/shmem writes use 0600; archive creation uses
+                // 0644. Preserve restrictive archive modes and unrelated files.
+                guard (archive && mode == 0o644)
+                    || ((index || name == "shmem") && [mode_t(0o600), mode_t(0o644)].contains(mode)) else { continue }
+                guard chmod(next.path, 0o666) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
+                changed = true
+                continue
+            }
+            guard info.st_mode & S_IFMT == S_IFDIR else { continue }
             guard [mode_t(0o777), mode_t(0o755), mode_t(0o666)].contains(mode) else { continue }
             if mode != 0o777 {
                 guard chmod(next.path, 0o777) == 0 else { throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO) }
