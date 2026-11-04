@@ -99,7 +99,7 @@ public struct GameUninstaller: Sendable {
     /// The folder inside `root` that holds this product's own files, when
     /// the product has one (`_retail_`, `_classic_era_`).
     var flavorFolder: String? {
-        if isWoW { return GameCatalog.wowFlavorFolders[install.productCode] ?? "_\(install.productCode)_" }
+        if isWoW { return GameCatalog.wowFolder(for: install.productCode) }
         return InstallableProduct.forProduct(install.productCode)?.flavorFolder
     }
 

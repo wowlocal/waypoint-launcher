@@ -98,7 +98,7 @@ public enum GameCatalog {
             appURL = existing(root.appendingPathComponent("Hearthstone.app"), fileManager)
             name = install.productCode == "hsb" ? "Hearthstone" : "Hearthstone (\(install.productCode))"
         case .worldOfWarcraft:
-            let folder = wowFlavorFolders[install.productCode] ?? "_\(install.productCode)_"
+            let folder = wowFolder(for: install.productCode)
             appURL = firstApp(in: root.appendingPathComponent(folder), prefix: "World of Warcraft", fileManager)
             name = wowFlavorNames[install.productCode] ?? install.productCode
         case .other:
@@ -133,6 +133,10 @@ public enum GameCatalog {
         return result
     }
 
+    static func wowFolder(for productCode: String) -> String {
+        InstallableProduct.forProduct(productCode)?.flavorFolder ?? wowFlavorFolders[productCode] ?? "_\(productCode)_"
+    }
+
     private static func existing(_ url: URL, _ fm: FileManager) -> URL? {
         fm.fileExists(atPath: url.path) ? url : nil
     }
@@ -154,26 +158,31 @@ public struct GameLibrary {
     public var agentDatabase: URL
     /// Folders to scan for a `.product.db`, so games keep working after the
     /// Battle.net app is removed.
-    public var searchRoots: [URL]
+    public var searchRoots: [URL] {
+        get { explicitSearchRoots ?? Self.defaultSearchRoots }
+        set { explicitSearchRoots = newValue }
+    }
+    private var explicitSearchRoots: [URL]?
     public var fileManager: FileManager
     public var stateStore: InstallStateStore
 
     /// Every supported game's default folder: Battle.net can forget a game
     /// (it lost HotS once), and Waypoint should still find it there rather
     /// than offer a fresh install.
-    public static let defaultSearchRoots: [URL] = InstallableProduct.native.map(\.folderName)
+    public static var defaultSearchRoots: [URL] { InstallableProduct.native.map(\.folderName)
         .reduce(into: [String]()) { if !$0.contains($1) { $0.append($1) } }
         .map { URL(fileURLWithPath: "/Applications").appendingPathComponent($0, isDirectory: true) }
         + WindowsTitle.enabled.map {
             FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Games/" + $0.folderName + " (Windows)", isDirectory: true)
         }
+    }
 
     public init(agentDatabase: URL = ProductDB.agentDatabaseURL,
-                searchRoots: [URL] = GameLibrary.defaultSearchRoots,
+                searchRoots: [URL]? = nil,
                 fileManager: FileManager = .default,
                 stateStore: InstallStateStore = InstallStateStore()) {
         self.agentDatabase = agentDatabase
-        self.searchRoots = searchRoots
+        self.explicitSearchRoots = searchRoots
         self.fileManager = fileManager
         self.stateStore = stateStore
     }

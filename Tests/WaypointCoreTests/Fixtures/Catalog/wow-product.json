@@ -1,0 +1,63 @@
+{
+  "all": {
+    "config": {
+      "form": {
+        "eula": {
+          "eula": false
+        },
+        "game_dir": {
+          "dirname": "World of Warcraft"
+        }
+      },
+      "launch_arguments": [],
+      "opaque_product_specific": {
+        "uses_web_credentials": "true"
+      },
+      "product": "WoW",
+      "shared_container_default_subfolder": "_retail_",
+      "supported_locales": [
+        "enUS",
+        "esMX",
+        "ptBR",
+        "deDE",
+        "esES",
+        "frFR",
+        "itIT",
+        "ruRU",
+        "koKR",
+        "zhTW",
+        "zhCN"
+      ],
+      "update_method": "ngdp"
+    }
+  },
+  "platform": {
+    "mac": {
+      "config": {
+        "binaries": {
+          "game": {
+            "launch_arguments": [],
+            "relative_path": "World of Warcraft.app",
+            "switcher": false
+          }
+        },
+        "form": {
+          "game_dir": {
+            "default": "Applications",
+            "required_space": 55000000000,
+            "space_per_extra_language": 2000000000
+          }
+        },
+        "tags": [
+          "OSX"
+        ],
+        "tags_32bit": [
+          "x86_32"
+        ],
+        "tags_64bit": [
+          "x86_64"
+        ]
+      }
+    }
+  }
+}

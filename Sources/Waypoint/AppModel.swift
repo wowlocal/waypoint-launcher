@@ -31,6 +31,10 @@ final class AppModel {
     }
 
     private(set) var games: [Game] = []
+    private var catalogRevision = 0
+    private var isRefreshingCatalog = false
+    private var lastCatalogAttempt: Date?
+    private var lastCatalogRegion: Region?
     private var discoveredGames: [Game] = []
     private var pendingHeroesInstall: ProductInstall?
     private var heroesPlatform = UserDefaults.standard.string(forKey: "heroesPlatform").flatMap(InstallPlatform.init(rawValue:)) ?? .windows
@@ -56,7 +60,10 @@ final class AppModel {
 
     /// nil = use the region each game was installed for.
     var regionOverride: Region? {
-        didSet { UserDefaults.standard.set(regionOverride?.rawValue, forKey: "regionOverride") }
+        didSet {
+            UserDefaults.standard.set(regionOverride?.rawValue, forKey: "regionOverride")
+            Task { await refreshCatalog() }
+        }
     }
 
     /// Saved Battle.net accounts, each with its own web session and last
@@ -110,10 +117,16 @@ final class AppModel {
             forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.reload()
-                _ = Task { await self?.checkForUpdates() }
+                _ = Task {
+                    await self?.refreshCatalog()
+                    await self?.checkForUpdates()
+                }
             }
         })
-        Task { await checkForUpdates(force: true) }
+        Task {
+            await refreshCatalog()
+            await checkForUpdates(force: true)
+        }
         Task { await setUpAccounts() }
     }
 
@@ -259,9 +272,30 @@ final class AppModel {
 
     // MARK: Installs
 
+    private func refreshCatalog() async {
+        let region = regionOverride ?? Region.preferred(games: games)
+        guard !isRefreshingCatalog,
+              lastCatalogRegion != region || (lastCatalogAttempt.map({ Date().timeIntervalSince($0) > 15 * 60 }) ?? true) else { return }
+        isRefreshingCatalog = true
+        lastCatalogAttempt = Date()
+        lastCatalogRegion = region
+        defer {
+            isRefreshingCatalog = false
+            if region != (regionOverride ?? Region.preferred(games: games)) { Task { await refreshCatalog() } }
+        }
+        do {
+            try await ProductCatalog.shared.refresh(region: region)
+            catalogRevision += 1
+            reload()
+        } catch {
+            Log.warning(.library, "catalog_refresh_failed", nil, ["error": error])
+        }
+    }
+
     /// Games Waypoint can install that aren't installed yet.
     var installable: [InstallableProduct] {
-        InstallableProduct.all.filter { product in
+        _ = catalogRevision
+        return InstallableProduct.available(for: regionOverride ?? Region.preferred(games: games)).filter { product in
             !games.contains { $0.install.uid == product.uid } &&
             (product.supportedPlatforms != [.windows] || WindowsTitle(rawValue: product.productCode)?.isAvailable == true)
         }
@@ -277,6 +311,7 @@ final class AppModel {
         let platform = requestedPlatform ?? defaultPlatform(for: product)
         defer { ProcessMemory.releaseFreed() }
         do {
+            try await ProductCatalog.shared.validateDownload(product, region: region, platform: platform)
             let plan = try await GameInstaller(product: product, folder: folder, region: region, languages: languages, platform: platform).plan()
             return (plan.downloadSize, plan.storedBytes)
         } catch {
@@ -305,6 +340,7 @@ final class AppModel {
                                                 "language": languages.text, "speech_language": languages.speech])
         let job = DownloadJob(uid: uid, category: .install) { progress in
             try BattleNet.ensureNotRunning() // ask before downloading anything
+            try await ProductCatalog.shared.validateDownload(product, region: region, platform: platform)
             let installer = GameInstaller(product: product, folder: folder, region: region, languages: languages, platform: platform)
             let plan = try await installer.plan()
             try await installer.apply(plan, progress: progress)

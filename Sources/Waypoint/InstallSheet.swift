@@ -48,7 +48,7 @@ final class InstallSheet: NSViewController {
         let change = NSButton(title: "Change…", target: self, action: #selector(chooseParent))
         let locationRow = NSStackView(views: [location, change])
         regionPopup.addItems(withTitles: Region.allCases.map(\.displayName))
-        regionPopup.selectItem(at: Region.allCases.firstIndex(of: model.regionOverride ?? Region.default()) ?? 0)
+        regionPopup.selectItem(at: Region.allCases.firstIndex(of: model.regionOverride ?? Region.preferred(games: model.games)) ?? 0)
         regionPopup.target = self
         regionPopup.action = #selector(refreshSize)
         sizeText.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)

@@ -1,0 +1,151 @@
+{
+  "categories": {
+    "definitions": [
+      {
+        "id": "cat_wow_classic_live",
+        "name": "default#CATEGORIES_LIVE_NAME",
+        "rank": 98
+      },
+      {
+        "id": "cat_wow_forever",
+        "name": "default#CATEGORIES_LIVE_NAME",
+        "rank": 99
+      }
+    ]
+  },
+  "types": {
+    "definitions": [
+      {
+        "category": "cat_wow_forever",
+        "id": "wow_classic_beta",
+        "product_defaults": {
+          "name_style": "default",
+          "rank": 1,
+          "type_name": "world_of_warcraft#WOW_FOREVER_NAME"
+        }
+      },
+      {
+        "category": "cat_wow_forever",
+        "id": "wowf",
+        "product_defaults": {
+          "name_style": "default",
+          "rank": 3,
+          "type_name": "world_of_warcraft#WOW_FOREVER_NAME"
+        }
+      }
+    ]
+  },
+  "strings": {
+    "default": {
+      "world_of_warcraft#WOW_FOREVER_BETA_NAME": "WoW: Forever - Beta",
+      "world_of_warcraft#WOW_FOREVER_NAME": "WoW: Forever",
+      "world_of_warcraft#WOW_MIDNIGHT_BETA_NAME": "Midnight Beta",
+      "world_of_warcraft#WOW_NAME": "World of Warcraft",
+      "world_of_warcraft#WOW_VENDOR_NAME": "WoW Vendor 1"
+    }
+  },
+  "installs": {
+    "wow": {
+      "auto_update_policy": {
+        "meets_criteria": {
+          "actioned_in_last_n_seconds": 1209600,
+          "has_game_time": true,
+          "played_in_last_n_seconds": 2592000
+        }
+      },
+      "locale_specific_uid": true,
+      "run_64_bit_only": true,
+      "sso_launch_argument": "-launcherlogin",
+      "tact_product": "wow"
+    },
+    "wow_beta": {
+      "auto_update_policy": {
+        "meets_criteria": {
+          "played_in_last_n_seconds": 1209600
+        }
+      },
+      "deprecated": true,
+      "run_64_bit_only": true,
+      "sso_launch_argument": "-launcherlogin",
+      "tact_product": "wow_beta"
+    },
+    "wow_classic_beta": {
+      "auto_update_policy": {
+        "meets_criteria": {
+          "played_in_last_n_seconds": 1209600
+        }
+      },
+      "deprecated": true,
+      "run_64_bit_only": true,
+      "sso_launch_argument": "-launcherlogin",
+      "tact_product": "wow_classic_beta"
+    },
+    "wow_vendor": {
+      "run_64_bit_only": true,
+      "sso_launch_argument": "-launcherlogin",
+      "tact_product": "wowv"
+    },
+    "wowf": {
+      "auto_update_policy": {
+        "meets_criteria": {
+          "played_in_last_n_seconds": 1209600
+        }
+      },
+      "run_64_bit_only": true,
+      "sso_launch_argument": "-launcherlogin",
+      "tact_product": "wowf"
+    }
+  },
+  "products": [
+    {
+      "id": "WoW",
+      "base": {
+        "name": "world_of_warcraft#WOW_NAME",
+        "program_id": "WoW",
+        "types": {
+          "beta": {
+            "deprecated": true,
+            "selector_display_name": "world_of_warcraft#WOW_MIDNIGHT_BETA_NAME",
+            "uid": "wow_beta"
+          },
+          "retail": {
+            "supported_regions": [
+              "US",
+              "EU",
+              "KR",
+              "CN"
+            ]
+          },
+          "vendor": {
+            "selector_display_name": "world_of_warcraft#WOW_VENDOR_NAME",
+            "uid": "wow_vendor"
+          },
+          "wow_classic_beta": {
+            "deprecated": true,
+            "name": "world_of_warcraft#WOW_FOREVER_BETA_NAME",
+            "selector_display_name": "world_of_warcraft#WOW_FOREVER_BETA_NAME",
+            "supported_regions": [
+              "US",
+              "EU",
+              "KR",
+              "TW"
+            ],
+            "uid": "wow_classic_beta"
+          },
+          "wowf": {
+            "name": "world_of_warcraft#WOW_FOREVER_NAME",
+            "selector_display_name": "world_of_warcraft#WOW_FOREVER_NAME",
+            "supported_regions": [
+              "US",
+              "EU",
+              "KR",
+              "CN"
+            ],
+            "uid": "wowf"
+          }
+        },
+        "uid": "wow"
+      }
+    }
+  ]
+}

@@ -43,6 +43,7 @@ A launcher only has to do three things: install the game, keep it up to date, an
 - **Sign in once per game.** Uses the official Battle.net web login. Battle.net signs each game in separately, so each one asks once; after that every launch is one click.
 - **Several accounts.** Each one keeps its own sign-ins, so switching between them is one click, with no login. **Play As** launches a game once as another account.
 - **Installs games.** Click **+** in the toolbar and pick a game. Waypoint downloads it straight from Blizzard's servers and lays it out exactly the way Battle.net does, so the game takes it as its own. Interrupted installs pick up where they stopped. Every Blizzard game with a Mac version is on the list; [Supported games](#supported-games) shows what has been tested.
+- **Discovers new game versions.** Reads Blizzard's launcher catalog for live Mac releases in supported game families, including new WoW versions. Names, install IDs, folders, languages and launch arguments come from Blizzard. It checks on launch and when you return to the app, at most once an hour. The catalog stays available offline; bundled entries cover the first offline launch.
 - **Updates games itself**, including ones Battle.net installed. It checks Blizzard's servers, downloads only the files that changed, verifies every one of them, and puts them in place: loose files are swapped in, and new data goes into the game's CASC storage the way Battle.net adds it.
 - **Light.** About 27 MB of memory while it sits there. Installs and updates read Blizzard's manifests and indexes straight from disk instead of loading them, so even planning a 130 GB World of Warcraft install stays under 100 MB.
 - **Updates itself** in the background with [Sparkle](https://sparkle-project.org). New versions download silently and install when you quit. There are no update dialogs; a small "Restart to Update" appears at the bottom of the window (and in the menu bar menu, if you turned it on).
@@ -56,7 +57,7 @@ A launcher only has to do three things: install the game, keep it up to date, an
 |---|---|---|---|
 | Hearthstone | ✅ Through Waypoint | ✅ Tested natively, with the Battle.net app and its Agent fully quit | ✅ Through Waypoint |
 | Warcraft III: Reforged | ✅ Tested: the same files as Battle.net's own install | ✅ Tested. The game itself is Intel-only, so it runs under Rosetta | 🧪 Through Waypoint. Tested by repairing Waypoint's and Battle.net's installs; no new build has shipped yet |
-| World of Warcraft: Retail, Classic, Classic Era, Anniversary | 🧪 Implemented, not yet tested | 🧪 Implemented, not yet tested | 🧪 Implemented, not yet tested |
+| World of Warcraft: Retail, Classic, Classic Era, Anniversary, Forever | 🧪 Implemented, not yet tested | 🧪 Implemented, not yet tested | 🧪 Implemented, not yet tested |
 | StarCraft II, StarCraft: Remastered, Diablo III, Heroes of the Storm | 🧪 Implemented, not yet tested | 🧪 Implemented, not yet tested | 🧪 Implemented, not yet tested |
 | Overwatch (Windows Preview) | ✅ Installed through Waypoint's installer | 🧪 Startup, native web login and Retina fullscreen checked; testing stopped at SMS Protect | 🧪 Implemented, not yet tested |
 | Diablo IV (Windows Preview) | ✅ Full installation through Waypoint's installer | 🧪 Native web login and intro cinematic checked; gameplay and performance not qualified | 🧪 Implemented, not yet tested |
@@ -260,6 +261,7 @@ Downloads are staged in `.waypoint-staging` inside the game folder, so an interr
 
 ```sh
 xcrun swift run waypoint-cli list            # installed games and whether they run natively
+xcrun swift run waypoint-cli catalog --refresh  # discover available games from Blizzard
 xcrun swift run waypoint-cli plan hs_beta    # dry run: how a game would be launched
 xcrun swift run waypoint-cli check-tokens    # verify the cipher on tokens Battle.net wrote
 xcrun swift run waypoint-cli check-updates   # installed vs. live version

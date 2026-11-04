@@ -4,7 +4,7 @@ import Foundation
 /// Layout facts come from each product's Blizzard product config
 /// (see ProductConfig); tags and folders are re-read from it at install
 /// time, so this only pins down what doesn't change between builds.
-public struct InstallableProduct: Sendable, Identifiable, Equatable {
+public struct InstallableProduct: Sendable, Identifiable, Equatable, Codable {
     public var id: String { uid }
     /// Battle.net's install uid; also what `-uid` passes to the game. Not
     /// always the product code: Battle.net's own product.db and logs say
@@ -47,13 +47,23 @@ public struct InstallableProduct: Sendable, Identifiable, Equatable {
         native + WindowsTitle.enabled.filter { $0 != .heroes }.map(\.product)
     }
 
+    /// Fresh downloads use current regional availability. Installed games keep
+    /// access to all known metadata through `forProduct`, even after retirement.
+    public static func available(for region: Region) -> [InstallableProduct] {
+        ProductCatalog.shared.availableNativeProducts(region: region)
+            + WindowsTitle.enabled.filter { $0 != .heroes }.map(\.product)
+    }
+
     public var supportedPlatforms: Set<InstallPlatform> {
         if productCode == "hero" { return [.macOS, .windows] }
         if WindowsTitle(rawValue: productCode) != nil { return [.windows] }
         return [.macOS]
     }
 
-    public static let native: [InstallableProduct] = [
+    /// Blizzard's live catalog, with the bundled entries as an offline fallback.
+    public static var native: [InstallableProduct] { ProductCatalog.shared.nativeProducts }
+
+    static let fallbackNative: [InstallableProduct] = [
         .hearthstone,
         InstallableProduct(uid: "wow", productCode: "wow", displayName: "World of Warcraft", folderName: "World of Warcraft",
                            codename: "WoW", appPath: "_retail_/World of Warcraft.app", launchArguments: ["-launcherlogin"],

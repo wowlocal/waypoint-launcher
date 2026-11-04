@@ -9,6 +9,17 @@ func log(_ message: String) {
     FileHandle.standardError.write(Data((message + "\n").utf8))
 }
 
+func catalogRegion() -> Region {
+    option("--region", in: Array(CommandLine.arguments)).flatMap(Region.init(rawValue:))
+        ?? Region.preferred(games: GameLibrary().games())
+}
+
+func refreshCatalog(force: Bool = false) async {
+    let region = catalogRegion()
+    do { try await ProductCatalog.shared.refresh(region: region, force: force) }
+    catch { log("Catalog refresh failed; using saved games: \(error)") }
+}
+
 func game(_ uid: String) -> Game {
     guard let game = GameLibrary().games().first(where: { $0.install.uid == uid }) else { fail("no game with uid \(uid)") }
     return game
@@ -169,12 +180,12 @@ func install(_ args: [String]) async {
         if args[i].hasPrefix("--") { flags.insert(args[i]) } else { positional.append(args[i]) }
         i += 1
     }
+    guard let region = options["--region"].map({ Region(rawValue: $0) }) ?? Region.preferred(games: GameLibrary().games()) else { fail(usage) }
     guard positional.count == 2,
-          let product = InstallableProduct.all.first(where: { $0.uid == positional[0] || $0.productCode == positional[0] })
+          let product = InstallableProduct.available(for: region).first(where: { $0.uid == positional[0] || $0.productCode == positional[0] })
     else { fail(usage) }
     guard let platform = options["--platform"].map({ InstallPlatform(rawValue: $0) })
             ?? (product.supportedPlatforms == [.windows] ? .windows : .macOS) else { fail(usage) }
-    guard let region = options["--region"].map({ Region(rawValue: $0) }) ?? Region.preferred(games: GameLibrary().games()) else { fail(usage) }
     let languages = GameLanguages(text: options["--language"] ?? product.defaultLanguage(), speech: options["--speech"])
     checkLanguages(languages, for: product)
     let pattern = options["--only"]

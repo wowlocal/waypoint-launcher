@@ -6,6 +6,7 @@ import Foundation
 /// follows, so installs match its layout.
 public struct ProductConfig: Sendable, Equatable {
     public let platform: InstallPlatform
+    public let hasPlatformConfiguration: Bool
     /// Where loose (install manifest) files go, relative to the install root;
     /// WoW and Warcraft III use flavor folders like `_retail_`. Empty: root.
     public var subfolder: String
@@ -21,6 +22,7 @@ public struct ProductConfig: Sendable, Equatable {
     /// The game's `.app`, relative to the subfolder.
     public var gameBinary: String?
     public var launchArguments: [String]
+    public var ssoLaunchArgument: String?
     /// Default folder name under /Applications, when the config names one.
     public var folderName: String?
     /// Games stored as loose files only, with no local CASC storage (Hearthstone).
@@ -33,6 +35,7 @@ public struct ProductConfig: Sendable, Equatable {
         }
         let all = (root["all"] as? [String: Any])?["config"] as? [String: Any] ?? [:]
         let selected = ((root["platform"] as? [String: Any])?[platform.rawValue] as? [String: Any])?["config"] as? [String: Any]
+        hasPlatformConfiguration = selected != nil
         if platform == .windows, selected == nil { throw TACTError.malformed("Windows product configuration is missing") }
         let config = selected ?? [:]
 
@@ -53,8 +56,12 @@ public struct ProductConfig: Sendable, Equatable {
 
         let game = (config["binaries"] as? [String: Any])?["game"] as? [String: Any] ?? [:]
         gameBinary = game["relative_path_64"] as? String ?? game["relative_path"] as? String
-        launchArguments = game["launch_arguments"] as? [String] ?? []
+        launchArguments = game["launch_arguments"] as? [String]
+            ?? config["launch_arguments"] as? [String] ?? all["launch_arguments"] as? [String] ?? []
+        ssoLaunchArgument = (config["opaque_product_specific"] as? [String: Any])?["sso_launch_argument"] as? String
+            ?? (all["opaque_product_specific"] as? [String: Any])?["sso_launch_argument"] as? String
         folderName = ((config["form"] as? [String: Any])?["game_dir"] as? [String: Any])?["dirname"] as? String
+            ?? ((all["form"] as? [String: Any])?["game_dir"] as? [String: Any])?["dirname"] as? String
         isContainerless = (config["update_method"] as? String)?.contains("containerless") == true
             || (all["update_method"] as? String)?.contains("containerless") == true
     }
@@ -74,11 +81,12 @@ public struct ProductConfig: Sendable, Equatable {
 extension VersionService {
     /// Fetches and parses a product's config for the given live version.
     public func productConfig(product: String, region: Region, version given: ProductVersion? = nil,
-                              platform: InstallPlatform) async throws -> ProductConfig {
+                              platform: InstallPlatform, cacheDirectory: URL = CDNClient.defaultCacheDirectory) async throws -> ProductConfig {
         let version: ProductVersion
         if let given { version = given } else { version = try await latest(product: product, region: region) }
         guard let hash = version.productConfig, !hash.isEmpty else { throw TACTError.notFound("\(product) product config") }
-        let cdn = try await cdn(product: product, region: region)
+        var cdn = try await cdn(product: product, region: region)
+        cdn.cacheDirectory = cacheDirectory
         let data = try await cdn.cachedConfigFile(hash, path: cdn.configPath ?? "tpr/configs/data")
         return try ProductConfig(json: data, platform: platform)
     }

@@ -1,0 +1,79 @@
+{
+  "categories": {
+    "definitions": [
+      {
+        "id": "cat_unknown",
+        "name": "default#CATEGORIES_UNKNOWN_NAME",
+        "rank": 0
+      },
+      {
+        "id": "cat_event",
+        "name": "default#CATEGORIES_EVENT_NAME",
+        "rank": 40
+      },
+      {
+        "id": "cat_in_development",
+        "name": "default#CATEGORIES_INDEVELOPMENT_NAME",
+        "rank": 50
+      },
+      {
+        "id": "cat_vendor",
+        "name": "default#CATEGORIES_VENDOR_NAME",
+        "rank": 55
+      },
+      {
+        "id": "cat_professional",
+        "name": "default#CATEGORIES_PROFESSIONAL_NAME",
+        "rank": 70
+      },
+      {
+        "id": "cat_tournament",
+        "name": "default#CATEGORIES_TOURNAMENT_NAME",
+        "rank": 71
+      },
+      {
+        "id": "cat_live",
+        "name": "default#CATEGORIES_LIVE_NAME",
+        "rank": 100
+      }
+    ]
+  },
+  "types": {
+    "definitions": [
+      {
+        "category": "cat_in_development",
+        "id": "beta",
+        "product_defaults": {
+          "name_style": "type_name_suffix",
+          "rank": 20,
+          "ribbon_text": "default#RIBBON_TEXT_BETA",
+          "supports_starter_mode": false,
+          "type_name": "default#TYPES_BETA_NAME"
+        }
+      },
+      {
+        "category": "cat_live",
+        "id": "retail",
+        "product_defaults": {
+          "name_style": "default",
+          "type_name": "default#TYPES_RETAIL_NAME"
+        }
+      },
+      {
+        "category": "cat_vendor",
+        "id": "vendor",
+        "product_defaults": {
+          "name_style": "type_name_suffix",
+          "rank": 0,
+          "type_name": "default#TYPES_VENDOR_NAME"
+        }
+      }
+    ]
+  },
+  "fragments": [
+    {
+      "hash": "1193d9029eb9222f9bb52f2ca484586d",
+      "name": "world_of_warcraft"
+    }
+  ]
+}

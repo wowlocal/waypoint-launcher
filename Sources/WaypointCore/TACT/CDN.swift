@@ -80,7 +80,7 @@ public struct VersionService: Sendable {
         return client
     }
 
-    private func table(product: String, file: String, region: Region) async throws -> BPSV {
+    func table(product: String, file: String, region: Region) async throws -> BPSV {
         let host = region == .cn ? "us" : region.rawValue
         let url = URL(string: "https://\(host).version.battle.net/v2/products/\(product)/\(file)")!
         return try await retry.run { _ in

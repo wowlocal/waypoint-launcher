@@ -55,19 +55,29 @@ case "plan":
     }
 
 case "check-updates":
+    await refreshCatalog()
     await checkUpdates()
 
 case "update":
+    await refreshCatalog()
     await update(Array(args.dropFirst()))
 
 case "cleanup":
+    await refreshCatalog()
     await cleanup(Array(args.dropFirst()))
 
 case "fetch":
     await fetch(Array(args.dropFirst()))
 
 case "install":
+    await refreshCatalog()
     await install(Array(args.dropFirst()))
+
+case "catalog":
+    await refreshCatalog(force: args.contains("--refresh"))
+    for product in InstallableProduct.available(for: catalogRegion()) {
+        print("\(product.uid)  \(product.productCode)  \(product.displayName)  [\(product.supportedPlatforms.map(\.rawValue).sorted().joined(separator: ","))]")
+    }
 
 case "logs":
     await logs(Array(args.dropFirst()))
@@ -79,7 +89,7 @@ case "diagnose":
     diagnose()
 
 default:
-    fail("usage: waypoint-cli [list | plan <uid> | check-tokens [GAMEKEY…] | check-updates | update <uid> [--path root] [--state file] [--verify] [--language xxXX [--speech xxXX]] [--dry-run] | cleanup <uid> [--path root] [--state file] [--dry-run] | fetch <uid> <regex> <dir> | install <uid> <dir> [options] | launch <uid> [--state file] [--dry-run] | logs [options] | diagnose]")
+    fail("usage: waypoint-cli [list | catalog [--refresh] | plan <uid> | check-tokens [GAMEKEY…] | check-updates | update <uid> [--path root] [--state file] [--verify] [--language xxXX [--speech xxXX]] [--dry-run] | cleanup <uid> [--path root] [--state file] [--dry-run] | fetch <uid> <regex> <dir> | install <uid> <dir> [options] | launch <uid> [--state file] [--dry-run] | logs [options] | diagnose]")
 }
 
 Diagnostics.shared.flush()
