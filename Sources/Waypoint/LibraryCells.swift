@@ -37,8 +37,9 @@ final class GameCell: NSView {
 
     private let icon = GameIconView()
     private let name = NSTextField.label(.headline)
-    private let progress = DownloadProgressIndicator()
-    private let detail = NSTextField.label(.subheadline, color: .secondaryLabelColor, monospacedDigits: true)
+    private let downloadDetailsView = DownloadDetailsView()
+    private var progress: NSProgressIndicator { downloadDetailsView.progress }
+    private var detail: NSTextField { downloadDetailsView.label }
     private let status = NSTextField.label(.body, color: .secondaryLabelColor)
     private let spinner = NSProgressIndicator.spinner()
     private let button = NSButton(title: "Play", target: nil, action: nil)
@@ -65,7 +66,7 @@ final class GameCell: NSView {
         edition.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         edition.target = self
         edition.action = #selector(changeEdition)
-        layOutRow(in: self, icon: icon, text: [name, edition, progress, detail], trailing: [status, spinner, keepAwakeButton, cancelButton, button])
+        layOutRow(in: self, icon: icon, text: [name, edition, downloadDetailsView], trailing: [status, spinner, keepAwakeButton, cancelButton, button])
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
@@ -96,7 +97,7 @@ final class GameCell: NSView {
         let isUninstalling = if case .uninstalling = state.phase { true } else { false }
         edition.isEnabled = !state.isRunning && !model.isSigningIn && state.phase != .launching && !isUninstalling
         let versionTooltip = game.install.version.map { "Version \($0)" }
-        if toolTip != versionTooltip { toolTip = versionTooltip }
+        if name.toolTip != versionTooltip { name.toolTip = versionTooltip }
 
         var showsProgress = false
         var downloadTooltip: (() -> String)?
@@ -141,7 +142,7 @@ final class GameCell: NSView {
 
         if detail.toolTip != detailTooltip { detail.toolTip = detailTooltip }
         progress.isHidden = !showsProgress
-        progress.details = downloadTooltip
+        downloadDetailsView.details = downloadTooltip
         switch state.phase {
         case .updating, .pausing, .paused: keepAwakeButton.isHidden = false
         default: keepAwakeButton.isHidden = true
@@ -303,7 +304,7 @@ final class GameCell: NSView {
     }
 
     /// "36.6.3 · EU", plus "Intel" for games that need Rosetta. The full
-    /// version is in the row's tooltip.
+    /// version is in the name's tooltip.
     private static func summary(of game: Game) -> String {
         var parts: [String] = []
         if let version = game.install.version {
@@ -326,8 +327,9 @@ final class InstallableCell: NSView {
 
     private let icon = NSImageView()
     private let name = NSTextField.label(.headline)
-    private let progress = DownloadProgressIndicator()
-    private let detail = NSTextField.label(.subheadline, color: .secondaryLabelColor, monospacedDigits: true)
+    private let downloadDetailsView = DownloadDetailsView()
+    private var progress: NSProgressIndicator { downloadDetailsView.progress }
+    private var detail: NSTextField { downloadDetailsView.label }
     private let button = NSButton(title: "Try Again…", target: nil, action: nil)
     private let keepAwakeButton = NSButton.downloadKeepAwake()
     private let cancelButton = NSButton(title: "Cancel", target: nil, action: nil)
@@ -345,7 +347,7 @@ final class InstallableCell: NSView {
         cancelButton.target = self
         cancelButton.action = #selector(cancelDownload)
         cancelButton.toolTip = "Stop this download. Downloaded data is kept for next time."
-        layOutRow(in: self, icon: icon, text: [name, progress, detail], trailing: [keepAwakeButton, cancelButton, button])
+        layOutRow(in: self, icon: icon, text: [name, downloadDetailsView], trailing: [keepAwakeButton, cancelButton, button])
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
@@ -388,7 +390,7 @@ final class InstallableCell: NSView {
             button.isHidden = true
         }
         if detail.toolTip != detailTooltip { detail.toolTip = detailTooltip }
-        progress.details = downloadTooltip
+        downloadDetailsView.details = downloadTooltip
         switch state.phase {
         case .updating, .pausing, .paused: keepAwakeButton.isHidden = false
         default: keepAwakeButton.isHidden = true
@@ -441,12 +443,7 @@ private func layOutRow(in cell: NSView, icon: NSView, text views: [NSView], trai
     row.edgeInsets = NSEdgeInsets(top: 6, left: 0, bottom: 6, right: 0)
     row.translatesAutoresizingMaskIntoConstraints = false
     cell.addSubview(row)
-    let barWidth = views.compactMap { $0 as? NSProgressIndicator }.map { bar in
-        let width = bar.widthAnchor.constraint(equalToConstant: 200)
-        width.priority = .defaultHigh
-        return [width, bar.widthAnchor.constraint(lessThanOrEqualTo: text.widthAnchor)]
-    }
-    NSLayoutConstraint.activate(barWidth.flatMap { $0 } + [
+    NSLayoutConstraint.activate([
         row.leadingAnchor.constraint(equalTo: cell.leadingAnchor),
         row.trailingAnchor.constraint(equalTo: cell.trailingAnchor),
         row.topAnchor.constraint(equalTo: cell.topAnchor),
