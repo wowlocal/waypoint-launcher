@@ -6,10 +6,12 @@ public struct UpdateCheck: Sendable {
     public var installedBuild: String?
     public var installedVersion: String?
     public var latest: ProductVersion
-    public var needsContentUpdate = false
 
+    /// Only a build change is an update. An installation whose build is the
+    /// live one is up to date, whatever optional content it was installed
+    /// with: Battle.net reports the same, and its own cleanup would discard
+    /// packages the install's tags don't select.
     public var isUpdateAvailable: Bool {
-        if needsContentUpdate { return true }
         if let installedBuild { return installedBuild != latest.buildConfig }
         return installedVersion != latest.name
     }
@@ -107,8 +109,7 @@ public struct GameUpdater: Sendable {
 
     public func check() async throws -> UpdateCheck {
         let latest = try await versions.latest(product: install.productCode, region: region)
-        return UpdateCheck(installedBuild: install.buildConfig, installedVersion: install.version, latest: latest,
-                           needsContentUpdate: InstallContent.needsUpdate(install))
+        return UpdateCheck(installedBuild: install.buildConfig, installedVersion: install.version, latest: latest)
     }
 
     /// Works out what to download and delete. With `verify`, every file is

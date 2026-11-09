@@ -187,6 +187,40 @@ private struct MetadataFixture {
     #expect(try ProtoReader(folder).fields()[3]?.first?.message?.fields()[9]?.first?.string == "HighRes")
 }
 
+/// An installation that does not have HighRes must not gain it in the
+/// Agent's `UserSettings.additional_tags` (9): Battle.net would then treat
+/// the package as selected and download it. Only the install's own completed
+/// tags put it there, in full.
+@Test func metadataLeavesContentSelectionOfInstallsWithoutHighResAlone() throws {
+    let f = try MetadataFixture(); defer { f.remove() }
+    let install = f.install("wowf")
+    #expect(try ProtoReader(BattleNetInstallMetadata.encode(install, subfolder: "_forever_"))
+        .fields()[3]?.first?.message?.fields()[9] == nil)
+    #expect(try BattleNetInstallMetadata.repair(installs: [install], agentDatabase: f.database, ensureNotRunning: {}) == 2)
+    func additionalTags(_ settings: [Int: [ProtoReader.Value]]?) throws -> String? {
+        try settings?[3]?.first?.message?.fields()[9]?.first?.string
+    }
+    let folder = try Data(contentsOf: f.game.appendingPathComponent(".product.db"))
+    #expect(try additionalTags(try ProtoReader(folder).fields()) == nil)
+    #expect(try additionalTags(try ProtoReader(Data(contentsOf: f.database)).fields()[1]?.first?.message?.fields()) == nil)
+    #expect(try BattleNetInstallMetadata.repair(installs: [install], agentDatabase: f.database, ensureNotRunning: {}) == 0)
+
+    // The Agent's own record keeps whatever packages it selected.
+    let record = try ProtoReader(BattleNetInstallMetadata.encode(install, subfolder: "_forever_")).mappingBytes(3) {
+        try ProtoReader($0).replacingBytes(9, with: Data("OtherContent".utf8))
+    }
+    #expect(try BattleNetInstallMetadata.updatingContentSelection(record, for: install) == record)
+    // Half a selection is not one: the other set's files were never installed.
+    var partial = install
+    partial.tagString = "OSX x86_64 arm64 EU? HighRes ruRU text?:OSX x86_64 arm64 EU? enUS speech?"
+    #expect(try BattleNetInstallMetadata.updatingContentSelection(record, for: partial) == record)
+    // A completed install that does select it throughout still reaches it.
+    var completed = install
+    completed.tagString = InstallContent.tags(for: install, from: install.tagString!)
+    #expect(try additionalTags(try ProtoReader(BattleNetInstallMetadata.updatingContentSelection(record, for: completed)).fields())
+        == "OtherContent HighRes")
+}
+
 @Test func metadataRepairsOnlyKnownOwnedDataDirectoryModes() throws {
     let f = try MetadataFixture(); defer { f.remove() }
     let fm = FileManager.default

@@ -226,18 +226,76 @@ private func selectFixture(_ tagString: String) -> [String] {
     let anniversary = InstallContent.tags(for: wow, from: "OSX Alternate")
     #expect(im.select(tagString: anniversary).map(\.path) == ["base", "hires", "alternate", "both"])
     #expect(InstallContent.tags(for: .init(uid: "s2", productCode: "s2", installPath: "/unused"), from: "OSX code") == "OSX code")
+
+    // An installation that already exists is planned with its own selection,
+    // so no optional package comes down with an update.
+    var existing = wow
+    existing.version = "1.0"
+    existing.buildConfig = "a"
+    let kept = InstallContent.plannedTags(for: existing, from: "OSX enUS speech?:OSX enUS text?")
+    #expect(im.select(tagString: kept).map(\.path) == ["base"])
+    #expect(dm.select(tagString: kept).map(\.size) == [1])
 }
 
-@Test func sameBuildWoWOffersHighResBackfillUntilTagsAreCommitted() {
-    var install = ProductInstall(uid: "wowf", productCode: "wowf", installPath: "/unused", version: "1.0", buildConfig: "a",
-                                 tagString: "OSX EU? enUS speech?:OSX EU? ruRU text?")
-    let latest = ProductVersion(region: "eu", buildConfig: "a", cdnConfig: "b", buildID: 1, name: "1.0")
-    #expect(UpdateCheck(installedBuild: "a", installedVersion: "1.0", latest: latest,
-                        needsContentUpdate: InstallContent.needsUpdate(install)).isUpdateAvailable)
-    install.tagString = InstallContent.tags(for: install, from: install.tagString!)
-    #expect(install.languages == GameLanguages(text: "ruRU", speech: "enUS"))
-    #expect(!UpdateCheck(installedBuild: "a", installedVersion: "1.0", latest: latest,
-                         needsContentUpdate: InstallContent.needsUpdate(install)).isUpdateAvailable)
+/// A WoW install that already exists keeps the content it was installed
+/// with: its build is the live one, so it is up to date, and planning uses
+/// its own tags rather than adding the optional HighRes package Battle.net
+/// left out. Only an install Waypoint makes from scratch opts into that, and
+/// its own later updates and language changes keep it.
+@Test func existingWoWInstallIsUpToDateAndKeepsItsContentSelection() {
+    let recorded = "OSX x86_64 EU? acct-HRV? geoip-HR? enUS speech?:OSX x86_64 EU? acct-HRV? geoip-HR? ruRU text?"
+    var install = ProductInstall(uid: "wowf", productCode: "wowf", installPath: "/unused", version: "1.60.1.70862",
+                                 buildConfig: "a", tagString: recorded)
+    let latest = ProductVersion(region: "eu", buildConfig: "a", cdnConfig: "b", buildID: 1, name: "1.60.1.70862")
+    #expect(!UpdateCheck(installedBuild: install.buildConfig, installedVersion: install.version, latest: latest).isUpdateAvailable)
+    #expect(!InstallContent.isFresh(install))
+    #expect(InstallContent.plannedTags(for: install, from: recorded) == recorded)
+    #expect(!InstallContent.selectsHighRes(install))
+    let newer = ProductVersion(region: "eu", buildConfig: "b", cdnConfig: "b", buildID: 2, name: "1.60.2.70999")
+    #expect(UpdateCheck(installedBuild: install.buildConfig, installedVersion: install.version, latest: newer).isUpdateAvailable)
+
+    var fresh = ProductInstall(uid: "wowf", productCode: "wowf", installPath: "/unused", tagString: recorded)
+    #expect(InstallContent.isFresh(fresh))
+    let full = InstallContent.plannedTags(for: fresh, from: recorded)
+    #expect(full == InstallContent.tags(for: fresh, from: recorded))
+    fresh.tagString = full
+    #expect(InstallContent.selectsHighRes(fresh))
+    #expect(fresh.languages == GameLanguages(text: "ruRU", speech: "enUS"))
+
+    install.tagString = full
+    install.version = "1.60.1.70862"
+    #expect(InstallContent.plannedTags(for: install, from: full) == full)
+    let german = install.with(GameLanguages(text: "deDE"), tags: full)
+    #expect(InstallContent.selectsHighRes(german))
+    #expect(InstallContent.plannedTags(for: german, from: german.tagString!) == german.tagString)
+}
+
+/// What counts as an install that has HighRes, for the Agent's records: its
+/// own tags select it in every set. Half a selection, a tag that merely
+/// starts the same, a missing tag record and another game's tags are not it.
+@Test func highResSelectionNeedsEveryTagSetOfAWoWInstall() {
+    func wow(_ tags: String?) -> ProductInstall {
+        ProductInstall(uid: "wowf", productCode: "wowf", installPath: "/unused", version: "1.0", buildConfig: "a", tagString: tags)
+    }
+    #expect(InstallContent.selectsHighRes(wow("OSX HighRes enUS speech?:OSX HighRes? ruRU text?")))
+    #expect(InstallContent.selectsHighRes(wow("OSX HighRes")))
+    #expect(!InstallContent.selectsHighRes(wow("OSX HighRes enUS speech?:OSX ruRU text?")))
+    #expect(!InstallContent.selectsHighRes(wow("OSX HighResolution enUS text?")))
+    #expect(!InstallContent.selectsHighRes(wow(nil)))
+    #expect(!InstallContent.selectsHighRes(wow("")))
+    #expect(!InstallContent.selectsHighRes(ProductInstall(uid: "s2", productCode: "s2", installPath: "/unused",
+                                                          version: "1.0", buildConfig: "a", tagString: "OSX HighRes")))
+
+    // An install with no tag record of its own is not incomplete, and not a
+    // fresh one either: it is planned from the product config's selection.
+    let unknown = wow(nil)
+    #expect(!InstallContent.isFresh(unknown))
+    #expect(InstallContent.plannedTags(for: unknown, from: "OSX arm64 enUS text?") == "OSX arm64 enUS text?")
+    // Nor is a record that lost its build key but kept its version.
+    var noBuild = wow("OSX arm64 enUS text?")
+    noBuild.buildConfig = nil
+    #expect(!InstallContent.isFresh(noBuild))
+    #expect(InstallContent.plannedTags(for: noBuild, from: noBuild.tagString!) == noBuild.tagString)
 }
 
 private func tagFixtureData() -> Data {

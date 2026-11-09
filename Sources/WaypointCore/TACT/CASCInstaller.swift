@@ -123,7 +123,7 @@ public struct CASCInstaller: Sendable {
         if let requested { target = requested } else { target = try await versions.latest(product: install.productCode, region: region) }
         let cdn = try await versions.cdn(product: install.productCode, region: region)
         let installedTags = install.tagString.nonEmpty ?? config.tagString(region: region, languages: install.languages)
-        let contentTags = InstallContent.tags(for: install, from: installedTags)
+        let contentTags = InstallContent.plannedTags(for: install, from: installedTags)
         var planned = languages.map { install.with($0, tags: contentTags) } ?? install
         if languages == nil { planned.tagString = contentTags }
         let tags = planned.tagString ?? contentTags

@@ -76,14 +76,15 @@ public enum BattleNetInstallMetadata {
         return added
     }
 
-    /// Only a completed, matching build can advertise HighRes. The Agent
-    /// derives its desired selection from UserSettings.additional_tags (9),
-    /// not just the cached active_tag_string (17). Agent-written folder
-    /// records can be Database envelopes containing several WoW editions.
+    /// Only an installation whose own completed tags select HighRes can
+    /// advertise it. The Agent derives its desired selection from
+    /// UserSettings.additional_tags (9), not just the cached
+    /// active_tag_string (17), so writing the field for an install without
+    /// the package would make Battle.net want to download it. Agent-written
+    /// folder records can be Database envelopes containing several WoW editions.
     static func updatingContentSelection(_ data: Data, for completed: ProductInstall) throws -> Data {
-        guard completed.platform == .macOS,
-              GameCatalog.family(for: completed.productCode) == .worldOfWarcraft,
-              !InstallContent.needsUpdate(completed), let tags = completed.tagString else { return data }
+        guard completed.platform == .macOS, InstallContent.selectsHighRes(completed),
+              let tags = completed.tagString else { return data }
         func updateRecord(_ record: Data) throws -> Data {
             guard let current = try? ProductDB.parseInstallFile(record),
                   current.isSameInstallation(as: completed) else { return record }
@@ -207,9 +208,7 @@ public enum BattleNetInstallMetadata {
             let text = install.textLanguage ?? "enUS", speech = install.speechLanguage ?? text
             settings.string(6, text)
             settings.string(7, speech)
-            if GameCatalog.family(for: install.productCode) == .worldOfWarcraft, !InstallContent.needsUpdate(install) {
-                settings.string(9, "HighRes")
-            }
+            if InstallContent.selectsHighRes(install) { settings.string(9, "HighRes") }
             for language in Set([text, speech]).sorted() {
                 settings.message(8) {
                     $0.string(1, language)
