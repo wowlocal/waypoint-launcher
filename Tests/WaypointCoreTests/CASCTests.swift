@@ -513,6 +513,206 @@ private func expectStoredIndexesOnly(_ dir: URL, version: UInt32) throws {
     #expect(keys.count == 2)
 }
 
+// MARK: - The game's update section (issue #3)
+
+/// `count` distinct entries for one index file.
+private func indexEntries(_ count: Int) -> [CASC.IndexEntry] {
+    (0..<count).map { i in
+        var key = [UInt8](repeating: 0, count: 9)
+        for byte in 0..<4 { key[byte] = UInt8(truncatingIfNeeded: i >> (8 * byte)) }
+        key[8] = 0xA5
+        return CASC.IndexEntry(key: Data(key), archive: 0, offset: UInt64(CASC.segmentHeadersSize + i * 0x40), size: 0x40)
+    }
+}
+
+/// Waypoint 0.9.5's rule: the reserve measured from the entries' end, not
+/// from the 4 KiB boundary the game starts its update section at.
+private func shortIndexFileSize(sortedEnd: Int) -> Int { (sortedEnd + 0x7800 + 0xFFFF) & ~0xFFFF }
+
+private func updateSectionRoom(size: Int, sortedEnd: Int) -> Int {
+    size - ((sortedEnd + 0xFFF) & ~0xFFF)
+}
+
+/// Every index file leaves the game its update section: 0x7800 bytes from the
+/// 4 KiB boundary after the sorted entries. 121,968 entries in one bucket (WoW
+/// Forever 1.60.1, issue #3) left 0x7000 of it, and the game refused the
+/// storage with "Truncated KMT update section detected" and asked to be
+/// repaired, with every file of the install present and sound.
+@Test func indexFileSizeLeavesTheGameItsUpdateSection() {
+    for entries in [0, 1, 1_000, 1_819, 1_820, 3_640, 4_738, 50_000, 119_647, 120_866, 121_968, 200_000] {
+        let sortedEnd = 0x28 + 18 * entries
+        let size = CASC.indexFileSize(sortedEnd: sortedEnd)
+        #expect(size % 0x10000 == 0, "\(entries) entries")
+        #expect(size >= sortedEnd + 0x7800, "\(entries) entries")
+        #expect(updateSectionRoom(size: size, sortedEnd: sortedEnd) >= 0x7800, "\(entries) entries")
+    }
+    // The reported case, and the one before the boundary moved.
+    #expect(CASC.indexFileSize(sortedEnd: 0x28 + 18 * 121_968) == 0x230000)
+    #expect(shortIndexFileSize(sortedEnd: 0x28 + 18 * 121_968) == 0x220000)
+    #expect(updateSectionRoom(size: 0x220000, sortedEnd: 0x28 + 18 * 121_968) == 0x7000)
+}
+
+/// Agent-written index files, so the fix stays byte-compatible with them:
+/// the entry counts of the 16 index files of a Battle.net-installed Warcraft
+/// III (131,072 bytes each) and World of Warcraft with the Forever flavor
+/// (2,228,224 bytes each), measured on 2026-11-09.
+@Test func indexFileSizeMatchesAgentWrittenSizes() {
+    let warcraftIII = [4738, 4726, 4711, 4703, 4725, 4614, 4758, 4658, 4567, 4730, 4789, 4692, 4663, 4679, 4761, 4757]
+    let worldOfWarcraft = [119_967, 119_993, 119_863, 119_776, 119_647, 120_020, 120_223, 120_508,
+                           120_482, 119_805, 119_690, 119_801, 120_223, 119_975, 120_866, 120_762]
+    for entries in warcraftIII {
+        #expect(CASC.indexFileSize(sortedEnd: 0x28 + 18 * entries) == 131_072, "\(entries) entries")
+    }
+    for entries in worldOfWarcraft {
+        #expect(CASC.indexFileSize(sortedEnd: 0x28 + 18 * entries) == 2_228_224, "\(entries) entries")
+    }
+}
+
+/// A written index file is as big as that, and reads back whole.
+@Test func writtenIndexFileHasRoomForTheUpdateSection() throws {
+    // 1,819 entries is the smallest count the old rule got wrong.
+    let entries = indexEntries(1_819)
+    let sortedEnd = 0x28 + 18 * entries.count
+    let file = CASC.indexFile(bucket: 3, entries: entries)
+    #expect(file.count == 0x20000)
+    #expect(shortIndexFileSize(sortedEnd: sortedEnd) == 0x10000) // what 0.9.5 wrote
+    #expect(updateSectionRoom(size: file.count, sortedEnd: sortedEnd) >= 0x7800)
+    let parsed = try CASC.parseIndexFile(file)
+    #expect(parsed.bucket == 3)
+    #expect(parsed.sortedEnd == sortedEnd)
+    #expect(parsed.entries.count == entries.count)
+    #expect(parsed.updates.isEmpty)
+    #expect(file[sortedEnd...].allSatisfy { $0 == 0 })
+}
+
+/// Writes a storage whose bucket-0 index is as short as Waypoint 0.9.5 left
+/// it (the other 15 buckets are empty and were big enough all along).
+private func shortIndexStorage(_ dir: URL, entries: [CASC.IndexEntry], version: UInt32 = 1,
+                               tail: [UInt8] = []) throws -> (url: URL, kept: Data) {
+    let fm = FileManager.default
+    try fm.createDirectory(at: dir, withIntermediateDirectories: true)
+    var file = [UInt8](CASC.indexFile(bucket: 0, entries: entries))
+    let sortedEnd = 0x28 + 18 * entries.count
+    let short = shortIndexFileSize(sortedEnd: sortedEnd)
+    #expect(short < file.count, "this index was long enough already")
+    file = Array(file[0..<short])
+    if !tail.isEmpty {
+        let page = (sortedEnd + 0x1FF) & ~0x1FF
+        file.replaceSubrange(page..<page + tail.count, with: tail)
+    }
+    let url = dir.appendingPathComponent(CASC.indexFileName(bucket: 0, version: version))
+    try Data(file).write(to: url)
+    for bucket in 1..<16 {
+        try CASC.indexFile(bucket: bucket, entries: [])
+            .write(to: dir.appendingPathComponent(CASC.indexFileName(bucket: bucket, version: version)))
+    }
+    try CASC.segmentHeaders(baseKey: Data(repeating: 7, count: 16), archive: 0).data
+        .write(to: dir.appendingPathComponent("data.000"))
+    return (url, Data(file))
+}
+
+/// Verifying files repairs an install an older Waypoint left unlaunchable,
+/// without any game content changing: the short index file gets the room the
+/// game needs, and nothing else about it moves.
+@Test func repairGivesShortIndexesTheirUpdateSectionBack() throws {
+    let fm = FileManager.default
+    let dir = fm.temporaryDirectory.appendingPathComponent("waypoint-casc-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: dir) }
+    let entries = indexEntries(1_819)
+    let (url, before) = try shortIndexStorage(dir, entries: entries)
+    let keys = try #require(try StoredKeys.load(dir))
+
+    let repair = try CASC.repairIndexReserve(dir)
+    #expect(repair.repaired == [CASC.indexFileName(bucket: 0, version: 1)])
+    #expect(repair.skipped.isEmpty)
+
+    let after = try Data(contentsOf: url)
+    let sortedEnd = 0x28 + 18 * entries.count
+    #expect(after.count == CASC.indexFileSize(sortedEnd: sortedEnd))
+    #expect(updateSectionRoom(size: after.count, sortedEnd: sortedEnd) >= 0x7800)
+    // Header, entries and checksums keep their bytes; only zeros were added.
+    #expect(after.prefix(before.count) == before)
+    #expect(after.dropFirst(before.count).allSatisfy { $0 == 0 })
+    #expect(try CASC.loadBucket(dir, bucket: 0, version: 1).count == entries.count)
+    #expect(try StoredKeys.load(dir)?.count == keys.count)
+    // Index versions don't change, so no reader is sent looking for a new file.
+    #expect(try CASC.scanStorage(dir)?.versions == [UInt32](repeating: 1, count: 16))
+    #expect(try fm.contentsOfDirectory(atPath: dir.path).filter { $0.hasSuffix(".idx") }.count == 16)
+    // Running it again changes nothing.
+    #expect(try CASC.repairIndexReserve(dir).isEmpty)
+    #expect(try Data(contentsOf: url) == after)
+}
+
+/// What the repair must not touch: storages this version or the Agent wrote,
+/// an index whose update section is in use, and an unfinished install.
+@Test func repairLeavesSoundAndBusyStoragesAlone() throws {
+    let fm = FileManager.default
+
+    // A storage this version wrote (so, by size, an Agent-written one too).
+    let written = fm.temporaryDirectory.appendingPathComponent("waypoint-casc-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: written) }
+    let writer = try CASCStorageWriter(directory: written)
+    for i in 0..<20 { try writer.append(encodedKey: storageKey(i), blob: storageBlob(i), fullKey: false) }
+    try writer.finish()
+    func indexSizes() throws -> [UInt64] {
+        try (0..<16).map { bucket in
+            let url = written.appendingPathComponent(CASC.indexFileName(bucket: bucket, version: 1))
+            return try fm.attributesOfItem(atPath: url.path)[.size] as! UInt64
+        }
+    }
+    let sizes = try indexSizes()
+    #expect(try CASC.repairIndexReserve(written).isEmpty)
+    #expect(try indexSizes() == sizes)
+
+    // A short index whose update section already holds a record: appending to
+    // it is safe, but a game that got that far is better left to its own
+    // repair, so the file is reported and left exactly as it is.
+    let used = fm.temporaryDirectory.appendingPathComponent("waypoint-casc-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: used) }
+    let entries = indexEntries(1_819)
+    var record = [UInt8](repeating: 0x5C, count: 9) + [UInt8](repeating: 0, count: 5) + CASC.le32(0x40) + [0]
+    record = CASC.le32(Lookup3.hashlittle(record, 0) | 0x8000_0000) + record + [0]
+    let (usedURL, usedBefore) = try shortIndexStorage(used, entries: entries, tail: record)
+    let usedRepair = try CASC.repairIndexReserve(used)
+    #expect(usedRepair.repaired.isEmpty)
+    #expect(usedRepair.skipped == [CASC.indexFileName(bucket: 0, version: 1)])
+    #expect(try Data(contentsOf: usedURL) == usedBefore)
+
+    // An unfinished install or update: its own writer finishes the job.
+    let busy = fm.temporaryDirectory.appendingPathComponent("waypoint-casc-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: busy) }
+    let (busyURL, busyBefore) = try shortIndexStorage(busy, entries: entries)
+    try Data(repeating: 0, count: 16).write(to: busy.appendingPathComponent(CASCStorageWriter.journalName))
+    #expect(try CASC.repairIndexReserve(busy).isEmpty)
+    #expect(try Data(contentsOf: busyURL) == busyBefore)
+
+    // Nothing to repair where there is no storage.
+    #expect(try CASC.repairIndexReserve(fm.temporaryDirectory.appendingPathComponent(UUID().uuidString)).isEmpty)
+}
+
+/// An update that appends to a repaired storage keeps working: the next
+/// index version is written from scratch, at the size the game wants.
+@Test func updateAfterRepairWritesFullSizedIndexes() throws {
+    let fm = FileManager.default
+    let dir = fm.temporaryDirectory.appendingPathComponent("waypoint-casc-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: dir) }
+    let entries = indexEntries(1_819)
+    _ = try shortIndexStorage(dir, entries: entries)
+    #expect(try CASC.repairIndexReserve(dir).repaired.count == 1)
+
+    let update = try CASCStorageWriter(directory: dir, allowExisting: true)
+    try update.append(encodedKey: storageKey(1), blob: storageBlob(1), fullKey: false)
+    try update.finish()
+    try expectStoredIndexesOnly(dir, version: 2)
+    for bucket in 0..<16 {
+        let file = try Data(contentsOf: dir.appendingPathComponent(CASC.indexFileName(bucket: bucket, version: 2)))
+        let parsed = try CASC.parseIndexFile(file)
+        #expect(file.count == CASC.indexFileSize(sortedEnd: parsed.sortedEnd))
+        #expect(updateSectionRoom(size: file.count, sortedEnd: parsed.sortedEnd) >= 0x7800)
+    }
+    #expect(try CASC.loadBucket(dir, bucket: 0, version: 2).count >= entries.count)
+}
+
 // MARK: - Battle.net detection
 
 @Test func recognizesBattleNetProcesses() {

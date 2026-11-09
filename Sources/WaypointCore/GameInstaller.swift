@@ -186,6 +186,18 @@ public struct GameUpdate: Sendable {
             .plan(target: target, verify: verify, languages: languages, log: log))
     }
 
+    /// Repairs what a plan with nothing to download still can: the local
+    /// storage's index files, which an older Waypoint could leave too short
+    /// for the game's update section (issue #3). Downloads nothing, writes no
+    /// records, and does nothing for games without local storage.
+    @discardableResult
+    public func repairIndexes(_ plan: GameUpdatePlan) throws -> CASC.IndexRepair {
+        guard plan.install.isSameInstallation(as: install) else { throw TACTError.malformed("Update plan belongs to another installation") }
+        guard case .casc(let p) = plan else { return CASC.IndexRepair() }
+        return try CASCInstaller(product: p.product, install: p.install, config: p.config, versions: versions, store: store)
+            .repairIndexes()
+    }
+
     public func apply(_ plan: GameUpdatePlan, progress: @escaping @Sendable (UpdateProgress) -> Void = { _ in }) async throws {
         guard plan.install.isSameInstallation(as: install) else { throw TACTError.malformed("Update plan belongs to another installation") }
         try install.platform.validate(install: install)

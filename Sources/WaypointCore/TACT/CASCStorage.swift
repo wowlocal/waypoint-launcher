@@ -18,6 +18,13 @@ public enum CASC {
     static let headerSize = 30
     static let segmentHeadersSize = 16 * 30
     static let freeSpanCapacity = 1090
+    /// The update section starts at the sorted entries' end, rounded up to this.
+    static let updateSectionAlignment = 0x1000
+    /// Bytes of update section the game insists on from that point. Less and
+    /// it refuses the storage ("Truncated KMT update section detected", then
+    /// NeedsRepair) however sound the entries are.
+    static let updateSectionReserve = 0x7800
+    static let indexFileAlignment = 0x10000
     static let checksumSeedA: UInt32 = 0x3D6BE971
     static let checksumTable: [UInt32] = [
         0x049396B8, 0x72A82A9B, 0xEE626CCA, 0x9917754F, 0x15DE40B1, 0xF5A8A9B6, 0x421EAC7E, 0xA9D55C9A,
@@ -112,10 +119,26 @@ public enum CASC {
             body += record
         }
         out += le32(UInt32(body.count)) + le32(pc) + body
-        // Room for the Agent's update section, rounded to 64 KiB.
-        let total = (out.count + 0x7800 + 0xFFFF) & ~0xFFFF
+        // Room for the update section, rounded to 64 KiB as the Agent writes it.
+        let total = indexFileSize(sortedEnd: out.count)
         out += [UInt8](repeating: 0, count: total - out.count)
         return Data(out)
+    }
+
+    /// How big an `.idx` file whose sorted entries end at `sortedEnd` has to
+    /// be: the game looks for its update section at the next 4 KiB boundary
+    /// and wants `updateSectionReserve` bytes of it, and the file is a whole
+    /// number of 64 KiB blocks.
+    ///
+    /// The 4 KiB step is what Waypoint 0.9.5 missed: reserving the bytes from
+    /// the entries' end instead left as little as 0x7000 past the boundary
+    /// (WoW Forever, 121,968 entries in a bucket: issue #3), which the game
+    /// reads as a truncated update section. The sizes this returns match every
+    /// Agent-written index measured so far (Warcraft III at ~4,700 entries a
+    /// bucket, World of Warcraft at ~120,000).
+    static func indexFileSize(sortedEnd: Int) -> Int {
+        let updateStart = (sortedEnd + updateSectionAlignment - 1) & ~(updateSectionAlignment - 1)
+        return (updateStart + updateSectionReserve + indexFileAlignment - 1) & ~(indexFileAlignment - 1)
     }
 
     public static func indexFileName(bucket: Int, version: UInt32) -> String {
@@ -630,6 +653,9 @@ extension CASC {
         var bucket: Int
         var entries: [IndexEntry]
         var updates: [(entry: IndexEntry, status: UInt8)]
+        /// Where the sorted entries end: the update section starts at the next
+        /// 4 KiB boundary from here.
+        var sortedEnd: Int
     }
 
     /// Reads a v7 index file, checking its lookup3 hashes. The update
@@ -680,7 +706,8 @@ extension CASC {
                 }
                 page += 0x200
             }
-            return ParsedIndex(bucket: Int(b[0x0A]), entries: entries, updates: updates)
+            return ParsedIndex(bucket: Int(b[0x0A]), entries: entries, updates: updates,
+                               sortedEnd: entriesStart + blockSize)
         }
     }
 
@@ -695,6 +722,91 @@ extension CASC {
             if status == 0 { entries.append(entry) }
         }
         return entries
+    }
+
+    /// What `repairIndexReserve` did.
+    public struct IndexRepair: Sendable, Equatable {
+        /// Index files that were extended, by name.
+        public var repaired: [String] = []
+        /// Short index files left alone: their update section already holds
+        /// records, or they aren't in a format this version writes.
+        public var skipped: [String] = []
+
+        public var isEmpty: Bool { repaired.isEmpty && skipped.isEmpty }
+    }
+
+    /// Gives the game the update-section room an older Waypoint left out
+    /// (issue #3: "Truncated KMT update section detected", then NeedsRepair,
+    /// with every file of the install present and sound).
+    ///
+    /// Only the newest version of each of the 16 index files is considered,
+    /// only when it is shorter than `indexFileSize` wants, and the only change
+    /// is zeros appended past its end: the header, the sorted entries and
+    /// their lookup3 checksums keep their bytes, and so does anything the game
+    /// already wrote. An Agent-written storage — or one this version wrote — is
+    /// long enough already and comes out untouched, so this can run on any
+    /// install, including one Battle.net manages.
+    ///
+    /// Nothing happens while an install or update is unfinished: its writer
+    /// writes the index files itself when it finishes.
+    @discardableResult
+    public static func repairIndexReserve(_ directory: URL) throws -> IndexRepair {
+        let fm = FileManager.default
+        var result = IndexRepair()
+        guard fm.fileExists(atPath: directory.path),
+              !fm.fileExists(atPath: directory.appendingPathComponent(CASCStorageWriter.journalName).path)
+        else { return result }
+        let lock = try StorageLock(directory)
+        defer { lock.release() }
+        // A writer may have left a journal while this repair waited for its lock.
+        guard !fm.fileExists(atPath: directory.appendingPathComponent(CASCStorageWriter.journalName).path)
+        else { return result }
+        guard let state = try scanStorage(directory) else { return result }
+
+        for bucket in 0..<16 {
+            let name = indexFileName(bucket: bucket, version: state.versions[bucket])
+            let url = directory.appendingPathComponent(name)
+            // Mapped only for the measurement: the file grows right after.
+            var measured: (size: Int, needed: Int, emptyTail: Bool)?
+            do {
+                measured = try autoreleasepool {
+                    let data = try Data(contentsOf: url, options: .alwaysMapped)
+                    let parsed = try parseIndexFile(data)
+                    guard parsed.bucket == bucket else { throw TACTError.malformed("\(name) is for bucket \(parsed.bucket)") }
+                    let tail = data[(data.startIndex + parsed.sortedEnd)...]
+                    return (size: data.count, needed: indexFileSize(sortedEnd: parsed.sortedEnd),
+                            emptyTail: tail.allSatisfy { $0 == 0 })
+                }
+            } catch {
+                // A format this version doesn't write is not ours to pad.
+                Log.warning(.install, "index_unreadable", nil, ["path": url.path, "error": error])
+                result.skipped.append(name)
+                continue
+            }
+            guard let measured, measured.size < measured.needed else { continue }
+            guard measured.emptyTail else {
+                Log.warning(.install, "index_tail_in_use", "update section already written", ["path": url.path])
+                result.skipped.append(name)
+                continue
+            }
+            let handle = try FileHandle(forWritingTo: url)
+            do {
+                // Past the end, so the new bytes read as zeros: an empty
+                // update section, which is what the game expects to find.
+                try handle.truncate(atOffset: UInt64(measured.needed))
+                try handle.synchronize()
+                try handle.close()
+            } catch {
+                try? handle.close()
+                throw error
+            }
+            result.repaired.append(name)
+        }
+        if !result.isEmpty {
+            Log.notice(.install, "index_reserve_repaired", nil, ["path": directory.path, "repaired": result.repaired.count,
+                                                                 "skipped": result.skipped.count])
+        }
+        return result
     }
 
     /// A storage's shape, without its entries.

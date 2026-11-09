@@ -44,6 +44,11 @@ public struct DownloadRequest: Codable, Sendable, Equatable {
             let plan = try await updater.plan(target: target, verify: verify, languages: languages)
             if kind == .languages || !plan.isEmpty || plan.target.buildConfig != install.buildConfig {
                 try await updater.apply(plan, progress: progress)
+            } else {
+                // Up to date and nothing to download: still give the game the
+                // index-file room an older Waypoint may have left out, which
+                // is what makes "Verify Files" fix such an install (issue #3).
+                try updater.repairIndexes(plan)
             }
         }
     }

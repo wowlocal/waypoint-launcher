@@ -346,6 +346,10 @@ public struct CASCInstaller: Sendable {
         let resuming = fm.fileExists(atPath: storageDir.appendingPathComponent(CASCStorageWriter.journalName).path)
         if !plan.storage.isEmpty || resuming {
             try await writeStorage(plan, to: storageDir, counter: counter, progress: progress)
+        } else if storageExisted {
+            // Nothing to store, so no index file gets rewritten: give an older
+            // Waypoint's short ones the room the game needs (issue #3).
+            try repairIndexes(in: storageDir)
         }
 
         // Loose files (the game's .app and friends), verified like updates.
@@ -396,6 +400,29 @@ public struct CASCInstaller: Sendable {
         }
         Log.notice(.install, "casc_apply_finished", nil, ["uid": install.uid, "version": plan.target.name,
                                                           "duration_ms": Int(Date().timeIntervalSince(started) * 1000)])
+    }
+
+    /// Repairs the local storage's index files without downloading anything:
+    /// an older Waypoint could leave them too short for the game's update
+    /// section, which made the game ask to be repaired even though every file
+    /// was there (issue #3). Verifying files and an update with nothing to
+    /// download both go through here; see `CASC.repairIndexReserve` for what
+    /// it does and does not touch.
+    @discardableResult
+    public func repairIndexes() throws -> CASC.IndexRepair {
+        guard RunningProcesses.inside(root).isEmpty else { throw UpdateError.gameRunning }
+        try BattleNet.ensureNotRunning()
+        return try repairIndexes(in: dataRoot.appendingPathComponent("data", isDirectory: true))
+    }
+
+    @discardableResult
+    private func repairIndexes(in storageDir: URL) throws -> CASC.IndexRepair {
+        let repair = try CASC.repairIndexReserve(storageDir)
+        if !repair.isEmpty {
+            Log.notice(.install, "storage_indexes_repaired", nil, ["uid": install.uid, "path": storageDir.path,
+                                                                   "repaired": repair.repaired.count, "skipped": repair.skipped.count])
+        }
+        return repair
     }
 
     /// Removes from the storage what none of the builds in `.build.info`

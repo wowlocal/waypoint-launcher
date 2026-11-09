@@ -120,8 +120,16 @@ func update(_ args: [String]) async {
             for file in p.loose.files.prefix(10) { print("  + \(file.path) (\(byteString(file.size)))") }
         }
         for path in plan.deletions.prefix(10) { print("  - \(path)") }
-        guard !args.contains("--dry-run"),
-              !plan.isEmpty || plan.target.buildConfig != install.buildConfig || (languages != nil && languages != from) else { return }
+        guard !args.contains("--dry-run") else { return }
+        guard !plan.isEmpty || plan.target.buildConfig != install.buildConfig || (languages != nil && languages != from) else {
+            // Nothing to download: index files an older Waypoint left too
+            // short for the game's update section still get their room back.
+            let repair = try updater.repairIndexes(plan)
+            if !repair.isEmpty {
+                print("repaired \(repair.repaired.count) index files (\(repair.skipped.count) left alone)")
+            }
+            return
+        }
         try await updater.apply(plan) { p in
             log(String(format: "%.1f%%  %@ / %@  (%d/%d files)", p.fraction * 100,
                        byteString(p.completedBytes), byteString(p.totalBytes), p.completedFiles, p.totalFiles))
