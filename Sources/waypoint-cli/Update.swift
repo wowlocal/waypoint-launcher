@@ -126,7 +126,7 @@ func update(_ args: [String]) async {
             // short for the game's update section still get their room back.
             let repair = try updater.repairIndexes(plan)
             if !repair.isEmpty {
-                print("repaired \(repair.repaired.count) index files (\(repair.skipped.count) left alone)")
+                print("repaired \(repair.repaired.count) index files")
             }
             return
         }

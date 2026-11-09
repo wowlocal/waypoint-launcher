@@ -253,7 +253,24 @@ public final class CASCStorageWriter {
         try fm.createDirectory(at: directory, withIntermediateDirectories: true)
         lock = try StorageLock(directory)
         journalURL = directory.appendingPathComponent(Self.journalName)
-        let saved = (try? Data(contentsOf: journalURL, options: .alwaysMapped)) ?? Data()
+        var saved = (try? Data(contentsOf: journalURL, options: .alwaysMapped)) ?? Data()
+
+        // All 16 published indexes are authoritative, even if an old fresh
+        // install's journal survived beside them (or Battle.net completed the
+        // folder meanwhile). Resume from those indexes, not as new storage:
+        // the latter would replace archives and discard existing entries.
+        if saved.count >= 16, Self.marker(in: saved.dropFirst(16)) == nil,
+           let state = try CASC.scanStorage(directory) {
+            guard allowExisting else { throw TACTError.unsupported("writing over the existing storage in \(directory.path)") }
+            guard let last = state.archiveSizes.indices.last,
+                  state.archiveSizes[last] >= UInt64(CASC.segmentHeadersSize),
+                  let key = state.baseKey, try StoredKeys.load(directory) != nil
+            else { throw TACTError.malformed("Cannot safely resume the stale journal in \(directory.path). Use Battle.net's Scan and Repair") }
+            let header = key + Self.record(key: Self.markerKey, archive: last, offset: state.archiveSizes[last], size: 0, flag: 2)
+            try header.write(to: journalURL, options: .atomic)
+            saved = header
+            Log.notice(.install, "stale_new_storage_journal_rebased", nil, ["path": directory.path])
+        }
 
         var start: (archive: Int, offset: UInt64)?
         // The journal's first 16 bytes hold the container's base key.
@@ -404,6 +421,15 @@ public final class CASCStorageWriter {
 
     private static func record(key: Data, archive: Int, offset: UInt64, size: UInt32, flag: UInt8) -> Data {
         key.prefix(16) + Data(CASC.le16(UInt16(archive))) + Data(CASC.le64(offset)) + Data(CASC.le32(size)) + Data([flag])
+    }
+
+    /// Only a recognizable update marker can resume an otherwise empty
+    /// update. A truncated marker must never be treated as a fresh storage.
+    static func hasUnfinishedUpdate(_ directory: URL) -> Bool {
+        guard let handle = try? FileHandle(forReadingFrom: directory.appendingPathComponent(journalName)) else { return false }
+        defer { try? handle.close() }
+        guard let head = try? handle.read(upToCount: 16 + journalRecordSize), head.count >= 16 else { return false }
+        return marker(in: head.dropFirst(16)) != nil
     }
 
     /// Whether the folder holds a new storage's journal (one without an
@@ -747,20 +773,19 @@ extension CASC {
     /// long enough already and comes out untouched, so this can run on any
     /// install, including one Battle.net manages.
     ///
-    /// Nothing happens while an install or update is unfinished: its writer
-    /// writes the index files itself when it finishes.
+    /// An unfinished journal must be resumed by the writer, which rewrites
+    /// the indexes itself. Report it rather than silently completing a repair.
     @discardableResult
     public static func repairIndexReserve(_ directory: URL) throws -> IndexRepair {
         let fm = FileManager.default
         var result = IndexRepair()
-        guard fm.fileExists(atPath: directory.path),
-              !fm.fileExists(atPath: directory.appendingPathComponent(CASCStorageWriter.journalName).path)
-        else { return result }
+        guard fm.fileExists(atPath: directory.path) else { return result }
+        let journal = directory.appendingPathComponent(CASCStorageWriter.journalName)
+        guard !fm.fileExists(atPath: journal.path) else { throw UpdateError.unfinishedStorage(directory.path) }
         let lock = try StorageLock(directory)
         defer { lock.release() }
         // A writer may have left a journal while this repair waited for its lock.
-        guard !fm.fileExists(atPath: directory.appendingPathComponent(CASCStorageWriter.journalName).path)
-        else { return result }
+        guard !fm.fileExists(atPath: journal.path) else { throw UpdateError.unfinishedStorage(directory.path) }
         guard let state = try scanStorage(directory) else { return result }
 
         for bucket in 0..<16 {

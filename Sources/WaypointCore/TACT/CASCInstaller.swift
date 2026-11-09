@@ -65,8 +65,19 @@ public struct CASCInstallPlan: Sendable {
         let total = totalSize
         return total - min(storedBytes, total)
     }
-    /// Nothing to download or delete (configs and records may still change).
-    public var isEmpty: Bool { storage.isEmpty && loose.isEmpty && !setsLanguages }
+    /// An interrupted update must finish its journal even if the current
+    /// selection needs none of the files it was downloading. A stale fresh-
+    /// install journal can also be rebased safely onto fully published indexes.
+    public var resumesStorage: Bool {
+        let directory = URL(fileURLWithPath: install.installPath, isDirectory: true)
+            .appendingPathComponent(config.dataDirectory, isDirectory: true)
+            .appendingPathComponent("data", isDirectory: true)
+        guard FileManager.default.fileExists(atPath: directory.appendingPathComponent(CASCStorageWriter.journalName).path) else { return false }
+        return CASCStorageWriter.hasUnfinishedUpdate(directory) || (try? CASC.scanStorage(directory)) != nil
+    }
+
+    /// Nothing to download, delete, or finish (configs and records may still change).
+    public var isEmpty: Bool { storage.isEmpty && loose.isEmpty && !setsLanguages && !resumesStorage }
 }
 
 /// Installs or updates a game that keeps its data in local CASC storage (WoW,
@@ -110,6 +121,30 @@ public struct CASCInstaller: Sendable {
 
     // MARK: Plan
 
+    /// The Agent can omit active_tag_string while .build.info still records
+    /// the selection actually installed. Never borrow another flavor's,
+    /// region's, platform's, or build's tags from a shared installation.
+    func installedTags() -> String {
+        if let tags = install.tagString.nonEmpty { return tags }
+        if !InstallContent.isFresh(install),
+           let text = try? String(contentsOf: root.appendingPathComponent(".build.info"), encoding: .utf8) {
+            let rows = BPSV(text).rows.filter { row in
+                guard row["Active"] == "1", let product = row["Product"],
+                      product == install.productCode || product == install.uid else { return false }
+                guard row["Branch"]?.caseInsensitiveCompare(region.rawValue) == .orderedSame else { return false }
+                if let build = install.buildConfig.nonEmpty {
+                    guard row["Build Key"]?.caseInsensitiveCompare(build) == .orderedSame else { return false }
+                } else if let version = install.version.nonEmpty {
+                    guard row["Version"] == version else { return false }
+                } else { return false }
+                return InstallPlatform.from(tags: row["Tags"]) == install.platform
+            }
+            let selections = Set(rows.compactMap { $0["Tags"].nonEmpty })
+            if selections.count == 1, let tags = selections.first { return tags }
+        }
+        return config.tagString(region: region, languages: install.languages)
+    }
+
     /// With `verify`, loose files are hashed instead of trusting the installed
     /// build's manifest (a repair). With `languages`, the install switches to
     /// them: storage gets their files (the old ones' stay, as for any other
@@ -122,7 +157,7 @@ public struct CASCInstaller: Sendable {
         let target: ProductVersion
         if let requested { target = requested } else { target = try await versions.latest(product: install.productCode, region: region) }
         let cdn = try await versions.cdn(product: install.productCode, region: region)
-        let installedTags = install.tagString.nonEmpty ?? config.tagString(region: region, languages: install.languages)
+        let installedTags = self.installedTags()
         let contentTags = InstallContent.plannedTags(for: install, from: installedTags)
         var planned = languages.map { install.with($0, tags: contentTags) } ?? install
         if languages == nil { planned.tagString = contentTags }
@@ -280,7 +315,8 @@ public struct CASCInstaller: Sendable {
         let fm = FileManager.default
         guard RunningProcesses.inside(root).isEmpty else { throw UpdateError.gameRunning }
         try BattleNet.ensureNotRunning()
-        try install.platform.claim(install: install)
+        // Restore traversal on known legacy data-directory modes before
+        // inspecting storage. This changes permissions, not build data.
         if install.platform == .macOS { try BattleNetInstallMetadata.prepareDataDirectory(dataRoot) }
         let storageDir = dataRoot.appendingPathComponent("data", isDirectory: true)
         // An update (or another product joining a shared storage): afterwards,
@@ -292,6 +328,13 @@ public struct CASCInstaller: Sendable {
         let available = (try? root.deletingLastPathComponent().resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
             .volumeAvailableCapacityForImportantUsage).flatMap { $0 }.map { UInt64($0) } ?? .max
         guard available > needed + (1 << 30) else { throw UpdateError.notEnoughSpace(needed: needed, available: available) }
+        // Fail an unrepaired index before writing configs, loose files, or
+        // build records. A pending writer will rewrite the indexes itself.
+        if plan.storage.isEmpty, storageExisted,
+           !fm.fileExists(atPath: storageDir.appendingPathComponent(CASCStorageWriter.journalName).path) {
+            try repairIndexes(in: storageDir)
+        }
+        try install.platform.claim(install: install)
         Log.notice(.install, "casc_apply_started", nil, ["uid": install.uid, "bytes": needed, "resumed_bytes": plan.storedBytes,
                                                          "path": root.path])
 
@@ -346,10 +389,6 @@ public struct CASCInstaller: Sendable {
         let resuming = fm.fileExists(atPath: storageDir.appendingPathComponent(CASCStorageWriter.journalName).path)
         if !plan.storage.isEmpty || resuming {
             try await writeStorage(plan, to: storageDir, counter: counter, progress: progress)
-        } else if storageExisted {
-            // Nothing to store, so no index file gets rewritten: give an older
-            // Waypoint's short ones the room the game needs (issue #3).
-            try repairIndexes(in: storageDir)
         }
 
         // Loose files (the game's .app and friends), verified like updates.
@@ -390,7 +429,10 @@ public struct CASCInstaller: Sendable {
         record.tagString = plan.install.tagString ?? config.tagString(region: region, languages: plan.install.languages)
         try store.record(install: record, InstalledBuild(buildConfig: plan.target.buildConfig, version: plan.target.name, install: record,
                                                           chosenLanguages: plan.setsLanguages, replacedTags: plan.replacedTags))
-        if storageExisted {
+        // A shared storage's journal can belong to a paused sibling product.
+        // Its new build is not recorded yet, so cleanup would discard its
+        // downloaded files. Keep them when finishing any interrupted write.
+        if storageExisted && !resuming {
             // Best effort: the update itself is done either way.
             do {
                 _ = try await cleanStorage()
@@ -410,8 +452,11 @@ public struct CASCInstaller: Sendable {
     /// it does and does not touch.
     @discardableResult
     public func repairIndexes() throws -> CASC.IndexRepair {
+        guard config.platform == install.platform else { throw TACTError.malformed("Product configuration platform does not match the installation") }
+        try install.platform.validate(install: install)
         guard RunningProcesses.inside(root).isEmpty else { throw UpdateError.gameRunning }
         try BattleNet.ensureNotRunning()
+        if install.platform == .macOS { try BattleNetInstallMetadata.prepareDataDirectory(dataRoot) }
         return try repairIndexes(in: dataRoot.appendingPathComponent("data", isDirectory: true))
     }
 
@@ -422,6 +467,7 @@ public struct CASCInstaller: Sendable {
             Log.notice(.install, "storage_indexes_repaired", nil, ["uid": install.uid, "path": storageDir.path,
                                                                    "repaired": repair.repaired.count, "skipped": repair.skipped.count])
         }
+        guard repair.skipped.isEmpty else { throw UpdateError.indexRepairIncomplete(storageDir.path, repair.skipped) }
         return repair
     }
 

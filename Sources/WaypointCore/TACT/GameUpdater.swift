@@ -62,6 +62,10 @@ public enum UpdateError: Error, CustomStringConvertible {
     case storageBusy(String)
     /// Another update wrote to the storage while it was being checked for cleaning.
     case storageChanged
+    /// A journal appeared after planning; retrying the plan resumes its writer.
+    case unfinishedStorage(String)
+    /// Some indexes were deliberately left untouched because they could not be repaired safely.
+    case indexRepairIncomplete(String, [String])
 
     public var description: String {
         switch self {
@@ -76,6 +80,9 @@ public enum UpdateError: Error, CustomStringConvertible {
         case .unsafePath(let path): "Refusing to write outside the game folder: \(path)"
         case .storageBusy(let path): "Another install or update is writing to \(path). Try again once it has finished"
         case .storageChanged: "Another update changed the game data while it was being checked"
+        case .unfinishedStorage(let path): "An unfinished install or update needs to finish in \(path). Resume it or try Verify Files again"
+        case .indexRepairIncomplete(let path, let files):
+            "Could not repair \(files.count) storage index file(s) in \(path). Use Battle.net's Scan and Repair"
         }
     }
 }

@@ -193,6 +193,7 @@ public struct GameUpdate: Sendable {
     @discardableResult
     public func repairIndexes(_ plan: GameUpdatePlan) throws -> CASC.IndexRepair {
         guard plan.install.isSameInstallation(as: install) else { throw TACTError.malformed("Update plan belongs to another installation") }
+        try install.platform.validate(install: install)
         guard case .casc(let p) = plan else { return CASC.IndexRepair() }
         return try CASCInstaller(product: p.product, install: p.install, config: p.config, versions: versions, store: store)
             .repairIndexes()

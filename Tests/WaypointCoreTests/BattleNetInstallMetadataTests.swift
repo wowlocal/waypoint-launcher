@@ -210,7 +210,8 @@ private struct MetadataFixture {
         try ProtoReader($0).replacingBytes(9, with: Data("OtherContent".utf8))
     }
     #expect(try BattleNetInstallMetadata.updatingContentSelection(record, for: install) == record)
-    // Half a selection is not one: the other set's files were never installed.
+    // HighRes in one set selects files, but does not establish that every set
+    // selects it. Do not advertise a complete selection to the Agent.
     var partial = install
     partial.tagString = "OSX x86_64 arm64 EU? HighRes ruRU text?:OSX x86_64 arm64 EU? enUS speech?"
     #expect(try BattleNetInstallMetadata.updatingContentSelection(record, for: partial) == record)

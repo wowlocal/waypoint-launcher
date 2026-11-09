@@ -683,7 +683,12 @@ private func shortIndexStorage(_ dir: URL, entries: [CASC.IndexEntry], version: 
     defer { try? fm.removeItem(at: busy) }
     let (busyURL, busyBefore) = try shortIndexStorage(busy, entries: entries)
     try Data(repeating: 0, count: 16).write(to: busy.appendingPathComponent(CASCStorageWriter.journalName))
-    #expect(try CASC.repairIndexReserve(busy).isEmpty)
+    do {
+        _ = try CASC.repairIndexReserve(busy)
+        Issue.record("An unfinished journal must be reported")
+    } catch UpdateError.unfinishedStorage(let path) {
+        #expect(path == busy.path)
+    }
     #expect(try Data(contentsOf: busyURL) == busyBefore)
 
     // Nothing to repair where there is no storage.
@@ -711,6 +716,197 @@ private func shortIndexStorage(_ dir: URL, entries: [CASC.IndexEntry], version: 
         #expect(updateSectionRoom(size: file.count, sortedEnd: parsed.sortedEnd) >= 0x7800)
     }
     #expect(try CASC.loadBucket(dir, bucket: 0, version: 2).count >= entries.count)
+}
+
+private final class IndexRepairRequests: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+    func record() { lock.withLock { value += 1 } }
+    var count: Int { lock.withLock { value } }
+}
+
+private final class IndexRepairOfflineProtocol: URLProtocol, @unchecked Sendable {
+    static let requests = IndexRepairRequests()
+    override class func canInit(with request: URLRequest) -> Bool { true }
+    override class func canonicalRequest(for request: URLRequest) -> URLRequest { request }
+    override func startLoading() {
+        Self.requests.record()
+        client?.urlProtocol(self, didFailWithError: URLError(.unsupportedURL))
+    }
+    override func stopLoading() {}
+}
+
+private func indexRepairPlan(at root: URL) throws -> CASCInstallPlan {
+    let product = try #require(InstallableProduct.fallbackNative.first { $0.productCode == "s2" })
+    let target = ProductVersion(region: "eu", buildConfig: String(repeating: "a", count: 32),
+                                cdnConfig: String(repeating: "b", count: 32), buildID: 1, name: "1.0")
+    let install = ProductInstall(uid: "s2", productCode: "s2", installPath: root.path, region: "eu",
+                                 version: target.name, buildConfig: target.buildConfig, tagString: "OSX enUS")
+    let config = try ProductConfig(json: Data(#"{"all":{"config":{"data_dir":"SC2Data/"}}}"#.utf8))
+    let cdn = CDNClient(product: "s2", path: "tpr/test", servers: [])
+    let loose = UpdatePlan(install: install, target: target, cdn: cdn, files: [], deletions: [])
+    return CASCInstallPlan(install: install, product: product, config: config, target: target, cdn: cdn,
+                           buildConfig: Data(), cdnConfig: Data(), archives: [], storage: [], loose: loose)
+}
+
+/// Both the app and CLI use isEmpty to choose between apply and a local
+/// repair. A leftover backfill journal must take apply even at the same build.
+@Test(.enabled(if: (try? BattleNet.ensureNotRunning()) != nil), arguments: [true, false])
+func zeroDownloadUpdateFinishesAStrandedJournalAndRepairsOldIndexes(updateJournal: Bool) async throws {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("waypoint-journal-\(UUID())")
+    defer { try? fm.removeItem(at: root) }
+    let dir = root.appendingPathComponent("SC2Data/data")
+    _ = try shortIndexStorage(dir, entries: indexEntries(1_819))
+    let archive = dir.appendingPathComponent("data.000")
+    let plan = try indexRepairPlan(at: root)
+    #expect(plan.isEmpty)
+    if updateJournal {
+        try autoreleasepool {
+            let paused = try CASCStorageWriter(directory: dir, allowExisting: true)
+            try paused.append(encodedKey: storageKey(42), blob: storageBlob(42), fullKey: false)
+        }
+    } else {
+        try Data(repeating: 0xA5, count: 16).write(to: dir.appendingPathComponent(CASCStorageWriter.journalName))
+    }
+    let before = try Data(contentsOf: archive)
+    #expect(plan.resumesStorage)
+    #expect(!GameUpdatePlan.casc(plan).isEmpty)
+    #expect(plan.downloadSize == 0)
+
+    let configuration = URLSessionConfiguration.ephemeral
+    configuration.protocolClasses = [IndexRepairOfflineProtocol.self]
+    let session = URLSession(configuration: configuration)
+    defer { session.invalidateAndCancel() }
+    var versions = VersionService(session: session)
+    versions.retry.delays = []
+    let store = InstallStateStore(file: root.appendingPathComponent("state.json"))
+    let updater = GameUpdate(install: plan.install, versions: versions, store: store)
+    let requestsBefore = IndexRepairOfflineProtocol.requests.count
+    // The same dispatch decision as DownloadRequest and waypoint-cli update.
+    if GameUpdatePlan.casc(plan).isEmpty {
+        try updater.repairIndexes(.casc(plan))
+    } else {
+        try await updater.apply(.casc(plan))
+    }
+    #expect(!fm.fileExists(atPath: dir.appendingPathComponent(CASCStorageWriter.journalName).path))
+    #expect(plan.isEmpty)
+    #expect(try Data(contentsOf: archive) == before)
+    if updateJournal { #expect(try StoredKeys.load(dir)?.contains(Key16(storageKey(42))!) == true) }
+    let state = try #require(try CASC.scanStorage(dir))
+    for bucket in 0..<16 {
+        let file = try Data(contentsOf: dir.appendingPathComponent(CASC.indexFileName(bucket: bucket, version: state.versions[bucket])))
+        let parsed = try CASC.parseIndexFile(file)
+        #expect(file.count == CASC.indexFileSize(sortedEnd: parsed.sortedEnd))
+    }
+    #expect(store.load()[plan.install.uid]?.buildConfig == plan.target.buildConfig)
+    #expect(IndexRepairOfflineProtocol.requests.count == requestsBefore, "Journal recovery must not run cleanup or make network requests")
+    #expect(try updater.repairIndexes(.casc(plan)).isEmpty)
+}
+
+/// Covers both a crash after publishing a first install's indexes and an
+/// unrelated completed installation beside a stale 16-byte journal header.
+@Test(arguments: [true, false])
+func markerlessJournalsNeverReplaceCompletedStorage(publishedJournal: Bool) throws {
+    let fm = FileManager.default
+    let dir = fm.temporaryDirectory.appendingPathComponent("waypoint-stale-journal-\(UUID())")
+    defer { try? fm.removeItem(at: dir) }
+    let writer = try CASCStorageWriter(directory: dir)
+    for i in 0..<3 { try writer.append(encodedKey: storageKey(i), blob: storageBlob(i), fullKey: false) }
+    let journal = dir.appendingPathComponent(CASCStorageWriter.journalName)
+    let saved = try Data(contentsOf: journal)
+    try writer.finish()
+    let archive = dir.appendingPathComponent("data.000")
+    let before = try Data(contentsOf: archive)
+    try (publishedJournal ? saved : Data(repeating: 0xA5, count: 16)).write(to: journal)
+    let journalBefore = try Data(contentsOf: journal)
+    #expect(throws: TACTError.self) { try CASCStorageWriter(directory: dir) }
+    #expect(try Data(contentsOf: journal) == journalBefore)
+    #expect(try Data(contentsOf: archive) == before)
+
+    let resumed = try CASCStorageWriter(directory: dir, allowExisting: true)
+    for i in 0..<3 { #expect(resumed.contains(storageKey(i))) }
+    try resumed.append(encodedKey: storageKey(42), blob: storageBlob(42), fullKey: false)
+    try resumed.finish()
+
+    let after = try Data(contentsOf: archive)
+    #expect(after.prefix(before.count) == before)
+    #expect(after.count == before.count + CASC.headerSize + storageBlob(42).count)
+    let stored = try #require(try StoredKeys.load(dir))
+    for i in [0, 1, 2, 42] { #expect(stored.contains(Key16(storageKey(i))!)) }
+    #expect(!fm.fileExists(atPath: journal.path))
+    try expectStoredIndexesOnly(dir, version: 2)
+}
+
+/// A journal can appear after a no-download decision; the direct repair
+/// must fail visibly rather than claiming success while leaving it untouched.
+@Test(.enabled(if: (try? BattleNet.ensureNotRunning()) != nil))
+func journalAppearingAfterPlanningIsReported() throws {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("waypoint-journal-\(UUID())")
+    defer { try? fm.removeItem(at: root) }
+    let dir = root.appendingPathComponent("SC2Data/data")
+    let (url, before) = try shortIndexStorage(dir, entries: indexEntries(1_819))
+    let plan = try indexRepairPlan(at: root)
+    #expect(plan.isEmpty)
+    try Data(repeating: 0, count: 16).write(to: dir.appendingPathComponent(CASCStorageWriter.journalName))
+    // A re-plan can now recover the stale header using the published indexes.
+    // The already-chosen direct repair still reports the late journal safely.
+    #expect(plan.resumesStorage)
+    #expect(!plan.isEmpty)
+    do {
+        _ = try GameUpdate(install: plan.install, store: InstallStateStore(file: root.appendingPathComponent("state.json")))
+            .repairIndexes(.casc(plan))
+        Issue.record("An unfinished journal must not silently complete a repair")
+    } catch UpdateError.unfinishedStorage(let path) {
+        #expect(path == dir.path)
+    }
+    #expect(try Data(contentsOf: url) == before)
+}
+
+@Test(.enabled(if: (try? BattleNet.ensureNotRunning()) != nil), arguments: [0o755, 0o666])
+@MainActor func skippedIndexRepairFailsTheJobWithAnActionableMessage(dataMode: Int) async throws {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("waypoint-skipped-index-\(UUID())")
+    defer { try? fm.removeItem(at: root) }
+    let dir = root.appendingPathComponent("SC2Data/data")
+    let (url, before) = try shortIndexStorage(dir, entries: indexEntries(1_819), tail: [0x5C])
+    try fm.setAttributes([.posixPermissions: dataMode], ofItemAtPath: dir.path)
+    let plan = try indexRepairPlan(at: root)
+    let updater = GameUpdate(install: plan.install, store: InstallStateStore(file: root.appendingPathComponent("state.json")))
+    let job = DownloadJob(uid: plan.install.uid, category: .gameUpdate) { _ in
+        _ = try updater.repairIndexes(.casc(plan))
+    }
+    let message = UpdateError.indexRepairIncomplete(dir.path, [url.lastPathComponent]).description
+    #expect(await job.run() == .failed(message))
+    #expect(message.contains("Scan and Repair"))
+    #expect(try Data(contentsOf: url) == before)
+}
+
+@Test(.enabled(if: (try? BattleNet.ensureNotRunning()) != nil), arguments: [0o755, 0o666])
+func anApplyWithAnUnrepairableIndexFailsBeforeWritingBuildData(dataMode: Int) async throws {
+    let fm = FileManager.default
+    let root = fm.temporaryDirectory.appendingPathComponent("waypoint-index-preflight-\(UUID())")
+    defer { try? fm.removeItem(at: root) }
+    let dir = root.appendingPathComponent("SC2Data/data")
+    let (url, before) = try shortIndexStorage(dir, entries: indexEntries(1_819), tail: [0x5C])
+    try fm.setAttributes([.posixPermissions: dataMode], ofItemAtPath: dir.path)
+    var plan = try indexRepairPlan(at: root)
+    plan.setsLanguages = true // A switch to already-downloaded content still applies.
+    #expect(!plan.isEmpty)
+    let store = InstallStateStore(file: root.appendingPathComponent("state.json"))
+    do {
+        try await GameUpdate(install: plan.install, store: store).apply(.casc(plan))
+        Issue.record("An apply must report the unrepairable index before its first write")
+    } catch UpdateError.indexRepairIncomplete(let path, let files) {
+        #expect(path == dir.path)
+        #expect(files == [url.lastPathComponent])
+    }
+    for path in ["SC2Data/config", "SC2Data/indices", ".build.info", ".waypoint-platform", "state.json"] {
+        #expect(!fm.fileExists(atPath: root.appendingPathComponent(path).path))
+    }
+    #expect(try Data(contentsOf: url) == before)
+    #expect(store.load().isEmpty)
 }
 
 // MARK: - Battle.net detection
