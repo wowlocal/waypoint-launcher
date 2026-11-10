@@ -26,3 +26,14 @@ import Testing
     let directory = WineProcesses.currentDirectory(of: child.processIdentifier)?.resolvingSymlinksInPath().path
     #expect(directory == child.currentDirectoryURL?.resolvingSymlinksInPath().path)
 }
+
+@Test func recognizesWineLoadersByExecutableName() {
+    #expect(WineProcesses.isLoader("/Users/me/Library/Caches/Waypoint/wine/bin/wine64-preloader"))
+    #expect(WineProcesses.isLoader("/opt/wine/bin/wine"))
+    #expect(WineProcesses.isLoader("wine64"))
+    #expect(!WineProcesses.isLoader("/Applications/wine64.app/Contents/MacOS/Launcher"))
+    #expect(!WineProcesses.isLoader("/usr/local/bin/wine64/helper"))
+    #expect(!WineProcesses.isLoader("/usr/local/bin/winery"))
+    #expect(!WineProcesses.isLoader("/usr/local/bin/\u{301}wine"))
+    #expect(!WineProcesses.isLoader(""))
+}

@@ -75,7 +75,10 @@ public final class DownloadQueue {
 
     public var hasActiveJobs: Bool { jobs.values.contains { $0.state == .running || $0.state == .pausing } }
 
-    public func recoverLegacyInstalls(events: [Diagnostics.Event], products: [InstallableProduct] = InstallableProduct.all) {
+    /// `events` is read only while the one-time import is still to do:
+    /// parsing the logs takes about half a second per megabyte.
+    public func recoverLegacyInstalls(events: @autoclosure () -> [Diagnostics.Event],
+                                      products: [InstallableProduct] = InstallableProduct.all) {
         let marker = store.directory.appendingPathComponent("legacy-imported")
         guard !FileManager.default.fileExists(atPath: marker.path) else { return }
         do {
@@ -83,7 +86,7 @@ public final class DownloadQueue {
             let lease = try store.claim(key: "legacy-import")
             try withExtendedLifetime(lease) {
                 guard !FileManager.default.fileExists(atPath: marker.path) else { return }
-                for record in LegacyDownloadRecovery.records(events: events, products: products) {
+                for record in LegacyDownloadRecovery.records(events: events(), products: products) {
                     guard jobs[record.request.key] == nil,
                           !FileManager.default.fileExists(atPath: store.file(for: record.request.key).path) else { continue }
                     let jobLease = try store.claim(key: record.request.key)

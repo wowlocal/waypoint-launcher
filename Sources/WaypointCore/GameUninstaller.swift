@@ -171,13 +171,17 @@ public struct GameUninstaller: Sendable {
     /// moving fails, everything is put back as it was.
     @discardableResult
     public func remove() async throws -> UninstallPlan {
-        let plan = try plan()
-        guard RunningProcesses.inside(plan.root).isEmpty else {
-            throw UninstallError.gameRunning(sharedFolder: plan.sharesStorage ? plan.root.lastPathComponent : nil)
+        // Not while Battle.net's records are being repaired: a repair that
+        // had already listed this game would write its records again.
+        try BattleNetInstallMetadata.exclusively {
+            let plan = try plan()
+            guard RunningProcesses.inside(plan.root).isEmpty else {
+                throw UninstallError.gameRunning(sharedFolder: plan.sharesStorage ? plan.root.lastPathComponent : nil)
+            }
+            try BattleNet.ensureNotRunning()
+            try carryOut(plan)
+            return plan
         }
-        try BattleNet.ensureNotRunning()
-        try carryOut(plan)
-        return plan
     }
 
     func carryOut(_ plan: UninstallPlan) throws {
