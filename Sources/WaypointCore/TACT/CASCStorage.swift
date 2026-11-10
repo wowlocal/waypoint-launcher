@@ -735,10 +735,10 @@ extension CASC {
             // A shared storage may have a paused sibling product's journal.
             // Preserve unrelated records rather than guessing their format.
             guard let i = index(of: key.prefix9) else { return true }
-            return valid(entry, item: items[i])
+            return valid(entry, item: items[i], requireCanonicalHeader: true)
         }
 
-        func valid(_ entry: IndexEntry, item: StorageItem) -> Bool {
+        func valid(_ entry: IndexEntry, item: StorageItem, requireCanonicalHeader: Bool) -> Bool {
             guard entry.size > UInt32(headerSize), entry.offset >= UInt64(segmentHeadersSize) else { return false }
             if mappedArchive != entry.archive {
                 mappedArchive = entry.archive
@@ -748,14 +748,21 @@ extension CASC {
             guard let mapped, entry.offset <= UInt64(mapped.count),
                   UInt64(entry.size) <= UInt64(mapped.count) - entry.offset else { return false }
             let start = mapped.startIndex + Int(entry.offset)
-            let header = mapped[start..<start + headerSize]
-            let storedKey = Data(header.prefix(16).reversed())
-            guard storedKey.prefix(9) == item.encodedKey.prefix(9) else { return false }
-            let flags = UInt16(header[header.startIndex + 20]) | UInt16(header[header.startIndex + 21]) << 8
-            let expected = entryHeader(encodedKey: storedKey, blobSize: Int(entry.size) - headerSize,
-                                       archive: entry.archive, offset: entry.offset, flags: flags, fullKey: true)
-            guard header == expected else { return false }
+            // Native clients accept zeroed envelopes and older header checksums.
+            // The index locates the payload; BLTE authenticates its full key and
+            // chunks. Only our own journal must retain the header we wrote.
+            if requireCanonicalHeader {
+                let header = mapped[start..<start + headerSize]
+                let storedKey = Data(header.prefix(16).reversed())
+                guard storedKey.prefix(9) == item.encodedKey.prefix(9) else { return false }
+                let flags = UInt16(header[header.startIndex + 20]) | UInt16(header[header.startIndex + 21]) << 8
+                let expected = entryHeader(encodedKey: storedKey, blobSize: Int(entry.size) - headerSize,
+                                           archive: entry.archive, offset: entry.offset, flags: flags, fullKey: true)
+                guard header == expected else { return false }
+            }
             let blob = mapped[start + headerSize..<start + Int(entry.size)]
+            // Raw patch manifests retain size-only validation; same-size
+            // payload corruption is not detected by this check.
             if item.isRaw { return item.size == 0 || UInt64(blob.count) == item.size }
             do { try BLTE.verify(blob, encodedKey: item.encodedKey); return true }
             catch { return false }
@@ -776,7 +783,7 @@ extension CASC {
             for (n, entry) in entries.enumerated() {
                 if n % 256 == 0 { try Task.checkCancellation() }
                 guard let key = Key9(entry.key), let i = verifier.index(of: key), !valid[i] else { continue }
-                valid[i] = verifier.valid(entry, item: verifier.items[i])
+                valid[i] = verifier.valid(entry, item: verifier.items[i], requireCanonicalHeader: false)
             }
         }
         return valid

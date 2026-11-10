@@ -149,7 +149,7 @@ public struct CASCInstaller: Sendable {
     }
 
     /// With `verify`, loose files are hashed and stored blobs are checked
-    /// against their archive bounds, headers and BLTE checksums (a repair).
+    /// against their archive bounds and BLTE checksums (a repair).
     /// With `languages`, the install switches to them: storage gets their
     /// files (the old ones' stay, as for any other build data), and loose
     /// files change over.

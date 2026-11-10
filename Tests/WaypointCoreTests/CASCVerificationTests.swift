@@ -131,6 +131,94 @@ private struct VerificationFixture {
     #expect(try Data(contentsOf: fixture.archive) == before)
 }
 
+private enum ClientEnvelope: CaseIterable, Sendable {
+    case zeroed, legacyChecksums
+
+    func replacing(_ header: Data) -> Data {
+        if self == .zeroed { return Data(count: CASC.headerSize) }
+        var bytes = header
+        bytes[bytes.startIndex + 22] ^= 1
+        bytes[bytes.startIndex + 26] ^= 1
+        return bytes
+    }
+}
+
+@Test(arguments: ClientEnvelope.allCases, [false, true])
+private func nativeCASCEnvelopesDoNotOverridePayloadChecks(envelope: ClientEnvelope, corruptPayload: Bool) async throws {
+    let fixture = try VerificationFixture()
+    defer { fixture.cleanUp() }
+    let state = try #require(try CASC.scanStorage(fixture.storage))
+    var bytes = try Data(contentsOf: fixture.archive)
+    for item in fixture.items {
+        let entry = try #require(try CASC.loadBucket(fixture.storage, bucket: item.key.prefix9.bucket,
+                                                   version: state.versions[item.key.prefix9.bucket])
+            .first { $0.key == item.key.prefix9.data })
+        let range = Int(entry.offset)..<Int(entry.offset) + CASC.headerSize
+        bytes.replaceSubrange(range, with: envelope.replacing(Data(bytes[range])))
+    }
+    if corruptPayload { bytes[bytes.count - 1] ^= 1 }
+    try bytes.write(to: fixture.archive)
+
+    let plan = try await fixture.installer.plan(target: fixture.target, verify: true)
+
+    #expect(plan.storage.map(\.key) == (corruptPayload ? [fixture.damagedItem.key] : []))
+    #expect(plan.isEmpty == !corruptPayload)
+    #expect(try Data(contentsOf: fixture.archive) == bytes, "Verification never rewrites native envelopes")
+}
+
+@Test(arguments: ClientEnvelope.allCases)
+private func nativeRawPatchEnvelopesRetainSizeAndBoundsChecks(envelope: ClientEnvelope) throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("waypoint-raw-patch-\(UUID())")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let patch = Data("raw patch manifest".utf8)
+    let key = Key16(Data(Insecure.MD5.hash(data: patch)))!
+    var item = StorageItem(key: key, size: UInt64(patch.count), fullKey: true, kind: .patch, isRaw: true)
+    let writer = try CASCStorageWriter(directory: directory)
+    try writer.append(key: key, blob: patch, fullKey: true)
+    try writer.finish()
+    let archive = directory.appendingPathComponent("data.000")
+    var bytes = try Data(contentsOf: archive)
+    let range = CASC.segmentHeadersSize..<CASC.segmentHeadersSize + CASC.headerSize
+    bytes.replaceSubrange(range, with: envelope.replacing(Data(bytes[range])))
+    try bytes.write(to: archive)
+
+    #expect(try CASC.verifiedStorage(directory, items: [item]) == [true])
+    item.size = 0
+    #expect(try CASC.verifiedStorage(directory, items: [item]) == [true], "A raw patch may have no manifest size")
+    item.size = UInt64(patch.count) + 1
+    #expect(try CASC.verifiedStorage(directory, items: [item]) == [false], "Raw patch records still require their known size")
+    item.size = UInt64(patch.count)
+    try Data(bytes.dropLast()).write(to: archive)
+    #expect(try CASC.verifiedStorage(directory, items: [item]) == [false], "A truncated archive cannot satisfy its index")
+}
+
+@Test(.enabled(if: (try? BattleNet.ensureNotRunning()) != nil), arguments: ClientEnvelope.allCases)
+private func interruptedRepairStillRejectsNoncanonicalJournalHeaders(envelope: ClientEnvelope) async throws {
+    let fixture = try VerificationFixture()
+    defer { fixture.cleanUp() }
+    try fixture.damage(.corrupt)
+    let repair = try await fixture.installer.plan(target: fixture.target, verify: true)
+    let offset = try Data(contentsOf: fixture.archive).count
+    var writer: CASCStorageWriter? = try CASCStorageWriter(directory: fixture.storage, allowExisting: true,
+                                                        verifying: repair.storage)
+    try writer!.append(key: fixture.damagedItem.key, blob: fixture.blobs.last!, fullKey: false)
+    writer = nil
+    var bytes = try Data(contentsOf: fixture.archive)
+    let range = offset..<offset + CASC.headerSize
+    bytes.replaceSubrange(range, with: envelope.replacing(Data(bytes[range])))
+    try bytes.write(to: fixture.archive)
+
+    var resumed = try await fixture.installer.plan(target: fixture.target, verify: true)
+    #expect(resumed.storage.map(\.key) == [fixture.damagedItem.key])
+    #expect(resumed.storedBytes == 0, "Our journal must not publish a damaged envelope")
+    let server = try DownloadServer()
+    defer { server.stop() }
+    resumed.cdn = try fixture.serve(server)
+    try await fixture.installer.apply(resumed)
+    #expect(try await fixture.installer.plan(target: fixture.target, verify: true).isEmpty)
+    #expect(try server.requests().count == 1)
+}
+
 @Test(.enabled(if: (try? BattleNet.ensureNotRunning()) != nil), arguments: VerificationFixture.Damage.allCases)
 private func verifyCASCRepairsMissingTruncatedAndCorruptArchives(damage: VerificationFixture.Damage) async throws {
     let fixture = try VerificationFixture()
