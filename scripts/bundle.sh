@@ -45,8 +45,14 @@ fi
 # the release machine's keychain (generate_keys --account waypoint).
 sparkle_public_key="mfL3STHC28BUAVXlUOjMVv0pZ8noAtFWM115ekfpbsg="
 
-swift_flags=()
-[[ "${WINDOWS_EXPERIMENTAL:-0}" != "1" ]] || swift_flags=(-Xswiftc -DWAYPOINT_WINDOWS_EXPERIMENTAL)
+# SwiftPM's link step doesn't tell the linker which SDK it built against, so
+# the binary would claim the deployment target's (14.0), and macOS 26 and
+# later draw such an app in the old design: no Liquid Glass toolbar, square
+# buttons. Record the real SDK. (Plain `swift build` and `swift run` still
+# produce the old look.) Keep 14.0 in step with Package.swift's platform.
+sdk_version="$(xcrun --sdk macosx --show-sdk-version)"
+swift_flags=(-Xlinker -platform_version -Xlinker macos -Xlinker 14.0 -Xlinker "$sdk_version")
+[[ "${WINDOWS_EXPERIMENTAL:-0}" != "1" ]] || swift_flags+=(-Xswiftc -DWAYPOINT_WINDOWS_EXPERIMENTAL)
 nice -n 19 xcrun swift build -c release --arch arm64 --product Waypoint "${swift_flags[@]}"
 bin_dir="$(xcrun swift build -c release --arch arm64 --show-bin-path)"
 
