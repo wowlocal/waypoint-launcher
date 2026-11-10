@@ -103,11 +103,12 @@ public final class Diagnostics: @unchecked Sendable {
             "pid": Int(getpid()),
         ]
         if let message { record["message"] = message }
-        if !fields.isEmpty { record["fields"] = fields.mapValues(Self.jsonValue) }
+        if !fields.isEmpty { record["fields"] = fields }
         if let version { record["version"] = version }
 
-        mirror(level, category, event, message, fields)
-        guard let line = try? JSONSerialization.data(withJSONObject: record, options: [.sortedKeys, .withoutEscapingSlashes])
+        let sanitized = Self.sanitizedFields(record)
+        mirror(level, category, sanitized)
+        guard let line = try? JSONSerialization.data(withJSONObject: sanitized, options: [.sortedKeys, .withoutEscapingSlashes])
         else { return }
         queue.async { self.append(line + Data("\n".utf8)) }
     }
@@ -163,14 +164,22 @@ public final class Diagnostics: @unchecked Sendable {
         for file in files.prefix(files.count - keep) { try? FileManager.default.removeItem(at: file) }
     }
 
-    private func mirror(_ level: Level, _ category: Category, _ event: String, _ message: String?, _ fields: [String: Any]) {
+    private func mirror(_ level: Level, _ category: Category, _ record: [String: Any]) {
         lock.lock()
         let logger = loggers[category.rawValue] ?? Logger(subsystem: Self.subsystem, category: category.rawValue)
         loggers[category.rawValue] = logger
         lock.unlock()
-        let details = fields.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: " ")
-        let text = [event, message, details.isEmpty ? nil : details].compactMap { $0 }.joined(separator: " ")
+        // Both sinks receive the same already sanitized record. Never format
+        // the caller's Error/NSError again here: that prints its whole userInfo.
+        let text = Self.mirrorText(record)
         logger.log(level: level.osLogType, "\(text, privacy: .public)")
+    }
+
+    static func mirrorText(_ record: [String: Any]) -> String {
+        let fields = record["fields"] as? [String: Any] ?? [:]
+        let details = fields.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: " ")
+        return [record["event"] as? String, record["message"] as? String, details.isEmpty ? nil : details]
+            .compactMap { $0 }.joined(separator: " ")
     }
 
     // MARK: Reading
@@ -193,7 +202,7 @@ public final class Diagnostics: @unchecked Sendable {
         public var event: String
         public var message: String?
         public var process: String
-        /// The original JSON line, for `--json` output.
+        /// The sanitized JSON line, including when reading an older log.
         public var line: String
         public var fields: [String: String]
     }
@@ -215,44 +224,105 @@ public final class Diagnostics: @unchecked Sendable {
     }
 
     static func parse(_ line: String) -> Event? {
-        guard let object = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any],
-              let ts = object["ts"] as? String, let date = parseTimestamp(ts),
+        guard let raw = try? JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any] else { return nil }
+        // Older versions may already have written an auth URL. Sanitize on
+        // read too, so diagnostics exports never copy those secrets onward.
+        let object = sanitizedFields(raw)
+        guard let ts = object["ts"] as? String, let date = parseTimestamp(ts),
               let level = (object["level"] as? String).flatMap(Level.init(rawValue:)),
               let category = object["category"] as? String, let event = object["event"] as? String
         else { return nil }
         let fields = (object["fields"] as? [String: Any] ?? [:]).mapValues { "\($0)" }
+        guard let data = try? JSONSerialization.data(withJSONObject: object, options: [.sortedKeys, .withoutEscapingSlashes]) else { return nil }
         return Event(date: date, level: level, category: category, event: event, message: object["message"] as? String,
-                     process: object["process"] as? String ?? "?", line: line, fields: fields)
+                     process: object["process"] as? String ?? "?", line: String(decoding: data, as: UTF8.self), fields: fields)
     }
 
     // MARK: Helpers
 
+    static func sanitizedFields(_ fields: [String: Any]) -> [String: Any] {
+        Dictionary(uniqueKeysWithValues: fields.map { key, value in
+            let name = key.lowercased().filter { $0.isLetter || $0.isNumber }
+            return (key, secretFields.contains(name) ? "[redacted]" : jsonValue(value))
+        })
+    }
+
+    private static let secretFields: Set<String> = [
+        "password", "passwd", "pwd", "secret", "clientsecret", "credentials",
+        "token", "webtoken", "st", "accesstoken", "refreshtoken", "idtoken",
+        "authorization", "cookie", "cookies", "setcookie",
+    ]
+
     static func jsonValue(_ value: Any) -> Any {
         switch value {
-        case let v as Bool: v
-        case let v as Int: v
-        case let v as Int32: Int(v)
-        case let v as Int64: v
-        case let v as UInt64: v
-        case let v as UInt32: Int(v)
-        case let v as Double: v
-        case let v as String: v
-        case let v as URL: v.path
+        case let v as String: redact(v)
+        case let v as URL: v.isFileURL ? v.path : redact(v.absoluteString)
         case let v as Error: describe(v)
-        default: String(describing: value)
+        case let v as [String: Any]: sanitizedFields(v)
+        case let v as [Any]: v.map(jsonValue)
+        case let v as NSNull: v
+        case let v as NSNumber: v
+        default: redact(String(describing: value))
         }
     }
 
-    /// One line per error: our own errors as they describe themselves,
-    /// system ones as `domain code: description` (not the userInfo dump).
-    static func describe(_ error: Error) -> String {
-        if !(type(of: error) is NSError.Type) {
+    /// Keep the host and path for diagnosis, but never URL credentials,
+    /// queries or fragments: OAuth codes, ST tickets and state live there.
+    /// Apply this to prose too because localized error descriptions can
+    /// contain the failing URL instead of providing it as a separate value.
+    private static let urlExpression = try! NSRegularExpression(pattern: #"(?i)\b[a-z][a-z0-9+.-]*://[^\s<>"']+"#)
+
+    static func redact(_ text: String) -> String {
+        var result = text
+        for match in urlExpression.matches(in: text, range: NSRange(text.startIndex..., in: text)).reversed() {
+            guard let range = Range(match.range, in: result) else { continue }
+            let matched = String(result[range])
+            // Punctuation belongs to the surrounding error prose, not the
+            // URL. Keep it outside URLComponents so repeated redaction does
+            // not turn a closing bracket into part of the URL's path.
+            let raw = String(matched.reversed().drop(while: { ")]},.;".contains($0) }).reversed())
+            let suffix = String(matched.dropFirst(raw.count))
+            guard var url = URLComponents(string: raw), url.host != nil else {
+                result.replaceSubrange(range, with: "[redacted URL]" + suffix)
+                continue
+            }
+            url.user = nil; url.password = nil; url.query = nil; url.fragment = nil
+            result.replaceSubrange(range, with: (url.string ?? "[redacted URL]") + suffix)
+        }
+        result = result.replacingOccurrences(of: #"(?i)\b[A-Z]{2}-[0-9a-f]{32}-[0-9]+\b"#,
+                                             with: "[redacted]", options: .regularExpression)
+        // Also handle raw NSError strings from old logs. Arbitrary userInfo
+        // is never useful enough to risk retaining an unknown secret field.
+        result = result.replacingOccurrences(of: #"(?s)UserInfo=\{.*\}"#,
+                                             with: "UserInfo=[redacted]", options: .regularExpression)
+        result = result.replacingOccurrences(
+            of: #"(?i)(\b(?:authorization|cookie|set-cookie)\b["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\r\n]+)"#,
+            with: "$1[redacted]", options: .regularExpression)
+        result = result.replacingOccurrences(of: #"(?i)\bBearer\s+[a-z0-9._~+/-]+=*"#,
+                                             with: "Bearer [redacted]", options: .regularExpression)
+        result = result.replacingOccurrences(
+            of: #"(?i)(\b(?:password|passwd|pwd|secret|token|client[_-]?secret|web[_-]?token|access[_-]?token|refresh[_-]?token|id[_-]?token|authorization|cookie|ST)\b["']?\s*[:=]\s*)(?:"[^"]*"|'[^']*'|[^\s,;&}]+)"#,
+            with: "$1[redacted]", options: .regularExpression)
+        return result
+    }
+
+    /// A compact error plus whitelisted network context. Never interpolate
+    /// NSError/URLError or its arbitrary userInfo, including underlying errors.
+    static func describe(_ error: Error) -> String { describe(error, depth: 0) }
+
+    private static func describe(_ error: Error, depth: Int) -> String {
+        if !(type(of: error) is NSError.Type), !(error is URLError) {
             let text = String(describing: error)
-            if !text.contains("UserInfo=") { return text }
+            if !text.contains("UserInfo=") { return redact(text) }
         }
         let ns = error as NSError
-        var text = "\(ns.domain) \(ns.code): \(ns.localizedDescription)"
-        if let url = ns.userInfo[NSURLErrorFailingURLStringErrorKey] as? String { text += " (\(url))" }
+        var text = "\(ns.domain) \(ns.code): \(redact(ns.localizedDescription))"
+        let url = (ns.userInfo[NSURLErrorFailingURLErrorKey] as? URL)?.absoluteString
+            ?? ns.userInfo[NSURLErrorFailingURLStringErrorKey] as? String
+        if let url { text += " (\(redact(url)))" }
+        if depth < 3, let underlying = ns.userInfo[NSUnderlyingErrorKey] as? Error {
+            text += " [underlying: \(describe(underlying, depth: depth + 1))]"
+        }
         return text
     }
 

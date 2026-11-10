@@ -181,3 +181,89 @@ private func tempDir() throws -> URL {
     #expect(Diagnostics.shared.directory != Diagnostics.defaultDirectory)
     #expect(Diagnostics.shared.directory.path.hasPrefix(FileManager.default.temporaryDirectory.path))
 }
+
+@Test func authenticationSecretsAreRemovedBeforeBothLogSinks() throws {
+    let dir = try tempDir()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let log = Diagnostics(directory: dir, processName: "test")
+    let ticket = "US-0123456789abcdef0123456789abcdef-123456"
+    let callback = "https://fake-user:FAKE_URL_PASSWORD@account.battle.net/callback?code=FAKE_OAUTH_CODE&ST=\(ticket)#FAKE_FRAGMENT"
+    let underlying = URLError(.cannotConnectToHost, userInfo: [
+        NSURLErrorFailingURLErrorKey: URL(string: callback)!,
+        "arbitrary_private_value": "FAKE_UNDERLYING_SECRET",
+    ])
+    let error = NSError(domain: NSURLErrorDomain, code: NSURLErrorNetworkConnectionLost, userInfo: [
+        NSLocalizedDescriptionKey: "Request to \(callback) failed; password=FAKE_DESCRIPTION_PASSWORD",
+        NSURLErrorFailingURLStringErrorKey: callback,
+        NSUnderlyingErrorKey: underlying,
+        "arbitrary_private_value": "FAKE_USERINFO_SECRET",
+    ])
+    log.log(.warning, .auth, "profile_page_failed", "Redirect \(callback); ticket \(ticket)", [
+        "error": error, "url_error": underlying, "url": URL(string: callback)!, "raw_url": callback,
+        "password": "FAKE_FIELD_PASSWORD", "nested": ["authorization": "Bearer FAKE_BEARER_SECRET"],
+    ])
+    log.flush()
+
+    let line = try String(contentsOf: dir.appendingPathComponent("test.jsonl"), encoding: .utf8)
+    let record = try #require(try JSONSerialization.jsonObject(with: Data(line.utf8)) as? [String: Any])
+    // mirror() uses this exact persisted record, rather than formatting the
+    // original NSError again and exposing its arbitrary userInfo dictionary.
+    let mirror = Diagnostics.mirrorText(record)
+    let exported = log.events().map(\.line).joined(separator: "\n")
+    for output in [line, mirror, exported] {
+        for secret in ["fake-user", "FAKE_URL_PASSWORD", "FAKE_OAUTH_CODE", ticket, "FAKE_FRAGMENT",
+                       "FAKE_DESCRIPTION_PASSWORD", "FAKE_UNDERLYING_SECRET", "FAKE_USERINFO_SECRET",
+                       "FAKE_FIELD_PASSWORD", "FAKE_BEARER_SECRET"] {
+            #expect(!output.contains(secret))
+        }
+        #expect(output.contains("NSURLErrorDomain"))
+        #expect(output.contains("-1005"))
+        #expect(output.contains("-1004"))
+        #expect(output.contains("account.battle.net/callback"))
+    }
+    let fields = try #require(record["fields"] as? [String: Any])
+    let description = try #require(fields["error"] as? String)
+    #expect(mirror.contains("error=\(description)"))
+    #expect(!description.contains("UserInfo="))
+}
+
+@Test func diagnosticsExportRedactsSecretsAlreadyPresentInOlderLogs() throws {
+    let dir = try tempDir()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let log = Diagnostics(directory: dir, processName: "test")
+    let ticket = "US-abcdef0123456789abcdef0123456789-42"
+    let old: [String: Any] = [
+        "ts": Diagnostics.timestampString(Date()), "level": "warning", "category": "auth",
+        "event": "profile_page_failed", "process": "old-waypoint", "pid": 123,
+        "message": "http://localhost:0/?ST=\(ticket)&code=OLD_FAKE_CODE#OLD_FAKE_FRAGMENT",
+        "fields": [
+            "error": "NSURLErrorDomain -1005: failure (https://old-user:OLD_FAKE_PASSWORD@account.battle.net/callback?code=OLD_FAKE_CODE)",
+            "raw_error": "Error Domain=NSURLErrorDomain Code=-1004 UserInfo={unknown_private_field=OLD_FAKE_PRIVATE_VALUE}",
+            "password": "OLD_FAKE_FIELD_PASSWORD", "attempt": 2,
+        ],
+    ]
+    try JSONSerialization.data(withJSONObject: old, options: [.withoutEscapingSlashes])
+        .write(to: dir.appendingPathComponent("old.jsonl"))
+    let library = GameLibrary(agentDatabase: dir.appendingPathComponent("missing.db"), searchRoots: [],
+                              stateStore: InstallStateStore(file: dir.appendingPathComponent("installs.json")))
+    let file = dir.appendingPathComponent("export.jsonl")
+    #expect(try DiagnosticsReport.export(to: file, library: library, diagnostics: log) == 1)
+    let exported = try String(contentsOf: file, encoding: .utf8)
+    for secret in [ticket, "OLD_FAKE_CODE", "OLD_FAKE_FRAGMENT", "old-user", "OLD_FAKE_PASSWORD",
+                   "OLD_FAKE_PRIVATE_VALUE", "OLD_FAKE_FIELD_PASSWORD"] {
+        #expect(!exported.contains(secret))
+    }
+    #expect(exported.contains("NSURLErrorDomain -1005"))
+    #expect(exported.contains("account.battle.net/callback"))
+    #expect(exported.contains("localhost:0"))
+    #expect(log.events().first?.fields["attempt"] == "2")
+}
+
+@Test func diagnosticsKeepUsefulNetworkLocationsWithoutTheirCredentials() {
+    let url = URL(string: "https://cdn.example/tpr/wow/data/aa/bb/aabb?signature=FAKE_SIGNATURE#FAKE_ANCHOR")!
+    #expect(Diagnostics.jsonValue(url) as? String == "https://cdn.example/tpr/wow/data/aa/bb/aabb")
+    #expect(Diagnostics.redact("Authorization: Bearer FAKE_RAW_BEARER") == "Authorization: [redacted]")
+    #expect(Diagnostics.redact("Authorization: Basic FAKE_BASIC_SECRET") == "Authorization: [redacted]")
+    #expect(Diagnostics.redact("Cookie: session=FAKE_COOKIE; other=FAKE_OTHER_COOKIE") == "Cookie: [redacted]")
+    #expect(Diagnostics.redact("password=\"a password with spaces\"") == "password=[redacted]")
+}
