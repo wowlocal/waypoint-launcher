@@ -99,6 +99,7 @@ public struct GameUpdater: Sendable {
     public var versions: VersionService
     public var store: InstallStateStore
     public var concurrency: Int
+    var availableCapacity: @Sendable (URL) -> UInt64 = GameUpdater.volumeCapacity
 
     public init(install: ProductInstall, versions: VersionService = VersionService(),
                 store: InstallStateStore = InstallStateStore(), concurrency: Int = 4) {
@@ -237,17 +238,20 @@ public struct GameUpdater: Sendable {
         // Several paths can share one content key; download it once.
         let unique = Dictionary(plan.files.map { ($0.contentKey, $0) }, uniquingKeysWith: { a, _ in a })
         let total = unique.values.reduce(UInt64(0)) { $0 + $1.size }
-        let available = (try? root.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
-            .volumeAvailableCapacityForImportantUsage).flatMap { $0 }.map { UInt64($0) } ?? .max
-        guard available > total + 512 * 1024 * 1024 else {
-            Log.error(.gameUpdate, "not_enough_space", nil, ["uid": install.uid, "needed": total, "available": available])
-            throw UpdateError.notEnoughSpace(needed: total, available: available)
+        let unstaged = try filesToStage(Array(unique.values))
+        let needed = unstaged.reduce(UInt64(0)) { $0 + $1.size }
+        let available = availableCapacity(root)
+        guard available > needed + 512 * 1024 * 1024 else {
+            Log.error(.gameUpdate, "not_enough_space", nil, ["uid": install.uid, "needed": needed, "available": available])
+            throw UpdateError.notEnoughSpace(needed: needed, available: available)
         }
 
-        let counter = ProgressCounter(total: total, files: unique.count, uid: install.uid, report: progress)
+        let counter = ProgressCounter(total: total, files: unique.count, uid: install.uid,
+                                      completedBytes: total - needed, completedFiles: unique.count - unstaged.count,
+                                      report: progress)
         counter.report()
         try await withThrowingTaskGroup(of: Void.self) { group in
-            var pending = unique.values.makeIterator()
+            var pending = unstaged.makeIterator()
             for _ in 0..<concurrency {
                 guard let file = pending.next() else { break }
                 group.addTask { try await self.stage(file, cdn: plan.cdn); counter.add(file.size) }
@@ -334,12 +338,40 @@ public struct GameUpdater: Sendable {
         stagingDirectory.appendingPathComponent(contentKey.hex)
     }
 
+    /// Count only new allocations. A resumed job already owns the space used
+    /// by completed staging files; size alone is not enough to trust them.
+    func remainingStagingBytes(for files: [UpdatePlan.File]) throws -> UInt64 {
+        try filesToStage(files).reduce(UInt64(0)) { $0 + $1.size }
+    }
+
+    private func filesToStage(_ files: [UpdatePlan.File]) throws -> [UpdatePlan.File] {
+        let unique = Dictionary(files.map { ($0.contentKey, $0) }, uniquingKeysWith: { first, _ in first })
+        return try unique.values.filter { file in
+            try Task.checkCancellation()
+            return try !isStaged(file)
+        }
+    }
+
+    private func isStaged(_ file: UpdatePlan.File) throws -> Bool {
+        let staged = stagedURL(file.contentKey)
+        guard (try? FileManager.default.attributesOfItem(atPath: staged.path)[.size] as? UInt64) == file.size else { return false }
+        do { return try Self.md5(of: staged) == file.contentKey }
+        catch {
+            try Task.checkCancellation()
+            return false
+        }
+    }
+
+    static func volumeCapacity(_ url: URL) -> UInt64 {
+        (try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
+            .volumeAvailableCapacityForImportantUsage).flatMap { $0 }.flatMap { UInt64(exactly: $0) } ?? .max
+    }
+
     private func stage(_ file: UpdatePlan.File, cdn: CDNClient) async throws {
         try Task.checkCancellation()
         let staged = stagedURL(file.contentKey)
         let fm = FileManager.default
-        if let size = try? fm.attributesOfItem(atPath: staged.path)[.size] as? UInt64, size == file.size,
-           (try? Self.md5(of: staged)) == file.contentKey {
+        if try isStaged(file) {
             return // left over from an interrupted run
         }
 
@@ -446,10 +478,13 @@ private final class ProgressCounter: @unchecked Sendable {
     private let uid: String
     private let callback: @Sendable (UpdateProgress) -> Void
 
-    init(total: UInt64, files: Int, uid: String, report: @escaping @Sendable (UpdateProgress) -> Void) {
+    init(total: UInt64, files: Int, uid: String, completedBytes: UInt64 = 0, completedFiles: Int = 0,
+         report: @escaping @Sendable (UpdateProgress) -> Void) {
         self.total = total
         self.totalFiles = files
         self.uid = uid
+        self.bytes = completedBytes
+        self.files = completedFiles
         self.callback = report
     }
 

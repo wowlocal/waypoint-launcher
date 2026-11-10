@@ -167,8 +167,8 @@ public struct GameUpdate: Sendable {
         try await GameUpdater(install: install, versions: versions, store: store).check()
     }
 
-    /// With `verify`, loose files are hashed rather than trusted. With
-    /// `languages`, the game switches to them.
+    /// With `verify`, loose files are hashed and stored CASC blobs are checked
+    /// against their encoded keys. With `languages`, the game switches to them.
     public func plan(target requested: ProductVersion? = nil, verify: Bool = false, languages: GameLanguages? = nil,
                      log: @Sendable (String) -> Void = { _ in }) async throws -> GameUpdatePlan {
         guard Self.canUpdate(install) else { throw UpdateError.unsupported(install.productCode) }
