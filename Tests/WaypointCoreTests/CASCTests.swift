@@ -467,8 +467,13 @@ private func expectStored(_ keys: Range<Int>, in dir: URL, version: UInt32) thro
     defer { try? fm.removeItem(at: dir) }
     try fm.createDirectory(at: dir, withIntermediateDirectories: true)
     nonisolated(unsafe) let first = try StorageLock(dir)
-    DispatchQueue.global().asyncAfter(deadline: .now() + 0.2) { first.release() }
     let started = ContinuousClock.now
+    // Synchronous parallel tests can occupy the shared dispatch workers for
+    // longer than the lock timeout. Give the timed release its own thread.
+    Thread.detachNewThread {
+        Thread.sleep(forTimeInterval: 0.2)
+        first.release()
+    }
     let second = try StorageLock(dir)
     #expect(ContinuousClock.now - started >= .milliseconds(150))
     second.release()
