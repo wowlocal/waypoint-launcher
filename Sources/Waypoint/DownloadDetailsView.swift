@@ -15,6 +15,20 @@ final class DownloadDetailsView: NSStackView {
         }
     }
 
+    /// An error gets a second line before it truncates; the rest of the
+    /// message is in the label's tooltip. Two lines still fit beside the icon.
+    var showsError = false {
+        didSet {
+            guard showsError != oldValue else { return }
+            label.maximumNumberOfLines = showsError ? 2 : 1
+            // Set the mode itself: turning a cell's `wraps` off leaves it
+            // clipping, with no ellipsis.
+            label.lineBreakMode = showsError ? .byWordWrapping : .byTruncatingTail
+            label.cell?.truncatesLastVisibleLine = showsError
+            label.invalidateIntrinsicContentSize()
+        }
+    }
+
     private var hoverTracking: NSTrackingArea?
     private(set) var hoverPoint: NSPoint?
 
@@ -26,12 +40,11 @@ final class DownloadDetailsView: NSStackView {
         detachesHiddenViews = true
         setViews([progress, label], in: .center)
         setContentHuggingPriority(.init(1), for: .horizontal)
-        let barWidth = progress.widthAnchor.constraint(equalToConstant: 200)
-        // Shrink the bar before the table cell outgrows a narrow column.
-        barWidth.priority = .defaultLow
+        // No taller than the bar and its line, or the line drifts from the name.
+        setHuggingPriority(.defaultHigh, for: .vertical)
+        // The bar is as wide as the row's text column (see `layOutRow`).
         NSLayoutConstraint.activate([
-            barWidth,
-            progress.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor),
+            progress.widthAnchor.constraint(equalTo: widthAnchor),
             label.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor),
         ])
     }

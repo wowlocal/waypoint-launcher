@@ -62,8 +62,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         window.title = "Waypoint"
         window.toolbar = library.toolbar
         window.toolbarStyle = .unified
-        window.contentMinSize = NSSize(width: 360, height: 200)
-        window.setContentSize(NSSize(width: 420, height: 300))
+        // The list scrolls under the toolbar.
+        window.styleMask.insert(.fullSizeContentView)
+        window.contentMinSize = NSSize(width: 380, height: 260)
+        window.setContentSize(NSSize(width: 460, height: 360))
         window.isReleasedWhenClosed = false
         // Window ▸ Waypoint reopens it; no second entry for the open window.
         window.isExcludedFromWindowsMenu = true

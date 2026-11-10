@@ -4,7 +4,8 @@ import WaypointCore
 /// The library window: installed games with Play and Update, games being
 /// installed, the Battle.net account games launch as (in the subtitle; a
 /// toolbar menu switches it), a + toolbar menu to install more, and
-/// Waypoint's own update status when it has something to say.
+/// Waypoint's own update status in a banner when it has something to say.
+/// The list runs under the toolbar, as the system's own lists do.
 @MainActor
 final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSToolbarDelegate {
     private enum Row {
@@ -18,8 +19,9 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
             }
         }
 
-        /// Labels are single-line; only these optional views change height.
-        var layout: (edition: Bool, progress: Bool) {
+        /// What changes a row's height: these optional views, and an error,
+        /// which may take a second line. Other labels are single-line.
+        var layout: (edition: Bool, progress: Bool, error: Bool) {
             switch self {
             case .game(let row):
                 let progress: Bool = switch row.phase {
@@ -27,10 +29,11 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
                 case .updating, .pausing, .paused: true
                 default: false
                 }
-                return (row.showsEdition, progress)
+                let error = if case .failed = row.phase { true } else { false }
+                return (row.showsEdition, progress, error)
             case .installable(let row):
-                if case .failed = row.phase { return (false, false) }
-                return (false, true)
+                if case .failed = row.phase { return (false, false, true) }
+                return (false, true, false)
             }
         }
     }
@@ -42,8 +45,8 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
     private let table = NSTableView()
     private let scrollView = NSScrollView()
     private let emptyState = NSStackView()
-    private let updateBar = NSStackView()
-    private let updateSeparator = NSBox.separator()
+    private let emptyInstallButton = NSPopUpButton(frame: .zero, pullsDown: true)
+    private let updateBanner = NSView()
     private let updateIcon = NSImageView()
     private let updateSpinner = NSProgressIndicator.spinner()
     private let updateText = NSTextField.label(.callout, color: .secondaryLabelColor)
@@ -87,43 +90,70 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
         scrollView.autohidesScrollers = true
         scrollView.drawsBackground = false
 
-        let emptyIcon = NSImageView(image: .symbol("gamecontroller", pointSize: 36) ?? NSImage())
+        let emptyIcon = NSImageView(image: .symbol("gamecontroller", pointSize: 44) ?? NSImage())
         emptyIcon.contentTintColor = .tertiaryLabelColor
-        let emptyTitle = NSTextField.label(.title3)
-        emptyTitle.font = .boldSystemFont(ofSize: emptyTitle.font?.pointSize ?? 15)
+        let emptyTitle = NSTextField.label(.title2)
+        emptyTitle.font = .systemFont(ofSize: emptyTitle.font?.pointSize ?? 17, weight: .semibold)
         emptyTitle.stringValue = "No Games"
         let emptyDetail = NSTextField.label(.body, color: .secondaryLabelColor)
-        emptyDetail.stringValue = "Install one with the + button."
-        emptyState.setViews([emptyIcon, emptyTitle, emptyDetail], in: .center)
+        emptyDetail.stringValue = "Blizzard games on this Mac appear here."
+        emptyInstallButton.controlSize = .large
+        if #available(macOS 26.0, *) { emptyInstallButton.borderShape = .capsule }
+        emptyInstallButton.autoenablesItems = false
+        emptyState.setViews([emptyIcon, emptyTitle, emptyDetail, emptyInstallButton], in: .center)
         emptyState.orientation = .vertical
         emptyState.spacing = 6
+        emptyState.setCustomSpacing(12, after: emptyIcon)
+        emptyState.setCustomSpacing(18, after: emptyDetail)
 
         let content = NSView()
         for view in [scrollView, emptyState] as [NSView] {
             view.translatesAutoresizingMaskIntoConstraints = false
             content.addSubview(view)
         }
+        // The window's content runs under its toolbar: the scroll view insets
+        // its rows itself, the empty state centers in what's left.
+        let visible = content.safeAreaLayoutGuide
         NSLayoutConstraint.activate([
             scrollView.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: content.trailingAnchor),
             scrollView.topAnchor.constraint(equalTo: content.topAnchor),
             scrollView.bottomAnchor.constraint(equalTo: content.bottomAnchor),
-            emptyState.centerXAnchor.constraint(equalTo: content.centerXAnchor),
-            emptyState.centerYAnchor.constraint(equalTo: content.centerYAnchor),
+            emptyState.centerXAnchor.constraint(equalTo: visible.centerXAnchor),
+            emptyState.centerYAnchor.constraint(equalTo: visible.centerYAnchor),
+            emptyState.widthAnchor.constraint(lessThanOrEqualTo: visible.widthAnchor, constant: -32),
         ])
         content.setContentHuggingPriority(.init(1), for: .vertical)
         content.setContentCompressionResistancePriority(.init(1), for: .vertical)
 
         // Waypoint's own updates, inline instead of Sparkle's windows.
-        restartButton.controlSize = .small
-        restartButton.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
+        if #available(macOS 26.0, *) { restartButton.borderShape = .capsule }
+        restartButton.bezelColor = .controlAccentColor
+        let updateBar = NSStackView()
         updateBar.setViews([updateSpinner, updateIcon, updateText], in: .leading)
         updateBar.setViews([restartButton], in: .trailing)
         updateBar.spacing = 8
         updateBar.detachesHiddenViews = true
-        updateBar.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 8, right: 12)
+        updateBar.edgeInsets = NSEdgeInsets(top: 8, left: 12, bottom: 8, right: 8)
+        let card = NSBox()
+        card.boxType = .custom
+        card.titlePosition = .noTitle
+        card.borderWidth = 0
+        card.cornerRadius = 12
+        card.fillColor = .quaternarySystemFill
+        card.contentViewMargins = .zero
+        card.contentView = updateBar
+        card.translatesAutoresizingMaskIntoConstraints = false
+        updateBanner.addSubview(card)
+        NSLayoutConstraint.activate([
+            card.leadingAnchor.constraint(equalTo: updateBanner.leadingAnchor, constant: 10),
+            card.trailingAnchor.constraint(equalTo: updateBanner.trailingAnchor, constant: -10),
+            card.topAnchor.constraint(equalTo: updateBanner.topAnchor),
+            card.bottomAnchor.constraint(equalTo: updateBanner.bottomAnchor, constant: -10),
+            card.heightAnchor.constraint(greaterThanOrEqualToConstant: 40),
+        ])
 
-        let root = NSStackView(views: [content, updateSeparator, updateBar])
+        let root = NSStackView(views: [content, updateBanner])
         root.orientation = .vertical
         root.distribution = .fill
         root.spacing = 0
@@ -145,24 +175,34 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
     /// calls this again whenever any of it changes.
     private func render() {
         var rows = model.games.map { Row.game(GameRowState($0, model: model)) }
-        var installMenuItems: [NSMenuItem] = []
+        var installChoices: [InstallableProduct] = []
         for product in model.installable {
             let phase = model.phase(of: product)
-            if phase != .idle { rows.append(.installable(InstallableRowState(product: product, phase: phase))) }
+            if phase != .idle { rows.append(.installable(InstallableRowState(product, phase: phase, model: model))) }
             switch phase {
             case .updating, .pausing, .paused: continue
             default: break
             }
-            installMenuItems.append(ActionItem(product.displayName) { [weak self] in self?.install(product) })
+            installChoices.append(product)
         }
         show(rows)
+        // Menu items belong to one menu, so each menu gets its own.
+        let installMenuItems = { [weak self] in
+            installChoices.map { product in ActionItem(product.displayName) { self?.install(product) } }
+        }
 
         // NSMenuToolbarItem shows its menu as a pull-down button does: the
         // first item is the button's own and never appears. Without a
         // placeholder, a signed-out account menu's lone "Sign In…" did
         // nothing, and the account list lost its first row.
-        installMenu.items = installMenuItems.isEmpty ? [] : [.pullDownPlaceholder(), .sectionHeader(title: "Install a Game")] + installMenuItems
-        installItem?.isEnabled = !installMenuItems.isEmpty
+        installMenu.items = installChoices.isEmpty ? [] : [.pullDownPlaceholder(), .sectionHeader(title: "Install a Game")] + installMenuItems()
+        installItem?.isEnabled = !installChoices.isEmpty
+        // The same list under the empty state's button, whose title is the
+        // pull-down's own first item.
+        if rows.isEmpty {
+            emptyInstallButton.menu?.items = [NSMenuItem(title: "Install a Game", action: nil, keyEquivalent: "")] + installMenuItems()
+            emptyInstallButton.isEnabled = !installChoices.isEmpty
+        }
 
         accountMenu.items = [.pullDownPlaceholder()] + AccountMenu.items(model: model)
         subtitle = model.activeAccount?.displayName ?? "Not signed in"
@@ -173,8 +213,7 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
 
         let ready = appUpdater.readyVersion != nil
         let recoveryError = model.downloadRecoveryError
-        updateBar.isHidden = appUpdater.status == nil && !ready && recoveryError == nil
-        updateSeparator.isHidden = updateBar.isHidden
+        updateBanner.isHidden = appUpdater.status == nil && !ready && recoveryError == nil
         updateText.stringValue = appUpdater.status ?? recoveryError ?? ""
         let updateTooltip = appUpdater.status ?? recoveryError
         if updateText.toolTip != updateTooltip { updateText.toolTip = updateTooltip }
@@ -200,7 +239,7 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
         // button under the pointer isn't swapped out mid-click.
         let resizedRows = IndexSet(rows.indices.filter { rows[$0].layout != previousRows[$0].layout })
         table.enumerateAvailableRowViews { rowView, row in
-            configure(rowView.view(atColumn: 0) as? NSView, as: rows[row])
+            configure(rowView.view(atColumn: 0) as? NSView, at: row)
         }
         // Retiling the table on every progress report interrupts native
         // tooltips. Only invalidate heights when the row's layout changes.
@@ -211,10 +250,11 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
         }
     }
 
-    private func configure(_ view: NSView?, as row: Row) {
-        switch row {
-        case .game(let state): (view as? GameCell)?.configure(state, model: model)
-        case .installable(let state): (view as? InstallableCell)?.configure(state, model: model)
+    /// A hairline separates each row from the one above it.
+    private func configure(_ view: NSView?, at row: Int) {
+        switch rows[row] {
+        case .game(let state): (view as? GameCell)?.configure(state, model: model, showsSeparator: row > 0)
+        case .installable(let state): (view as? InstallableCell)?.configure(state, model: model, showsSeparator: row > 0)
         }
     }
 
@@ -269,7 +309,7 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
         case .game: tableView.makeView(withIdentifier: GameCell.identifier, owner: nil) ?? GameCell()
         case .installable: tableView.makeView(withIdentifier: InstallableCell.identifier, owner: nil) ?? InstallableCell()
         }
-        configure(view, as: rows[row])
+        configure(view, at: row)
         return view
     }
 }
