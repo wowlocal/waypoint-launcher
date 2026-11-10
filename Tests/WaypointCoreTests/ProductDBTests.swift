@@ -49,8 +49,59 @@ private func install(_ w: inout ProtoWriter, uid: String, code: String, path: St
     #expect(install.version == nil)
 }
 
+@Test(arguments: [false, true])
+func parsesFolderDatabaseDespiteUnknownSingleRecordShapedFields(validUnknownSettings: Bool) throws {
+    var writer = ProtoWriter()
+    install(&writer, uid: "wow", code: "wow", path: "/Games/WoW", region: "eu", version: "1.0")
+    writer.string(2, "unknown database field")
+    if validUnknownSettings {
+        writer.message(3) { $0.string(1, "/Games/other") }
+    } else {
+        writer.bytes(3, Data([0xff]))
+    }
+
+    #expect(try ProductDB.parseFolderInstalls(writer.data).map(\.uid) == ["wow"])
+}
+
 @Test func rejectsTruncatedData() {
     #expect(throws: (any Error).self) { try ProductDB.parseDatabase(Data([0x0a, 0x10, 0x01])) }
+}
+
+private let invalidProtobufLengths: [Data] = [
+    // UInt64.max cannot be represented as a Data index.
+    Data([0x0a] + [UInt8](repeating: 0xff, count: 9) + [0x01]),
+    // Int.max fits, but adding it to the cursor used to overflow.
+    Data([0x0a] + [UInt8](repeating: 0xff, count: 8) + [0x7f]),
+    Data([0x0a, 0x02, 0x00]),
+    Data([0x0a, 0x80]),
+]
+@Test(arguments: invalidProtobufLengths)
+func rejectsInvalidProtobufLengths(_ data: Data) {
+    #expect(throws: (any Error).self) { try ProductDB.parseDatabase(data) }
+}
+
+private let invalidProtobufVarints: [Data] = [
+    // The tenth byte can hold only bit 63, not bit 64 or a continuation.
+    Data([0x30] + [UInt8](repeating: 0xff, count: 9) + [0x02]),
+    Data([0x30] + [UInt8](repeating: 0x80, count: 10) + [0x00]),
+    Data([0x30, 0x80]),
+]
+@Test(arguments: invalidProtobufVarints)
+func rejectsOverflowingOrTruncatedProtobufVarints(_ data: Data) {
+    #expect(throws: (any Error).self) { try ProductDB.parseDatabase(data) }
+}
+
+@Test func acceptsMaximumProtobufValuesAndExactPayloadBounds() throws {
+    var w = ProtoWriter()
+    install(&w, uid: "wow", code: "wow", path: "/Games/World of Warcraft", region: "eu", version: "12.0.1")
+    w.varint(99, UInt64.max)
+    w.fixed64(100, UInt64.max)
+    w.bytes(101, Data())
+
+    let fields = try ProtoReader(w.data).fields()
+    #expect(fields[99]?.first?.uint == UInt64.max)
+    #expect(try ProductDB.parseDatabase(w.data).map(\.uid) == ["wow"])
+    #expect(try ProductDB.parseDatabase(Data([0x0a, 0x00])).isEmpty)
 }
 
 @Test func wowFlavorsMapToFolders() throws {

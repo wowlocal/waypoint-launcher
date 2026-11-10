@@ -211,8 +211,8 @@ public struct GameLibrary {
         for root in searchRoots {
             let file = root.appendingPathComponent(".product.db")
             if let data = try? Data(contentsOf: file),
-               let install = try? ProductDB.parseInstallFile(data) {
-                add(install)
+               let installs = try? ProductDB.parseFolderInstalls(data) {
+                installs.forEach(add)
             }
         }
         // Games Waypoint installed, as long as their folder is still there.
