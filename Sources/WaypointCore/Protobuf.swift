@@ -27,6 +27,7 @@ struct ProtoReader {
 
     enum Error: Swift.Error {
         case truncated
+        case overflowingVarint
         case unsupportedWireType(Int)
     }
 
@@ -51,10 +52,12 @@ struct ProtoReader {
         case 1:
             return (field, .fixed64(try readFixed(8)))
         case 2:
-            let length = Int(try readVarint())
-            guard length >= 0, offset + length <= data.endIndex else { throw Error.truncated }
-            let bytes = data[offset..<offset + length]
-            offset += length
+            guard let length = Int(exactly: try readVarint()), length <= data.endIndex - offset else {
+                throw Error.truncated
+            }
+            let end = offset + length
+            let bytes = data[offset..<end]
+            offset = end
             return (field, .bytes(Data(bytes)))
         case 5:
             return (field, .fixed32(UInt32(try readFixed(4))))
@@ -114,6 +117,9 @@ struct ProtoReader {
             guard offset < data.endIndex, shift < 64 else { throw Error.truncated }
             let byte = data[offset]
             offset += 1
+            // A UInt64 has only one bit left in the tenth byte. Check before
+            // shifting, which would otherwise silently discard overflowing bits.
+            guard shift != 63 || byte <= 1 else { throw Error.overflowingVarint }
             result |= UInt64(byte & 0x7f) << shift
             if byte & 0x80 == 0 { return result }
             shift += 7
@@ -121,7 +127,7 @@ struct ProtoReader {
     }
 
     private mutating func readFixed(_ size: Int) throws -> UInt64 {
-        guard offset + size <= data.endIndex else { throw Error.truncated }
+        guard size <= data.endIndex - offset else { throw Error.truncated }
         var result: UInt64 = 0
         for i in 0..<size {
             result |= UInt64(data[offset + i]) << (8 * UInt64(i))

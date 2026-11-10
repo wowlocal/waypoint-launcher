@@ -73,9 +73,19 @@ public enum ProductDB {
         .filter { !infrastructureCodes.contains($0.productCode) }
     }
 
-    /// Parses the `.product.db` found inside a game's install folder.
+    /// Parses a single ProductInstall record, without a Database envelope.
     public static func parseInstallFile(_ data: Data) throws -> ProductInstall? {
         try parseInstall(ProtoReader(data))
+    }
+
+    /// The Agent writes either a single ProductInstall or a Database envelope
+    /// to a game's `.product.db`; shared WoW folders can list several editions.
+    public static func parseFolderInstalls(_ data: Data) throws -> [ProductInstall] {
+        // Unknown envelope fields can resemble a single record's settings,
+        // so prefer its real installation list whenever one can be read.
+        if let installs = try? parseDatabase(data), !installs.isEmpty { return installs }
+        if let install = try parseInstallFile(data) { return [install] }
+        return []
     }
 
     static func parseInstall(_ reader: ProtoReader) throws -> ProductInstall? {

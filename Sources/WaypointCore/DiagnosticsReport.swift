@@ -6,15 +6,16 @@ import Foundation
 /// `waypoint-cli diagnose` prints it; the app's "Export Diagnostics…"
 /// saves it next to the logs.
 public enum DiagnosticsReport {
-    public static func make(library: GameLibrary = GameLibrary(), recentProblems: Int = 30) -> [String: Any] {
+    public static func make(library: GameLibrary = GameLibrary(), recentProblems: Int = 30,
+                            diagnostics: Diagnostics = .shared) -> [String: Any] {
         let os = ProcessInfo.processInfo.operatingSystemVersion
         var report: [String: Any] = [
             "generated_at": Diagnostics.timestamp(Date()),
             "macos": "\(os.majorVersion).\(os.minorVersion).\(os.patchVersion)",
             "arch": machineArchitecture(),
             "rosetta_installed": FileManager.default.fileExists(atPath: "/Library/Apple/usr/libexec/oah/libRosettaRuntime"),
-            "log_directory": Diagnostics.shared.directory.path,
-            "verbose_logging": Diagnostics.shared.verbose,
+            "log_directory": diagnostics.directory.path,
+            "verbose_logging": diagnostics.verbose,
         ]
 
         let installedApp = URL(fileURLWithPath: "/Applications/Waypoint.app")
@@ -55,28 +56,28 @@ public enum DiagnosticsReport {
         ]
 
         let since = Date().addingTimeInterval(-7 * 24 * 3600)
-        report["recent_problems"] = Diagnostics.shared.events(since: since, minimumLevel: .warning)
+        report["recent_problems"] = diagnostics.events(since: since, minimumLevel: .warning)
             .suffix(recentProblems)
             .map { "\(Diagnostics.timestamp($0.date)) \($0.level.rawValue) \($0.category)/\($0.event) \($0.message ?? "") \($0.fields.sorted { $0.key < $1.key }.map { "\($0.key)=\($0.value)" }.joined(separator: " "))" }
-        return report
+        return Diagnostics.sanitizedFields(report)
     }
 
     public static func json(_ report: [String: Any]) -> String {
-        let data = (try? JSONSerialization.data(withJSONObject: report, options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])) ?? Data()
+        let data = (try? JSONSerialization.data(withJSONObject: Diagnostics.sanitizedFields(report), options: [.prettyPrinted, .sortedKeys, .withoutEscapingSlashes])) ?? Data()
         return String(decoding: data, as: UTF8.self)
     }
 
     /// Writes the report plus the last week of logs into one JSONL file:
     /// first line is the report, then every event.
     @discardableResult
-    public static func export(to file: URL, library: GameLibrary = GameLibrary()) throws -> Int {
-        let report = make(library: library)
+    public static func export(to file: URL, library: GameLibrary = GameLibrary(), diagnostics: Diagnostics = .shared) throws -> Int {
+        let report = make(library: library, diagnostics: diagnostics)
         var out = (try JSONSerialization.data(withJSONObject: ["report": report], options: [.sortedKeys, .withoutEscapingSlashes]))
         out.append(Data("\n".utf8))
-        let events = Diagnostics.shared.events(since: Date().addingTimeInterval(-7 * 24 * 3600))
+        let events = diagnostics.events(since: Date().addingTimeInterval(-7 * 24 * 3600))
         for event in events { out.append(Data((event.line + "\n").utf8)) }
         try out.write(to: file, options: .atomic)
-        Log.info(.app, "diagnostics_exported", nil, ["path": file.path, "events": events.count])
+        diagnostics.log(.info, .app, "diagnostics_exported", nil, ["path": file.path, "events": events.count])
         return events.count
     }
 

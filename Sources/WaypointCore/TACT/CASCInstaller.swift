@@ -57,6 +57,8 @@ public struct CASCInstallPlan: Sendable {
     /// Bytes of `storage` an interrupted run already wrote: still planned (the
     /// writer skips them, and progress counts them as done), not downloaded again.
     public var storedBytes: UInt64 = 0
+    /// Full archive validation is opt-in, including interrupted repair journals.
+    var verifiesStorage = false
 
     /// Everything the plan covers, for progress.
     public var totalSize: UInt64 { storage.reduce(0) { $0 + $1.size } + loose.downloadSize }
@@ -100,6 +102,7 @@ public struct CASCInstaller: Sendable {
     public var versions: VersionService
     public var store: InstallStateStore
     public var concurrency = 8
+    var availableCapacity: @Sendable (URL) -> UInt64 = GameUpdater.volumeCapacity
     /// Biggest single range request when merging neighbouring blobs.
     public var maxBatchBytes: UInt64 = 32 << 20
     /// Merge blobs separated by at most this much unneeded data.
@@ -145,10 +148,11 @@ public struct CASCInstaller: Sendable {
         return config.tagString(region: region, languages: install.languages)
     }
 
-    /// With `verify`, loose files are hashed instead of trusting the installed
-    /// build's manifest (a repair). With `languages`, the install switches to
-    /// them: storage gets their files (the old ones' stay, as for any other
-    /// build data), and loose files change over.
+    /// With `verify`, loose files are hashed and stored blobs are checked
+    /// against their archive bounds, headers and BLTE checksums (a repair).
+    /// With `languages`, the install switches to them: storage gets their
+    /// files (the old ones' stay, as for any other build data), and loose
+    /// files change over.
     public func plan(target requested: ProductVersion? = nil, verify: Bool = false, languages: GameLanguages? = nil,
                      log: @Sendable (String) -> Void = { _ in }) async throws -> CASCInstallPlan {
         guard config.platform == install.platform else { throw TACTError.malformed("Product configuration platform does not match the installation") }
@@ -237,7 +241,7 @@ public struct CASCInstaller: Sendable {
             storage.append(StorageItem(key: key, size: download.size(at: i), fullKey: false))
         }
         log("\(listed) files for local storage")
-        if let present {
+        if !verify, let present {
             let total = storage.count
             storage.removeAll { present.contains($0.key) }
             log("\(total - storage.count) of \(total) storage files already there")
@@ -250,6 +254,18 @@ public struct CASCInstaller: Sendable {
             unique += 1
         }
         storage.removeLast(storage.count - unique)
+        if verify, present != nil {
+            let total = storage.count
+            log("Verifying \(total) storage files")
+            let verified = try CASC.verifiedStorage(storageDir, items: storage)
+            var remaining = 0
+            for i in storage.indices where !verified[i] {
+                storage[remaining] = storage[i]
+                remaining += 1
+            }
+            storage.removeLast(storage.count - remaining)
+            log("\(total - storage.count) of \(total) storage files already there")
+        }
         // Room was made for every file the tags select; an update keeps few.
         if storage.capacity > 2 * storage.count + 4096 { storage = storage.withUnsafeBufferPointer { Array($0) } }
 
@@ -269,7 +285,7 @@ public struct CASCInstaller: Sendable {
                 return true
             }
         }
-        let storedBytes = Self.storedBytes(storage, in: storageDir)
+        let storedBytes = Self.storedBytes(storage, in: storageDir, verify: verify)
         try Task.checkCancellation()
         // Download order: archive by archive, front to back; loose CDN files last.
         storage.sort { a, b in
@@ -282,7 +298,7 @@ public struct CASCInstaller: Sendable {
                                    buildConfig: buildConfigData, cdnConfig: cdnConfigData, archives: archives,
                                    storage: storage, loose: loose, setsLanguages: tags != installedTags || install.buildConfig == nil,
                                    writesLanguageConfig: install.buildConfig == nil || (languages != nil && languages != install.languages),
-                                   replacedTags: tags != installedTags ? installedTags : nil, storedBytes: storedBytes)
+                                   replacedTags: tags != installedTags ? installedTags : nil, storedBytes: storedBytes, verifiesStorage: verify)
         Log.info(.install, "casc_plan_ready", nil, [
             "uid": install.uid, "version": target.name, "storage_files": storage.count,
             "storage_bytes": plan.storage.reduce(UInt64(0)) { $0 + $1.size }, "resumed_bytes": storedBytes, "loose_files": looseFiles.count,
@@ -296,9 +312,9 @@ public struct CASCInstaller: Sendable {
 
     /// Bytes of `storage` (sorted by key) an interrupted install or update
     /// already wrote to the storage in `storageDir`.
-    static func storedBytes(_ storage: [StorageItem], in storageDir: URL) -> UInt64 {
+    static func storedBytes(_ storage: [StorageItem], in storageDir: URL, verify: Bool = false) -> UInt64 {
         var total: UInt64 = 0
-        CASCStorageWriter.forEachResumableKey(in: storageDir) { key in
+        CASCStorageWriter.forEachResumableKey(in: storageDir, verifying: verify ? storage : nil) { key in
             if let i = ArchiveIndexes.index(of: key, in: storage) { total += storage[i].size }
         }
         return total
@@ -324,9 +340,11 @@ public struct CASCInstaller: Sendable {
         let storageExisted = (try? CASC.scanStorage(storageDir)) != nil
 
         let total = plan.totalSize
-        let needed = plan.downloadSize
-        let available = (try? root.deletingLastPathComponent().resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
-            .volumeAvailableCapacityForImportantUsage).flatMap { $0 }.map { UInt64($0) } ?? .max
+        let storageBytes = plan.storage.reduce(UInt64(0)) { $0 + $1.size }
+        let remainingStorage = storageBytes - min(plan.storedBytes, storageBytes)
+        let remainingLoose = try GameUpdater(install: plan.loose.install).remainingStagingBytes(for: plan.loose.files)
+        let needed = remainingStorage + remainingLoose
+        let available = availableCapacity(root.deletingLastPathComponent())
         guard available > needed + (1 << 30) else { throw UpdateError.notEnoughSpace(needed: needed, available: available) }
         // Fail an unrepaired index before writing configs, loose files, or
         // build records. A pending writer will rewrite the indexes itself.
@@ -396,8 +414,9 @@ public struct CASCInstaller: Sendable {
         try fm.createDirectory(at: looseRoot, withIntermediateDirectories: true)
         if !plan.loose.isEmpty {
             let base = counter.completed
-            try await GameUpdater(install: plan.loose.install, versions: versions, store: store)
-                .apply(plan.loose, record: false) { p in
+            var updater = GameUpdater(install: plan.loose.install, versions: versions, store: store)
+            updater.availableCapacity = availableCapacity
+            try await updater.apply(plan.loose, record: false) { p in
                     progress(UpdateProgress(completedBytes: base + p.completedBytes, totalBytes: total,
                                             completedFiles: p.completedFiles, totalFiles: p.totalFiles))
                 }
@@ -574,7 +593,7 @@ public struct CASCInstaller: Sendable {
 
     private func writeStorage(_ plan: CASCInstallPlan, to storageDir: URL, counter: ByteCounter,
                               progress: @escaping @Sendable (UpdateProgress) -> Void) async throws {
-        let writer = try CASCStorageWriter(directory: storageDir, allowExisting: true)
+        let writer = try CASCStorageWriter(directory: storageDir, allowExisting: true, verifying: plan.verifiesStorage ? plan.storage : nil)
         let storage = plan.storage
         var stored: UInt64 = 0
         let batches = Self.batches(storage, maxBytes: maxBatchBytes, maxGap: maxGapBytes) { item in
