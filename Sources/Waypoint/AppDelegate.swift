@@ -25,6 +25,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         NSApp.mainMenu = MainMenu.make(for: self)
         menuBarItem = MenuBarItem(model: model, appUpdater: appUpdater)
         showLibrary(nil)
+        // How long the launch took, to compare versions and Macs by the logs.
+        Log.info(.app, "library_shown", nil, ["launch_ms": ProcessStart.millisecondsAgo ?? -1, "games": model.games.count])
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {

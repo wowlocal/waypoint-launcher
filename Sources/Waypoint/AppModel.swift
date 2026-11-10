@@ -95,7 +95,12 @@ final class AppModel {
     private let tokenVault = TokenVault(service: "\(Bundle.main.bundleIdentifier ?? "Waypoint"): Battle.net login tokens")
     private let credentialVault = CredentialVault(service: "\(Bundle.main.bundleIdentifier ?? "Waypoint"): Battle.net passwords")
     private var observers: [NSObjectProtocol] = []
-    @ObservationIgnored private var metadataRepairTask: Task<Void, Never>?
+    /// The repair of Battle.net's records that is running, off the main thread.
+    @ObservationIgnored private var metadataRepair: Task<Void, Never>?
+    /// Another repair was asked for meanwhile; it runs when this one ends.
+    @ObservationIgnored private var repairsMetadataAgain = false
+    /// Waits for Battle.net to quit, then repairs.
+    @ObservationIgnored private var metadataRepairRetry: Task<Void, Never>?
 
     init() {
         let info = Bundle.main.infoDictionary ?? [:]
@@ -111,6 +116,7 @@ final class AppModel {
             Diagnostics.shared.flush()
         })
         regionOverride = UserDefaults.standard.string(forKey: "regionOverride").flatMap(Region.init(rawValue:))
+        // Reads the logs only while that one-time import is still to do.
         downloadQueue.recoverLegacyInstalls(events: Diagnostics.shared.events())
         reload()
         let center = NSWorkspace.shared.notificationCenter
@@ -138,33 +144,77 @@ final class AppModel {
         Task { await setUpAccounts() }
     }
 
+    /// Fills in Battle.net's records of the games Waypoint installed, off
+    /// the main thread: a repair looks through every process several times,
+    /// and with World of Warcraft installed walks the game's Data folder.
+    /// Run inline, that held up every return to Waypoint. One repair runs at
+    /// a time; a request made meanwhile runs when it ends.
     private func repairInstallMetadata() {
-        guard BattleNet.running().isEmpty else {
-            // An app update can restart Waypoint while Battle.net is open.
-            // Wait for its background Agent too; never race its database writer.
-            if metadataRepairTask == nil {
-                metadataRepairTask = Task { [weak self] in
-                    while !Task.isCancelled {
-                        do { try await Task.sleep(for: .seconds(5)) } catch { return }
-                        guard let self else { return }
-                        if BattleNet.running().isEmpty {
-                            self.metadataRepairTask = nil
-                            self.reload()
-                            return
-                        }
-                    }
-                }
-            }
+        guard metadataRepair == nil else {
+            repairsMetadataAgain = true
             return
         }
-        metadataRepairTask?.cancel()
-        metadataRepairTask = nil
-        do { try BattleNetInstallMetadata.repair(store: library.stateStore, agentDatabase: library.agentDatabase) }
-        catch { Log.warning(.install, "battlenet_metadata_repair_failed", nil, ["error": error]) }
+        let store = library.stateStore, database = library.agentDatabase
+        // Detached, and not awaited from here: awaiting would lend it the
+        // main thread's priority, and it would compete with the launch.
+        metadataRepair = Task.detached(priority: .utility) { [weak self] in
+            // nil: Battle.net is running. Otherwise, how much was repaired.
+            var repaired: Int? = 0
+            if !BattleNet.running().isEmpty {
+                repaired = nil
+            } else {
+                do {
+                    repaired = try BattleNetInstallMetadata.repair(store: store, agentDatabase: database)
+                } catch UpdateError.battleNetRunning {
+                    repaired = nil // It started meanwhile.
+                } catch {
+                    Log.warning(.install, "battlenet_metadata_repair_failed", nil, ["error": error])
+                }
+            }
+            await self?.metadataRepairEnded(repaired)
+        }
+    }
+
+    private func metadataRepairEnded(_ repaired: Int?) {
+        metadataRepair = nil
+        if repairsMetadataAgain {
+            repairsMetadataAgain = false
+            repairInstallMetadata()
+        } else if repaired == nil {
+            repairWhenBattleNetQuits()
+        } else {
+            metadataRepairRetry?.cancel()
+            metadataRepairRetry = nil
+        }
+        // The scan reads the records a repair adds.
+        if let repaired, repaired > 0 { rescan() }
+    }
+
+    /// An app update can restart Waypoint while Battle.net is open. Wait for
+    /// its background Agent too; never race its database writer.
+    private func repairWhenBattleNetQuits() {
+        guard metadataRepairRetry == nil else { return }
+        metadataRepairRetry = Task { [weak self] in
+            while !Task.isCancelled {
+                do { try await Task.sleep(for: .seconds(5)) } catch { return }
+                guard await Task.detached(priority: .utility, operation: { BattleNet.running().isEmpty }).value else { continue }
+                guard let self, !Task.isCancelled else { return }
+                self.metadataRepairRetry = nil
+                self.reload()
+                return
+            }
+        }
     }
 
     func reload() {
         repairInstallMetadata()
+        rescan()
+    }
+
+    /// Reads which games are installed and running. Cheap enough for every
+    /// return to Waypoint; the repair of Battle.net's records is not, and
+    /// runs beside it (see `repairInstallMetadata`).
+    private func rescan() {
         downloadQueue.restoreAvailableJobs()
         // Battle.net's records outlive a game whose files are gone (moved to
         // the Trash, or uninstalled here): only what's on disk is listed.
@@ -967,19 +1017,27 @@ final class AppModel {
 
     private func refreshRunning() {
         let runningApps = NSWorkspace.shared.runningApplications.compactMap { $0.bundleURL?.standardizedFileURL }
-        running = Set(discoveredGames.filter { game in
-            if game.install.platform == .windows {
-                guard let title = WindowsTitle.forInstall(game.install), title.isEnabled else { return false }
-                return !WineProcesses.gameAndLaunchers(in: URL(fileURLWithPath: game.install.installPath), title: title).isEmpty
+        // A Windows game has no app to ask about: find its processes. One
+        // read of the process list serves every Windows game.
+        let windowsGames = discoveredGames.filter {
+            $0.install.platform == .windows && WindowsTitle.forInstall($0.install)?.isEnabled == true
+        }
+        var windowsProcesses: [String: [Int32]] = [:]
+        if !windowsGames.isEmpty {
+            let processes = RunningProcesses.executables()
+            for game in windowsGames {
+                guard let title = WindowsTitle.forInstall(game.install) else { continue }
+                windowsProcesses[game.id] = WineProcesses.gameAndLaunchers(
+                    in: URL(fileURLWithPath: game.install.installPath), title: title, processes: processes)
             }
+        }
+        running = Set(discoveredGames.filter { game in
+            if game.install.platform == .windows { return windowsProcesses[game.id]?.isEmpty == false }
             guard let app = game.appURL?.standardizedFileURL else { return false }
             return runningApps.contains(app)
         }.map(\.id)).union(windowsSessions.keys)
-        for game in discoveredGames where game.install.platform == .windows {
-            guard let title = WindowsTitle.forInstall(game.install), title.isEnabled else { continue }
-            for pid in WineProcesses.gameAndLaunchers(in: URL(fileURLWithPath: game.install.installPath), title: title) {
-                observeWindowsExit(pid: pid, game: game)
-            }
+        for game in windowsGames {
+            for pid in windowsProcesses[game.id] ?? [] { observeWindowsExit(pid: pid, game: game) }
         }
     }
 

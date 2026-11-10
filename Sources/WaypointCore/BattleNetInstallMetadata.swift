@@ -7,11 +7,27 @@ import Darwin
 /// and synchronize completed HighRes selections without replacing other
 /// state or unknown fields written by the Agent.
 public enum BattleNetInstallMetadata {
+    /// The app's repair, a download recording its finished install and an
+    /// uninstall all run off the main thread; they take turns at these
+    /// files. Recursive, because recording an install ends with a repair.
+    private static let writers = NSRecursiveLock()
+
+    /// Runs `body` while no repair is under way, and holds the next one off
+    /// until it returns. An uninstall goes through here, so a repair that
+    /// read the list of installs earlier can't put the game's records back.
+    static func exclusively<T>(_ body: () throws -> T) rethrows -> T {
+        writers.lock()
+        defer { writers.unlock() }
+        return try body()
+    }
+
     @discardableResult
     public static func repair(store: InstallStateStore = InstallStateStore(),
                               agentDatabase: URL = ProductDB.agentDatabaseURL) throws -> Int {
-        try repair(installs: store.standaloneInstalls(), agentDatabase: agentDatabase,
-                   ensureNotRunning: BattleNet.ensureNotRunning)
+        writers.lock()
+        defer { writers.unlock() }
+        return try repair(installs: store.standaloneInstalls(), agentDatabase: agentDatabase,
+                          ensureNotRunning: BattleNet.ensureNotRunning)
     }
 
     @discardableResult
@@ -159,6 +175,8 @@ public enum BattleNetInstallMetadata {
     /// startup repair also handles older installs and the shared Agent list.
     static func recordCompletedInstall(_ install: ProductInstall, build: InstalledBuild, store: InstallStateStore) {
         guard install.platform == .macOS else { return }
+        writers.lock()
+        defer { writers.unlock() }
         do {
             try BattleNet.ensureNotRunning()
             guard let product = InstallableProduct.forProduct(install.productCode) else { return }

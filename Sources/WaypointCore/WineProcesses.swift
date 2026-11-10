@@ -6,8 +6,12 @@ import Darwin
 public enum WineProcesses {
     private static let loaders: Set<String> = ["wine", "wine64", "wine-preloader", "wine64-preloader"]
 
+    /// Asked of every process on the Mac, so it compares the name without
+    /// building a URL for each.
     static func isLoader(_ path: String) -> Bool {
-        loaders.contains(URL(fileURLWithPath: path).lastPathComponent)
+        let bytes = path.utf8
+        let name = bytes.lastIndex(of: UInt8(ascii: "/")).map { bytes[bytes.index(after: $0)...] } ?? bytes[...]
+        return loaders.contains(String(Substring(name)))
     }
 
     public static func heroes(in directory: URL, runtime: URL? = nil) -> [Int32] {
@@ -22,8 +26,11 @@ public enum WineProcesses {
         matching(in: directory, runtime: runtime, names: title.coreNames)
     }
 
-    public static func gameAndLaunchers(in directory: URL, title: WindowsTitle, runtime: URL? = nil) -> [Int32] {
-        matching(in: directory, runtime: runtime, names: title.processNames)
+    /// `processes`: a list from `RunningProcesses.executables()` to look in,
+    /// so asking about several games reads the process list once.
+    public static func gameAndLaunchers(in directory: URL, title: WindowsTitle, runtime: URL? = nil,
+                                        processes: [(pid: pid_t, path: String)]? = nil) -> [Int32] {
+        matching(in: directory, runtime: runtime, names: title.processNames, processes: processes)
     }
 
     static func ownedGames(runtimeCache: URL) -> [Int32] {
@@ -34,10 +41,11 @@ public enum WineProcesses {
         matching(in: nil, runtime: runtimeCache, names: ["heroesofthestorm_x64.exe", "heroesswitcher_x64.exe"])
     }
 
-    private static func matching(in directory: URL?, runtime: URL?, names: Set<String>) -> [Int32] {
+    private static func matching(in directory: URL?, runtime: URL?, names: Set<String>,
+                                 processes: [(pid: pid_t, path: String)]? = nil) -> [Int32] {
         let root = directory?.resolvingSymlinksInPath().standardizedFileURL.path
         let runtimePath = runtime.map { $0.resolvingSymlinksInPath().standardizedFileURL.path + "/" }
-        return RunningProcesses.executables().compactMap { process in
+        return (processes ?? RunningProcesses.executables()).compactMap { process in
             guard isLoader(process.path),
                   runtimePath == nil || URL(fileURLWithPath: process.path).resolvingSymlinksInPath().path.hasPrefix(runtimePath!),
                   root == nil || currentDirectory(of: process.pid).map({ directory in

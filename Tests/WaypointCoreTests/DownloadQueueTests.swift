@@ -188,6 +188,9 @@ private func queuedRequest(_ directory: URL, uid: String = "hs_beta", platform: 
     queue.recoverLegacyInstalls(events: events, products: [product])
     #expect(queue.jobs["s2"]?.state == .paused)
     try queue.remove(key: "s2")
-    queue.recoverLegacyInstalls(events: events, products: [product])
+    // The import is done: the logs, slow to parse, are not read again.
+    var reads = 0
+    queue.recoverLegacyInstalls(events: { reads += 1; return events }(), products: [product])
     #expect(queue.jobs.isEmpty)
+    #expect(reads == 0)
 }
