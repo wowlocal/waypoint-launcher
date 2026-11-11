@@ -100,6 +100,32 @@ extension NSStackView {
     }
 }
 
+extension NSStackView {
+    /// Adds a view made after the stack was filled, before `other` (one of
+    /// the stack's views): how a view that is made only when first shown
+    /// takes its place.
+    func insert(_ view: NSView, before other: NSView) { insert(view, beside: other, offset: 0) }
+
+    func insert(_ view: NSView, after other: NSView) { insert(view, beside: other, offset: 1) }
+
+    private func insert(_ view: NSView, beside other: NSView, offset: Int) {
+        for gravity in [Gravity.leading, .center, .trailing] {
+            guard let index = views(in: gravity).firstIndex(of: other) else { continue }
+            insertView(view, at: index + offset, in: gravity)
+            break
+        }
+        // The stack puts a new view above its other subviews. Keep them in
+        // the order they're laid out in, as when all are there from the start.
+        let order = views as NSArray
+        sortSubviews({ first, second, order in
+            guard let order else { return .orderedSame }
+            let views = Unmanaged<NSArray>.fromOpaque(order).takeUnretainedValue()
+            let (a, b) = (views.index(of: first), views.index(of: second))
+            return a < b ? .orderedAscending : (a > b ? .orderedDescending : .orderedSame)
+        }, context: Unmanaged.passUnretained(order).toOpaque())
+    }
+}
+
 extension NSBox {
     static func separator() -> NSBox {
         let box = NSBox()

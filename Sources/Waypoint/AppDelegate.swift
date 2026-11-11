@@ -60,12 +60,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     private func makeLibraryWindow() -> NSWindow {
         let library = LibraryViewController(model: model, appUpdater: appUpdater)
-        let window = NSWindow(contentViewController: library)
+        // The toolbar and the frame come first and the content last. Each of
+        // them lays the window out; with the content already in, that was
+        // three passes over the list, building its rows, instead of one.
+        let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 460, height: 360),
+                              // The list scrolls under the toolbar.
+                              styleMask: [.titled, .closable, .miniaturizable, .resizable, .fullSizeContentView],
+                              backing: .buffered, defer: true)
         window.title = "Waypoint"
         window.toolbar = library.toolbar
         window.toolbarStyle = .unified
-        // The list scrolls under the toolbar.
-        window.styleMask.insert(.fullSizeContentView)
         window.contentMinSize = NSSize(width: 380, height: 260)
         window.setContentSize(NSSize(width: 460, height: 360))
         window.isReleasedWhenClosed = false
@@ -73,6 +77,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         window.isExcludedFromWindowsMenu = true
         window.delegate = self
         if !window.setFrameUsingName("Library") { window.center() }
+        // A window takes the size of the view its controller brings: bring
+        // one that already has the window's.
+        let frame = window.frame
+        library.view.setFrameSize(window.contentRect(forFrameRect: frame).size)
+        window.contentViewController = library
+        if window.frame != frame { window.setFrame(frame, display: false) }
         window.setFrameAutosaveName("Library")
         return window
     }
