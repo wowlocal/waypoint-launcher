@@ -462,7 +462,7 @@ final class AppModel {
             if region != (regionOverride ?? Region.preferred(games: games)) { Task { await refreshCatalog() } }
         }
         do {
-            let withoutArtwork = !askedForArtwork && ProductCatalog.shared.nativeProducts.allSatisfy { $0.artwork == nil }
+            let withoutArtwork = !askedForArtwork && ProductCatalog.shared.lacksArtwork
             try await ProductCatalog.shared.refresh(region: region, force: withoutArtwork)
             askedForArtwork = true
             catalogRevision += 1

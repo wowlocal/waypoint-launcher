@@ -118,6 +118,15 @@ private final class CatalogProtocol: URLProtocol, @unchecked Sendable {
                     if mode == "region-excluded" { types["wowf"]?["supported_regions"] = ["EU"] }
                     base["types"] = types; products[0]["base"] = base; fragment["products"] = products
                 }
+                if mode == "windows-art" {
+                    // A Windows-only title beside the games Waypoint installs natively.
+                    var products = fragment["products"] as! [[String: Any]]
+                    products.append(["id": "Fen", "base": ["program_id": "Fen", "key_art": "fenris#KEY_ART", "icon_svg": "fenris#ICON",
+                                                           "types": ["retail": ["uid": "fenris"]]]])
+                    fragment["products"] = products
+                    fragment["files"] = ["default": ["fenris#KEY_ART": ["hash": String(repeating: "1", count: 32)],
+                                                     "fenris#ICON": ["hash": String(repeating: "2", count: 32)]]]
+                }
                 body = try JSONSerialization.data(withJSONObject: fragment)
             } else if let product = Self.configHashes.keys.first(where: { path == "/v2/products/\($0)/versions" }),
                       let hash = Self.configHashes[product] {
@@ -318,4 +327,94 @@ func liveCatalogDiscoversWoWForever() async throws {
     cache.removeAll()
     #expect(cache.file(hash) == nil)
     #expect(!FileManager.default.fileExists(atPath: directory.path))
+}
+
+@Test func catalogGivesTheWindowsOnlyTitlesTheirPictures() throws {
+    func hash(_ digit: Character) -> String { String(repeating: digit, count: 32) }
+    let fragment: [String: Any] = [
+        "files": ["default": [
+            "fenris#KEY_ART": ["hash": hash("1")], "fenris#ICON": ["hash": hash("2")], "fenris#PTR_ART": ["hash": hash("3")],
+            "overwatch#INSTALL": ["hash": hash("4")], "overwatch#KEY_ART": ["hash": hash("5")],
+        ]],
+        "products": [
+            // Not a game Waypoint installs from the catalog: its entry is never offered, its pictures are kept.
+            ["id": "Fen", "base": ["program_id": "Fen", "key_art": "fenris#KEY_ART", "icon_svg": "fenris#ICON",
+                                   "types": ["ptr": ["uid": "fenris_ptr", "key_art": "fenris#PTR_ART"], "retail": ["uid": "fenris"]]]],
+            // The version Waypoint installs has pictures of its own.
+            ["id": "Pro", "base": ["program_id": "Pro", "key_art": "overwatch#KEY_ART",
+                                   "types": ["retail": ["uid": "prometheus", "install_background": "overwatch#INSTALL"]]]],
+        ],
+    ]
+    let document = try CatalogDocument(data: catalogFixture("root"))
+    let data = try JSONSerialization.data(withJSONObject: fragment)
+    let contents = try document.contents(in: data, region: .eu, supportedCodenames: ["WoW"],
+                                         windowsTitles: [.overwatch, .diabloII, .diabloIV])
+    #expect(contents.entries.isEmpty)
+    #expect(contents.windowsArtwork == [
+        "fenris": ProductArtwork(keyArt: hash("1"), icon: hash("2")),
+        "pro": ProductArtwork(keyArt: hash("4"), icon: nil),
+    ], "by product code; a title the fragment doesn't list has no entry")
+    // Only the titles asked for.
+    #expect(try document.contents(in: data, region: .eu, supportedCodenames: ["WoW"]).windowsArtwork.isEmpty)
+
+    // Other products can carry the same program id. One without the title's
+    // version isn't the title, whichever comes first and whatever it shows.
+    var crowded = fragment
+    let others: [[String: Any]] = [
+        ["id": "FenSpinOff", "base": ["program_id": "Fen", "key_art": "fenris#PTR_ART", "types": ["retail": ["uid": "fenris_spin_off"]]]],
+        ["id": "FenBare", "base": ["program_id": "Fen", "types": ["retail": ["uid": "fenris_other"]]]],
+    ]
+    for products in [others + (fragment["products"] as! [[String: Any]]), (fragment["products"] as! [[String: Any]]) + others] {
+        crowded["products"] = products
+        let found = try document.contents(in: JSONSerialization.data(withJSONObject: crowded), region: .eu, supportedCodenames: ["WoW"],
+                                          windowsTitles: [.diabloIV]).windowsArtwork
+        #expect(found == ["fenris": ProductArtwork(keyArt: hash("1"), icon: hash("2"))])
+    }
+}
+
+@Test func aCatalogRefreshSavesTheWindowsTitlesPicturesAndDropsThoseTheCatalogDropped() async throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("waypoint-catalog-windows-refresh-\(UUID())")
+    defer { try? FileManager.default.removeItem(at: root) }
+    let file = root.appendingPathComponent("catalog.json")
+    let catalog = ProductCatalog(file: file)
+    try await catalog.refresh(region: .eu, service: catalogService(cache: root.appendingPathComponent("with"), mode: "windows-art"))
+    let pictures = ProductArtwork(keyArt: String(repeating: "1", count: 32), icon: String(repeating: "2", count: 32))
+    #expect(catalog.windowsArtwork(productCode: "fenris") == pictures)
+    #expect(ProductCatalog(file: file).windowsArtwork(productCode: "fenris") == pictures, "saved with the rest")
+    // A refresh that fails leaves them.
+    do {
+        try await catalog.refresh(region: .eu, force: true, service: catalogService(cache: root.appendingPathComponent("offline"), mode: "offline"))
+        Issue.record("Expected an offline error")
+    } catch {}
+    #expect(catalog.windowsArtwork(productCode: "fenris") == pictures)
+    // One that read the whole catalog and found the game gone doesn't.
+    try await catalog.refresh(region: .eu, force: true, service: catalogService(cache: root.appendingPathComponent("without")))
+    #expect(catalog.windowsArtwork(productCode: "fenris") == nil)
+    #expect(ProductCatalog(file: file).windowsArtwork(productCode: "fenris") == nil)
+}
+
+@Test func theCatalogRemembersWindowsPicturesAndKnowsWhenItNeverLooked() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("waypoint-catalog-windows-\(UUID())")
+    defer { try? FileManager.default.removeItem(at: root) }
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    var product = InstallableProduct.hearthstone
+    product.artwork = ProductArtwork(keyArt: String(repeating: "a", count: 32))
+    let products = try JSONSerialization.jsonObject(with: JSONEncoder().encode([product]))
+    func catalog(_ name: String, _ snapshot: [String: Any]) throws -> ProductCatalog {
+        let file = root.appendingPathComponent(name)
+        try JSONSerialization.data(withJSONObject: snapshot).write(to: file)
+        return ProductCatalog(file: file)
+    }
+    let pictures = ["keyArt": String(repeating: "b", count: 32), "icon": String(repeating: "c", count: 32)]
+    let saved = try catalog("saved.json", ["products": products, "checkedAt": 0, "windowsArtwork": ["fenris": pictures]])
+    #expect(saved.windowsArtwork(productCode: "fenris") == ProductArtwork(keyArt: pictures["keyArt"], icon: pictures["icon"]))
+    #expect(saved.windowsArtwork(productCode: "pro") == nil)
+    #expect(!saved.lacksArtwork)
+    // Saved by a version that kept pictures of the native games only.
+    let older = try catalog("older.json", ["products": products, "checkedAt": 0])
+    #expect(older.nativeProducts.contains { $0.artwork != nil })
+    #expect(older.lacksArtwork, "the next refresh reads the catalog again for the Windows titles")
+    #expect(older.windowsArtwork(productCode: "fenris") == nil)
+    // Looked and found none: not the same as never having looked.
+    #expect(try !catalog("none.json", ["products": products, "checkedAt": 0, "windowsArtwork": [String: Any]()]).lacksArtwork)
 }

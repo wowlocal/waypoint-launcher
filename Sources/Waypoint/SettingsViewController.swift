@@ -37,7 +37,7 @@ final class SettingsViewController: NSViewController {
         menuBarCheckbox.action = #selector(menuBarChanged)
         artworkCheckbox.target = self
         artworkCheckbox.action = #selector(artworkChanged)
-        let artworkNote = NSTextField(wrappingLabelWithString: "A picture behind each game, and icons for games that aren’t installed. Downloaded from Blizzard’s catalog (about 6 MB); turning this off deletes the downloaded files.")
+        let artworkNote = NSTextField(wrappingLabelWithString: "A picture behind each game, and icons for games that aren’t installed. Downloaded from Blizzard’s catalog (about 7 MB); turning this off deletes the downloaded files.")
         artworkNote.font = .preferredFont(forTextStyle: .subheadline)
         artworkNote.textColor = .secondaryLabelColor
         artworkNote.preferredMaxLayoutWidth = 320

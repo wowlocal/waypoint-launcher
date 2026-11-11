@@ -19,6 +19,10 @@ public final class ProductCatalog: @unchecked Sendable {
         /// Region -> canonical fragment name -> currently offered products.
         /// Metadata above survives retirement so existing installs still work.
         var availableByRegion: [String: [String: [String]]]? = nil
+        /// Product code -> pictures of the Windows-only titles, which are
+        /// no products of the catalog's as far as installing goes (see
+        /// `WindowsTitle`). Nil until a refresh has looked for them.
+        var windowsArtwork: [String: ProductArtwork]? = nil
     }
 
     public init(file: URL = ProductCatalog.defaultFile) {
@@ -33,6 +37,18 @@ public final class ProductCatalog: @unchecked Sendable {
 
     public var nativeProducts: [InstallableProduct] {
         lock.withLock { Self.merging(InstallableProduct.fallbackNative, snapshot.products) }
+    }
+
+    /// The catalog's pictures for a Windows-only title, by product code.
+    public func windowsArtwork(productCode: String) -> ProductArtwork? {
+        lock.withLock { snapshot.windowsArtwork?[productCode] }
+    }
+
+    /// Whether what's saved was read before Waypoint kept pictures: of any
+    /// game, or of the Windows-only ones. The next refresh then reads the
+    /// catalog again, however recently it was checked.
+    public var lacksArtwork: Bool {
+        lock.withLock { snapshot.windowsArtwork == nil || snapshot.products.allSatisfy { $0.artwork == nil } }
     }
 
     public func availableNativeProducts(region: Region) -> [InstallableProduct] {
@@ -106,8 +122,12 @@ public final class ProductCatalog: @unchecked Sendable {
             }
             var byRegion = snapshot.availableByRegion ?? [:]
             byRegion[region.rawValue] = available
+            // What the catalog has now, once all of it was read. With a
+            // fragment that couldn't be, the pictures it gave before stay.
+            let windowsArtwork = discovery.failedFragments.isEmpty ? discovery.windowsArtwork
+                : (snapshot.windowsArtwork ?? [:]).merging(discovery.windowsArtwork) { _, new in new }
             return Snapshot(products: Self.merging(snapshot.products, discovery.products), checkedAt: Date(), region: region,
-                            availableByRegion: byRegion)
+                            availableByRegion: byRegion, windowsArtwork: windowsArtwork)
         }
         try FileManager.default.createDirectory(at: file.deletingLastPathComponent(), withIntermediateDirectories: true)
         try JSONEncoder().encode(updated).write(to: file, options: .atomic)
@@ -152,6 +172,7 @@ public struct LauncherCatalogService: Sendable {
         var availableByFragment: [String: [String]]
         var failedFragments: Set<String>
         var failedProducts: Set<String>
+        var windowsArtwork: [String: ProductArtwork] = [:]
     }
 
     private enum Resolution: Sendable {
@@ -185,9 +206,13 @@ public struct LauncherCatalogService: Sendable {
         let overlayData = overrides.sorted { $0.0.order < $1.0.order }.compactMap { $0.1 }
         let groups = try await Self.map(fragments.filter { !$0.isConditional }) { fragment in
             let data = try await mirror.cached(.data, fragment.hash)
-            return try catalog.entries(in: data, region: region, supportedCodenames: supported, overrides: overlayData)
+            return try catalog.contents(in: data, region: region, supportedCodenames: supported, overrides: overlayData,
+                                        windowsTitles: WindowsTitle.allCases.filter { $0 != .heroes })
         }
-        let entries = groups.flatMap { $0.1 ?? [] }.sorted { $0.productCode < $1.productCode }
+        let entries = groups.flatMap { $0.1?.entries ?? [] }.sorted { $0.productCode < $1.productCode }
+        let windowsArtwork = groups.reduce(into: [String: ProductArtwork]()) { result, group in
+            result.merge(group.1?.windowsArtwork ?? [:]) { _, new in new }
+        }
         let resolutions = try await Self.map(entries) { entry -> Resolution in
             let config = try await versions.productConfig(product: entry.productCode, region: region, platform: .macOS,
                                                           cacheDirectory: cacheDirectory)
@@ -207,11 +232,11 @@ public struct LauncherCatalogService: Sendable {
             throw TACTError.notFound("supported macOS games in launcher catalog")
         }
         var availability: [String: [String]] = [:]
-        for (fragment, entries) in groups {
-            if let entries { availability[fragment.name] = entries.map(\.productCode).filter { offered.contains($0) } }
+        for (fragment, contents) in groups {
+            if let contents { availability[fragment.name] = contents.entries.map(\.productCode).filter { offered.contains($0) } }
         }
         return Discovery(products: ProductCatalog.merging([], products), availableByFragment: availability,
-                         failedFragments: failedFragments, failedProducts: failedProducts)
+                         failedFragments: failedFragments, failedProducts: failedProducts, windowsArtwork: windowsArtwork)
     }
 
     /// Bound concurrency and isolate a broken fragment/product without hiding
@@ -315,7 +340,24 @@ struct CatalogDocument: Sendable {
         allFragments.filter { $0.regions?.contains(region) ?? true }
     }
 
+    /// What one fragment of the catalog holds for Waypoint.
+    struct Contents: Sendable {
+        /// The live versions of the games Waypoint installs natively.
+        var entries: [Entry]
+        /// Product code -> pictures of the Windows-only titles asked for.
+        var windowsArtwork: [String: ProductArtwork] = [:]
+    }
+
     func entries(in data: Data, region: Region, supportedCodenames: Set<String>, overrides: [Data] = []) throws -> [Entry] {
+        try contents(in: data, region: region, supportedCodenames: supportedCodenames, overrides: overrides).entries
+    }
+
+    /// `windowsTitles`: the Windows-only titles to find pictures for. The
+    /// catalog lists those games too, though nothing else about them is
+    /// taken from it: whether one can be installed is `WindowsTitle`'s
+    /// say, so its picture doesn't wait on the catalog offering it here.
+    func contents(in data: Data, region: Region, supportedCodenames: Set<String>, overrides: [Data] = [],
+                  windowsTitles: [WindowsTitle] = []) throws -> Contents {
         var root = try Self.object(data)
         let ids = Set((root["products"] as? [[String: Any]] ?? []).compactMap { $0["id"] as? String })
         for data in overrides {
@@ -337,9 +379,19 @@ struct CatalogDocument: Sendable {
             if let id = product["id"] as? String, let base = product["base"] as? [String: Any] { result[id] = base }
         }
         var result: [Entry] = []
+        var windowsArtwork: [String: ProductArtwork] = [:]
         for product in root["products"] as? [[String: Any]] ?? [] {
-            guard let base = product["base"] as? [String: Any], let codename = base["program_id"] as? String,
-                  supportedCodenames.contains(codename), base["hidden"] as? Bool != true,
+            guard let base = product["base"] as? [String: Any], let codename = base["program_id"] as? String else { continue }
+            // The version Waypoint installs is the one with the title's uid.
+            // Only a product that has it is the title's: others share a
+            // `program_id` in this catalog, and theirs aren't its pictures.
+            if let title = windowsTitles.first(where: { $0.codename == codename }),
+               let type = (base["types"] as? [String: [String: Any]] ?? [:]).values.first(where: { $0["uid"] as? String == title.uid })
+                   ?? (base["uid"] as? String == title.uid ? [:] : nil) {
+                let shownAs = (type["override_product_id"] as? String).flatMap { bases[$0] }
+                if let found = Self.artwork(type: type, base: base, shownAs: shownAs, files: files) { windowsArtwork[title.rawValue] = found }
+            }
+            guard supportedCodenames.contains(codename), base["hidden"] as? Bool != true,
                   base["deprecated"] as? Bool != true else { continue }
             for (typeID, type) in base["types"] as? [String: [String: Any]] ?? [:] {
                 guard let category = categories[typeID], live.contains(category),
@@ -359,7 +411,7 @@ struct CatalogDocument: Sendable {
                                     artwork: Self.artwork(type: type, base: base, shownAs: shownAs, files: files)))
             }
         }
-        return result
+        return Contents(entries: result, windowsArtwork: windowsArtwork)
     }
 
     /// Three-valued matching: account/country/client conditions cannot be

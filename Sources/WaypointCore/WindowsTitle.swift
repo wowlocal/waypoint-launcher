@@ -85,7 +85,8 @@ public enum WindowsTitle: String, CaseIterable, Sendable {
         if self == .overwatch { locales += ["thTH", "zhCN"] }
         return InstallableProduct(uid: uid, productCode: rawValue, displayName: displayName,
             folderName: folderName, codename: codename, appPath: "", launchArguments: launchArguments,
-            flavorFolder: self == .overwatch ? "_retail_" : nil, isContainerless: false, languages: locales)
+            flavorFolder: self == .overwatch ? "_retail_" : nil, isContainerless: false, languages: locales,
+            artwork: ProductCatalog.shared.windowsArtwork(productCode: rawValue))
     }
 
     var minimumOS: OperatingSystemVersion {
