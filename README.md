@@ -4,14 +4,11 @@
 
 # Waypoint
 
-**A bloat-free version of Battle.net for Apple Silicon Macs.**<br>
-Install, update and launch Blizzard games without the Battle.net app. The launcher runs natively. Just press Play.
+**A bloat-free version of Battle.net for Apple Silicon Macs.**<br>Install, update and launch Blizzard games without the Battle.net app. The launcher runs natively. Just press Play.
 
-[![Latest release](https://img.shields.io/github/v/release/wowlocal/waypoint-launcher?color=2ea44f)](https://github.com/wowlocal/waypoint-launcher/releases/latest)
-[![macOS 14+](https://img.shields.io/badge/macOS-14%2B-111?logo=apple&logoColor=white)](#build)
-[![Apple Silicon native](https://img.shields.io/badge/Apple%20Silicon-native-2ea44f)](#why)
-[![Swift 6](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)](#build)
-[![Unofficial](https://img.shields.io/badge/Blizzard-unofficial-8a8a8a)](#disclaimer)
+<a href="https://github.com/wowlocal/waypoint-launcher/releases/latest"><img src="https://img.shields.io/badge/Download_for_macOS-007AFF?style=for-the-badge&amp;logo=apple&amp;logoColor=white" alt="Download for macOS" width="350" height="48"></a>
+
+[![Latest release](https://img.shields.io/github/v/release/wowlocal/waypoint-launcher?color=2ea44f)](https://github.com/wowlocal/waypoint-launcher/releases/latest) [![macOS 14+](https://img.shields.io/badge/macOS-14%2B-111?logo=apple&logoColor=white)](#build) [![Apple Silicon native](https://img.shields.io/badge/Apple%20Silicon-native-2ea44f)](#why) [![Swift 6](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)](#build) [![Unofficial](https://img.shields.io/badge/Blizzard-unofficial-8a8a8a)](#disclaimer)
 
 <img src="docs/screenshot.png" width="600" alt="Waypoint library with colorful game icons, artwork and six installed games">
 
@@ -23,45 +20,67 @@ Install, update and launch Blizzard games without the Battle.net app. The launch
 
 ## Why
 
-The Battle.net app for Mac is still Intel-only. Every Apple Silicon Mac needs Rosetta just to open it, even though Hearthstone and World of Warcraft themselves run natively.
+A launcher should install your games, keep them up to date, and sign you in. Waypoint does that in a native Swift and AppKit window, with downloads straight from Blizzard and no Battle.net app or Agent needed to play.
 
-That is about to become a real problem: **macOS 27 is the last release with full Rosetta**. From macOS 28 on, Apple keeps only a limited subset for older games.
+The launcher runs on Apple silicon. Mac games use their own executables; supported Windows editions use an optional Wine runtime. Each game keeps its own OS, Rosetta and account requirements.
 
-A launcher only has to do three things: install the game, keep it up to date, and log it in. Waypoint does just that, natively, and nothing else.
-
-|  | Battle.net | Waypoint |
-|---|---|---|
-| Architecture | Intel (Rosetta) | Apple Silicon |
-| Size on disk | ~1.5 GB | **6 MB** |
-| Runs in the background | App + Agent + browser helpers | Nothing |
+| | Waypoint |
+|---|---|
+| Architecture | Native arm64, AppKit |
+| App size | **9.6 MB**; about 4.5 MB to download |
+| Windows components | Downloaded on demand and reused |
+| Menu bar item | Off by default; enabled in Settings |
 
 ## Features
 
-- **Native.** Written in Swift, built only for arm64.
-- **Windows HotS, free.** Builds with the optional Wine component recommend the Windows edition of Heroes of the Storm. Install and Play use the same native interface and saved accounts. CrossOver and a paid license are not required. The Windows game needs Rosetta and macOS 15+; macOS HotS remains selectable.
-- **Windows Battle.net games in Preview.** Install and launch Overwatch, Diablo IV and Diablo II: Resurrected through the same native interface and official web login. These profiles need Apple silicon, Rosetta and macOS 26.5+. Graphics components download on demand after their license is accepted. Overwatch startup and Diablo IV login have been checked; Diablo II: Resurrected has not been tested yet. Blizzard's account requirements, including Overwatch SMS Protect where required, still apply.
-- **Sign in once per game.** Uses the official Battle.net web login. Battle.net signs each game in separately, so each one asks once; after that every launch is one click.
-- **Several accounts.** Each one keeps its own sign-ins, so switching between them is one click, with no login. **Play As** launches a game once as another account.
-- **Installs games.** Click **+** in the toolbar and pick a game. Waypoint downloads it straight from Blizzard's servers and lays it out exactly the way Battle.net does, so the game takes it as its own. Interrupted installs pick up where they stopped. Every Blizzard game with a Mac version is on the list; [Supported games](#supported-games) shows what has been tested.
-- **Discovers new game versions.** Reads Blizzard's launcher catalog for live Mac releases in supported game families, including new WoW versions. Names, install IDs, folders, languages and launch arguments come from Blizzard. It checks on launch and when you return to the app, at most once an hour. The catalog stays available offline; bundled entries cover the first offline launch.
-- **Updates games itself**, including ones Battle.net installed. It checks Blizzard's servers, downloads only the files that changed, verifies every one of them, and puts them in place: loose files are swapped in, and new data goes into the game's CASC storage the way Battle.net adds it.
-- **Light.** About 27 MB of memory while it sits there. Installs and updates read Blizzard's manifests and indexes straight from disk instead of loading them, so even planning a 130 GB World of Warcraft install stays under 100 MB.
-- **Updates itself** in the background with [Sparkle](https://sparkle-project.org). New versions download silently and install when you quit. There are no update dialogs; a small "Restart to Update" appears at the bottom of the window (and in the menu bar menu, if you turned it on).
-- **Finds your games.** Reads Battle.net's install list and falls back to scanning the game folders, so it keeps working after you delete Battle.net.
-- **Changes nothing in the game.** No patches and no injected code: the login is handed over exactly the way Battle.net does it.
-- **Menu bar** quick launch, off by default. Turn it on in Settings (⌘,).
+- **Your library in one window.** Installed games appear above a collapsible **Available Games** list. Install from there or the **+** button. Pictures and icons come from Blizzard's catalog; turn off **Show game artwork** in Settings to remove them and delete the downloaded artwork.
+- **Install, update and repair.** Download directly from Blizzard, update games installed by either launcher, and use **Verify Files** to repair missing or corrupt content. Existing optional content, such as WoW's HighRes textures, is preserved.
+- **Downloads you can leave and resume.** Installs, updates and language changes survive quitting, crashes and Waypoint updates. Pause and resume in the game's row, set a shared speed limit, or keep the Mac awake for a download. Hover over progress for speed, exact sizes and estimated time left.
+- **Sign in once per game.** Use the official Battle.net web login, including two-factor authentication. Each saved account keeps its own sign-ins. Switch accounts or use **Play As** for a single launch; optionally save a login in Keychain.
+- **Windows Heroes of the Storm.** The Windows edition is recommended on supported Macs, with the macOS edition selectable in the same row. It uses a free Wine component; CrossOver is not required. Windows HotS needs Rosetta and macOS 15+.
+- **More Windows games in Preview.** Overwatch, Diablo IV and Diablo II: Resurrected use the same library and web login. They need Apple silicon, Rosetta and macOS 26.5+. Wine and graphics components download on demand; graphics installation asks you to accept its license. See the checks and limits below.
+- **Choose languages.** Pick text and speech languages when installing, or use **Change Language…** later. WoW supports separate text and speech choices.
+- **Manage game files.** Open a game in Finder or its WoW AddOns folder from **…**. **Uninstall…** moves game files to the Trash and can keep add-ons, settings and saved games. WoW editions sharing a folder can be removed separately.
+- **Discovers games and new Mac releases.** Read existing Battle.net installs or scan game folders. Blizzard's catalog supplies current Mac editions, names, folders and launch settings, including new WoW editions. The catalog is cached for offline use. Completed native installs get missing Battle.net records repaired in the background, so Battle.net can recognize them too.
+- **Small, native interface.** Library scans, metadata repair and artwork preparation run in the background. Large download manifests and indexes are read from disk rather than loaded into memory. Game files and login hand-offs follow Blizzard's formats.
+- **Updates itself quietly.** [Sparkle](https://sparkle-project.org) downloads Waypoint updates in the background and installs them when you quit. **Restart to Update** is available in the window footer. Optional menu bar quick launch is enabled in Settings (⌘,).
 
 ## Supported games
 
+Status reflects local usage logs and release validation through **11 November 2026**. ✅ means the operation has been checked; 🧪 means it is available but still needs verification. A launch check confirms startup, not every gameplay scenario. Windows Preview profiles remain Preview even when an installation or update has succeeded.
+
 | Game | Install | Launch | Updates |
 |---|---|---|---|
-| Hearthstone | ✅ Through Waypoint | ✅ Tested natively, with the Battle.net app and its Agent fully quit | ✅ Through Waypoint |
-| Warcraft III: Reforged | ✅ Tested: the same files as Battle.net's own install | ✅ Tested. The game itself is Intel-only, so it runs under Rosetta | 🧪 Through Waypoint. Tested by repairing Waypoint's and Battle.net's installs; no new build has shipped yet |
-| World of Warcraft: Retail, Classic, Classic Era, Anniversary, Forever | 🧪 Implemented, not yet tested | 🧪 Implemented, not yet tested | 🧪 Implemented, not yet tested |
-| StarCraft II, StarCraft: Remastered, Diablo III, Heroes of the Storm | 🧪 Implemented, not yet tested | 🧪 Implemented, not yet tested | 🧪 Implemented, not yet tested |
-| Overwatch (Windows Preview) | ✅ Installed through Waypoint's installer | 🧪 Startup, native web login and Retina fullscreen checked; testing stopped at SMS Protect | 🧪 Implemented, not yet tested |
-| Diablo IV (Windows Preview) | ✅ Full installation through Waypoint's installer | 🧪 Native web login and intro cinematic checked; gameplay and performance not qualified | 🧪 Implemented, not yet tested |
-| Diablo II: Resurrected (Windows Preview) | 🧪 Implemented, not yet tested | 🧪 Implemented, not yet tested | 🧪 Implemented, not yet tested |
+| Hearthstone | ✅ Through Waypoint | ✅ Native | ✅ Through Waypoint |
+| Warcraft III: Reforged | ✅ File set checked against Battle.net | ✅ Under Rosetta | ✅ Real build update |
+| WoW: Retail | ✅ Full installation | ✅ Native startup | ✅ Multiple real build updates |
+| WoW: Forever | ✅ Full installation | ✅ Native startup | ✅ Multiple real build updates |
+| WoW: Classic Era | ✅ Install checked in a temporary folder | 🧪 Not yet checked | 🧪 Not yet checked |
+| WoW: Classic, Anniversary | 🧪 Not yet checked | 🧪 Not yet checked | 🧪 Not yet checked |
+| Heroes of the Storm (macOS) | 🧪 Fresh install not yet checked | ✅ Startup checked | 🧪 Not yet checked |
+| Heroes of the Storm (Windows) | 🧪 Fresh install not yet checked | ✅ Wine/DXMT launch checked | 🧪 Not yet checked |
+| StarCraft II, StarCraft: Remastered, Diablo III | 🧪 Not yet checked | 🧪 Not yet checked | 🧪 Not yet checked |
+| Overwatch (Windows Preview) | ✅ Full installation | 🧪 Login, rendering and Retina fullscreen checked; stopped at SMS Protect | 🧪 Not yet checked |
+| Diablo IV (Windows Preview) | ✅ Full installation | 🧪 Login and intro cinematic checked; gameplay and performance not yet tested | ✅ Real build update |
+| Diablo II: Resurrected (Windows Preview) | 🧪 Not yet checked | 🧪 Not yet checked | 🧪 Not yet checked |
+
+<details>
+<summary><b>Completed real build updates</b></summary>
+
+These are completed updates recorded in Waypoint's usage logs, rather than dry runs or same-build repairs:
+
+| Game | Completed update | Date |
+|---|---|---|
+| WoW: Retail | `12.1.5.70448 → 12.1.5.70529`, then `70688` and `70783` | 23 October – 4 November 2026 |
+| WoW: Forever | `1.60.1.70790 → 1.60.1.70862 → 1.60.1.70888` | 7–11 November 2026 |
+| Warcraft III | `3.0.0.24268 → 3.0.1.24371` | 10 November 2026 |
+| Diablo IV (Windows) | `3.2.3.73883 → 3.2.4.74043` | 11 November 2026 |
+
+WoW Retail and Forever were also launched repeatedly. Classic Era has a completed installation test, but its later unfinished download is not counted as a successful update. A completed game update does not establish gameplay or performance qualification.
+
+</details>
+
+Blizzard's ownership and account requirements still apply, including Overwatch SMS Protect where required. [Release notes](https://github.com/wowlocal/waypoint-launcher/releases) describe changes and earlier validation.
 
 ## Download
 
@@ -82,26 +101,18 @@ open build/Waypoint.app
 
 Move `Waypoint.app` to `/Applications` if you want to keep it.
 
-To include Windows HotS support, first build the free runtime using the
-[runtime build instructions](tools/wine-runtime/README.md). The component adds
-about 314 MB before compression. Without it, the existing native-only build
-and game support remain available. This feature is currently on the
-`main` branch. Release builds download the component on the first Windows HotS
-Play instead of bundling it into every Waypoint update. A verified cached copy
-works without another download. Windows HotS needs macOS 15+, Apple silicon and
-Rosetta; native games retain the macOS 14 minimum.
+The local build includes Windows support when a runtime or download descriptor is staged at `build/windows-runtime-release/distribution`. See the [runtime build instructions](tools/wine-runtime/README.md) to prepare it. Without that component, the local build supports Mac games.
 
-Public builds include Overwatch, Diablo IV and Diablo II: Resurrected as Preview
-profiles. `WINDOWS_EXPERIMENTAL=1` creates an isolated development app with a
-separate bundle identifier and no public update feed. See
-[profiles, components and qualification status](tools/wine-runtime/WINDOWS-TITLES.md).
+Published releases already include the download descriptors. The Windows runtime downloads on the first Windows Play and is reused from its verified cache; it is not bundled into every Waypoint update. Windows HotS needs macOS 15+, Apple silicon and Rosetta. The other Windows profiles need macOS 26.5+ and retain their Preview labels.
+
+`WINDOWS_EXPERIMENTAL=1` creates an isolated development app with a separate bundle identifier and no public update feed. See [profiles, components and qualification status](tools/wine-runtime/WINDOWS-TITLES.md).
 
 <details>
 <summary><b>Making a release</b></summary>
 
 `scripts/release.sh` runs the tests, then builds the app and signs it with your Developer ID (hardened runtime). It notarizes and staples the app, then packs it into a DMG and signs, notarizes and staples that too. It checks the result with Gatekeeper, then writes the Sparkle `appcast.xml` and verifies its EdDSA signature.
 
-With `--publish` it does what snippets does: the DMG and `appcast.xml` go to S3 (`storage.yandexcloud.net/macos-releases/waypoint/`), which is the update feed installed copies read, and the DMG is mirrored as a GitHub release. S3 credentials come from `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` or a gitignored `scripts/release.env`.
+With `--publish`, the DMG and `appcast.xml` go to S3 (`storage.yandexcloud.net/macos-releases/waypoint/`), which is the update feed installed copies read, and the DMG is mirrored as a GitHub release. S3 credentials come from `AWS_ACCESS_KEY_ID`/`AWS_SECRET_ACCESS_KEY` or a gitignored `scripts/release.env`.
 
 ```sh
 # use the existing notary keychain profile (the release script defaults to this)
@@ -125,69 +136,41 @@ Updates are signed with an EdDSA key kept in the keychain under the account `way
 
 ## Usage
 
-1. Open Waypoint and press **Play**.
-2. The first time, sign in to Battle.net in the window that appears. Two-factor auth works.
-3. That's it. Later launches skip the login. Battle.net signs in to each game separately, so another game asks once on its first launch.
+1. Open Waypoint. Games already on disk appear in the library. To install one, expand **Available Games** and click **Install**, or use **+** in the toolbar.
+2. Choose the folder, language and region. The install sheet shows the download size and any data already available to reuse.
+3. Press **Play**. Sign in through Battle.net's web page when asked. Each game asks once per account; later launches reuse its saved sign-in.
 
-The window's subtitle shows the account games launch as. To switch, click the person button in the toolbar and pick another account. **Add Account…** signs in to one more, **Sign In Again…** gets the current one a fresh login for the game you played last (use it if a game says it can't log you in; other games then ask once on their next launch), and **Sign Out** forgets the current one. The same menu is in the menu bar item.
-
-**Optional automatic login.** Choose **Save Login in Keychain…** in the account menu, or **Save Login…** in Settings, to save that account's email/phone and password on this Mac. Before launching a game, Waypoint uses the token it saved for that game; if it has none, it tries the saved login once. **Sign In Again and Play** also tries it with a fresh session. Passwords stay in Keychain, outside preferences and diagnostics. A different account's token is rejected.
-
-Rejected logins, CAPTCHA and two-factor prompts pause automatic login and open the same Battle.net page for you to continue. **Update Saved Login…** replaces the saved credentials and enables automatic login again; **Forget Saved Login** disables it and deletes the password. Sign Out deletes it too. Temporary failures wait 5 minutes, then 15 minutes between attempts, with at most three consecutive attempts before pausing. Attempts happen only when you launch a game; the limit survives app restarts. Waypoint cannot observe a token rejection inside an already running game: close it, then use **Sign In Again…** in the account menu or **Sign In Again and Play**.
-
-To install a game, click **+** in the toolbar and pick it. Choose where it goes (`/Applications` by default), the language and the region; the sheet shows the real download size. Progress shows in the game's row. Hover over the progress bar for the recent download speed, exact downloaded and total bytes, and remaining size.
-
-Click the pause button beside an install or update to stop downloading. The row shows **Pausing…** until active requests and file writes have stopped, then **Paused** with its progress and a resume button. Resume keeps the same folder, language, region and verification options, reusing completed files and stored game data. These actions are also available in the optional menu bar item.
-
-Unfinished installs, updates and language changes survive quitting, a crash, and updating Waypoint itself. They return paused with their saved progress and a resume button. Normal quit and **Restart to Update** stop active downloads and save their state first. Saved jobs live in `~/Library/Application Support/Waypoint/Downloads/`; downloaded game data stays in the game's folder. Finishing or cancelling removes the job from the queue. Older unfinished CASC installs can be recovered from their download journals and Waypoint's install logs.
-
-The small cup button beside a download keeps the Mac awake while that download runs, with the display free to turn off. It starts off for each new download. Pausing or an error releases the sleep hold; Resume restores it if the button is still on. Finishing the installation releases it automatically. Choosing Sleep or closing the lid still follows macOS's normal behavior.
-
-To stop an unfinished download, pause it and click the **✕** button beside it. Downloaded data is kept for a later attempt, and an installed game returns to its normal Play/Update controls.
-
-To leave bandwidth for other apps, open **Settings…** (⌘,) and move the **Download speed** slider. Choose a speed from **250 KB/s** to **100 MB/s**, or **Unlimited** (the default). The limit covers all game downloads combined, applies immediately and is remembered for next time.
-
-Temporary connection and server failures retry automatically with increasing delays. If a download still stops, **Resume** continues with the same folder, language and region, reusing completed files and stored game data. After quitting Waypoint, select the same game and install folder again to continue an unfinished install. Whole-file transfers use resume data when available; an unfinished archive batch is downloaded again.
-
-When a new version is out, **Play** turns into **Update**, with a progress bar while it downloads.
-
-Click **…** beside the button, or right-click the row, for more:
-
-- **Play As**: launches the game once as another saved account, without switching the active one.
-- **Sign In Again and Play**: use this if a game ever rejects the login.
-- **Verify Files**: re-checks every file and repairs broken ones.
-- **Play Without Updating**: shown only when an update is waiting.
-
-> [!NOTE]
-> Waypoint doesn't install or update games while Battle.net or its background Agent is running, so the two never write to the same files at once. Quit Battle.net and try again; a download that was already under way picks up where it stopped.
+The window subtitle shows the active account. Use the person button to switch accounts, **Add Account…**, **Sign In Again…** or **Sign Out**. **Play As** in a game's **…** menu launches it once as another account. If a game rejects its sign-in, close it and use **Sign In Again and Play**.
 
 <details>
-<summary><b>Screenshots: installs and updates</b></summary>
+<summary><b>Optional automatic login</b></summary>
 
-The screenshots use a demo account and sample download and update data.
+Choose **Save Login in Keychain…** in the account menu, or **Save Login…** in Settings, to save that account's email/phone and password on this Mac. When a game has no saved token, Waypoint tries those credentials once. **Sign In Again and Play** also tries them with a fresh session. Passwords stay in Keychain, outside preferences and diagnostics.
 
-**Installing a game:** choose the folder, language and region, and see the download size.
-
-<img src="docs/screenshot-install.png" width="480" alt="World of Warcraft installation sheet with location, language, region and download size">
-
-**Game update available:** the launch button becomes Update.
-
-<img src="docs/screenshot-update-available.png" width="600" alt="Hearthstone update available with an Update button">
-
-**Downloading a game update:** progress and downloaded bytes appear in the game's row.
-
-<img src="docs/screenshot-game-update.png" width="600" alt="Hearthstone update at 42 percent, with 1.26 GB of 3 GB downloaded">
-
-**Downloading Waypoint itself:** a quiet status line appears at the bottom.
-
-<img src="docs/screenshot-waypoint-download.png" width="600" alt="Waypoint downloading its own update in the window footer">
-
-**Waypoint update ready:** restart now, or let it install when you quit.
-
-<img src="docs/screenshot-waypoint-update.png" width="600" alt="Waypoint update ready with a Restart to Update button">
+Rejected logins, CAPTCHA and two-factor prompts open the Battle.net page for you to continue. **Update Saved Login…** replaces the saved credentials and enables automatic login again; **Forget Saved Login** or Sign Out removes them. Temporary failures use increasing delays, with automatic attempts paused after three consecutive failures. Attempts happen only when you launch a game, and the limit survives app restarts.
 
 </details>
 
+**Downloads.** Pause beside the progress bar; **Pausing…** lasts until requests and file writes stop. Resume keeps the original folder, languages, region and verification options. After quitting or updating Waypoint, unfinished jobs return **Paused** with their saved progress. Temporary network failures retry automatically. Hover over progress for recent speed, downloaded and total bytes, remaining size, and an estimated time when available.
+
+The cup button keeps the Mac awake while that download runs, while allowing the display to sleep. It starts off for each new download. Pausing, an error or completion releases the sleep hold; resuming restores it if still enabled. Choosing Sleep or closing the lid still follows macOS's normal behavior.
+
+Use **✕** on a paused or failed download to stop tracking it. An unfinished installation offers **Keep Downloaded Data** or **Move to Trash** when cleanup is safe. Installed games and shared data are protected; cancelling an update keeps its downloaded data. Keeping data lets a later install into the same folder reuse it.
+
+**Settings** (⌘,) offers a combined download limit from **250 KB/s** to **100 MB/s**, or **Unlimited**. It also controls game artwork and the optional menu bar item. Turning artwork off removes its downloaded files; turning it on downloads them again (about 7 MB).
+
+**The game's … menu** also offers:
+
+- **Play Without Updating**, when an update is waiting.
+- **Verify Files**, to check and repair game content.
+- **Change Language…**, to download a new text or speech language.
+- **Show in Finder**, plus **Open AddOns Folder** for a WoW edition whose folder exists. These work while the game runs too.
+- **Uninstall…**, with a confirmation and an option to keep WoW add-ons, settings and screenshots, or a Windows game's saved games and settings. Other WoW editions stay installed; shared storage is cleaned only of content they no longer need.
+
+> [!NOTE]
+> Quit Battle.net and its background Agent before installing, updating or uninstalling. Waypoint prevents concurrent writes to the same game files. An active game must also be closed before changing its files.
+
+For a bug report, choose **Help → Export Diagnostics…**. The export includes installation state and recent logs, with credentials and authentication tickets redacted. **Help → Show Logs in Finder** opens the local logs.
 
 ## How it works
 
@@ -230,7 +213,7 @@ sequenceDiagram
 
 **Token.** The Battle.net web login at `https://<region>.battle.net/login/en/?externalChallenge=login&app=<CODE>` finishes with a redirect to `http://localhost:0/?ST=<token>`. The token looks like `US-<32 hex>-<account id>`.
 
-**Accounts.** Each account has its own persistent WebKit data store (`WKWebsiteDataStore(forIdentifier:)`), so their Battle.net sessions sit side by side. The token per account and game is kept in the login keychain and used for every launch: it lasts for months, and Battle.net's login page keeps no session that would hand out a new one without the form, so switching accounts needs no login either. The BattleTag and email come from the JSON API behind Blizzard's account page (`account.battle.net/api/details`), read with that account's session.
+**Accounts.** Each account has its own persistent WebKit data store (`WKWebsiteDataStore(forIdentifier:)`), so their Battle.net sessions sit side by side. The token per account and game is kept in the login keychain and reused for later launches until it needs to be replaced. Switching accounts selects that account's saved sign-in for the game. The BattleTag and email come from the JSON API behind Blizzard's account page (`account.battle.net/api/details`), read with that account's session.
 
 **Launch commands**
 
@@ -238,7 +221,11 @@ sequenceDiagram
 |---|---|---|
 | Hearthstone | `Hearthstone.app/…/Hearthstone -launch -uid hs_beta` | install folder |
 | WoW | `World of Warcraft.app/…/World of Warcraft -launcherlogin -uid wow` | flavor folder (`_retail_`, `_classic_`, …) |
-| Other games | `<Game>.app/…/<Game> -launch -uid <uid>` | install folder (Warcraft III: `_retail_`) |
+| Warcraft III, StarCraft | `<Game>.app/…/<Game> -launch -uid <uid>` | install folder (Warcraft III: `_retail_`) |
+| StarCraft II, Heroes of the Storm | game switcher with `-sso=1 -launch -uid <uid>` | install folder |
+| Diablo III | `Diablo III.app/…/Diablo III OnlineService.SSO=true -launch -uid d3` | install folder |
+
+Launch arguments come from Blizzard's product configuration, with bundled defaults for offline use. Windows titles use a per-game Wine environment and a small helper to write their encrypted login options; their profiles and graphics requirements are documented [here](tools/wine-runtime/WINDOWS-TITLES.md).
 
 Games are started with `posix_spawn` and disclaim the launcher as their responsible process, like apps started by Battle.net. So privacy prompts, such as the microphone for WoW voice chat, belong to the game.
 
@@ -246,14 +233,14 @@ Games are started with `posix_spawn` and disclaim the launcher as their responsi
 
 1. Ask `https://<region>.version.battle.net/v2/products/hsb/versions` which build is live.
 2. Fetch that build's config and *install manifest* from the CDN. The manifest lists every file with its MD5 and tags (platform, region, language, content).
-3. Select files with the tags Battle.net recorded for your install. For Hearthstone that's exactly the 5398 files in its folder.
+3. Select files with the tags Battle.net recorded for your install. The selection follows the installation's platform, region, languages and optional content.
 4. Diff against the installed build's manifest. Only files whose hash changed are downloaded. Without the old manifest, local files are hashed instead (this is what **Verify Files** does).
 5. Look up each file's encoded key in the *encoding* table and its location in the CDN archive indexes, then download it with an HTTP range request, decode the BLTE container chunk by chunk, and check the MD5.
 6. Once every file is downloaded and verified, swap them in, then delete the files the new build no longer has.
 
 Downloads are staged in `.waypoint-staging` inside the game folder, so an interrupted update resumes where it stopped. Updating refuses to run while the game is open.
 
-**Installs.** Hearthstone keeps its files loose, so installing it is an update into an empty folder. Every other game keeps its data in local CASC storage (`Data/data`), which the game reads itself. Waypoint downloads the files the build's download manifest lists for your platform and language, and writes the `data.###` archives, the 16 `.idx` index files and `shmem` byte for byte the way the Battle.net Agent does. The app and the other files from the install manifest go loose into the game folder, next to `.build.info`, `Data/config` and `Data/indices` (every index the CDN config names, plus the two archive-group indexes Battle.net builds from them, byte for byte as it does). A Warcraft III install made by Waypoint holds exactly the same 73,972 files as Battle.net's own install of that build, and the game launches from it.
+**Installs.** Hearthstone keeps its files loose, so installing it is an update into an empty folder. Every other game keeps its data in local CASC storage (`Data/data`), which the game reads itself. Waypoint downloads the files the build's download manifest lists for your platform and language, and writes the `data.###` archives, the 16 `.idx` index files and `shmem` byte for byte the way the Battle.net Agent does. The app and the other files from the install manifest go loose into the game folder, next to `.build.info`, `Data/config` and `Data/indices` (every index the CDN config names, plus the two archive-group indexes Battle.net builds from them, byte for byte as it does). A Warcraft III test install matched Battle.net's file set and launched successfully.
 
 **Updates of these games** add the new build's files to the same storage, whoever wrote it. Nothing already there is moved or rewritten: new files go after the end of the last archive, then into new ones; the 16 index files are written as their next version, then `shmem`, and only then are the old index files removed, so the game always finds a complete set. An interrupted update resumes from its journal. Loose files are updated like Hearthstone's. Afterwards, files no installed build uses any more (an old build's) are removed from the storage and their disk space is given back: a dead end of an archive is cut off, and dead ranges inside are punched out, which APFS frees in place without moving any data. `waypoint-cli cleanup <uid>` does the same on demand.
 
@@ -284,19 +271,21 @@ WAYPOINT_NETWORK_TESTS=1 xcrun swift test --filter liveUpdate  # real update, 36
 
 ## Roadmap
 
-- [x] Hearthstone
-- [x] Sign in once, launch with one click
-- [x] Several accounts, switched without signing in again
-- [x] Hearthstone updates without Battle.net
-- [x] Install games from scratch, for every Blizzard game with a Mac version
-- [x] Warcraft III installed and launched without Battle.net
-- [ ] World of Warcraft tested on macOS
-- [x] Updates for games stored in CASC (World of Warcraft, StarCraft, Diablo III, Warcraft III, Heroes of the Storm)
-- [ ] A CASC game's update tested on a real new build
-- [x] Prebuilt, notarized releases
-- [x] Self-updates (Sparkle)
-- [x] App icon
-- [x] Native AppKit interface (no SwiftUI)
+- [x] Install, launch and update Hearthstone, Warcraft III, WoW Retail and WoW: Forever
+- [x] Update CASC games to newly released builds, including Diablo IV on Windows
+- [x] Launch Windows Heroes of the Storm through the free Wine component
+- [x] Offer Overwatch, Diablo IV and Diablo II: Resurrected as Windows Preview profiles
+- [x] Keep multiple accounts and per-game sign-ins, with optional Keychain login
+- [x] Resume downloads across restarts, with pause, bandwidth and keep-awake controls
+- [x] Change languages, repair content and uninstall individual WoW editions
+- [x] Discover new Mac editions and fetch artwork from Blizzard's catalog
+- [x] Native AppKit library, signed/notarized releases and silent self-updates
+- [ ] Verify launch and real build updates for the remaining WoW Classic editions
+- [ ] Verify full fresh installs and real build updates for both HotS editions
+- [ ] Verify StarCraft II, StarCraft: Remastered and Diablo III end to end
+- [ ] Complete Overwatch gameplay checks beyond account/SMS requirements
+- [ ] Test Diablo IV gameplay and sustained performance
+- [ ] Verify Diablo II: Resurrected installation, launch and updates
 
 ## Disclaimer
 
