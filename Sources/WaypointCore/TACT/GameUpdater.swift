@@ -524,6 +524,33 @@ public enum RunningProcesses {
         }.map(\.pid)
     }
 
+    /// Whether the app at `bundle` is running: a process in `processes`
+    /// (from `executables()`) runs an executable in its `Contents/MacOS`.
+    /// A helper nested deeper in the bundle doesn't count: it isn't the game,
+    /// and nothing reports when it quits. Asking Launch Services instead
+    /// costs a round trip for every running app.
+    public static func isRunning(bundle: URL, in processes: [(pid: pid_t, path: String)]) -> Bool {
+        guard let path = kernelPath(of: bundle) else { return false }
+        let folder = Array((path + "/Contents/MacOS/").utf8)
+        return processes.contains { process in
+            let executable = process.path.utf8
+            return executable.starts(with: folder) && !executable.dropFirst(folder.count).contains(UInt8(ascii: "/"))
+        }
+    }
+
+    /// The path the kernel has for the file at `url`, which is how
+    /// `executables()` spells paths: links resolved (`/private/tmp`, not
+    /// `/tmp`), in the letter case the volume stores. nil if it can't be opened.
+    public static func kernelPath(of url: URL) -> String? {
+        // O_EVTONLY: only to ask about the file; doesn't keep a volume mounted.
+        let descriptor = open(url.path, O_EVTONLY | O_CLOEXEC)
+        guard descriptor >= 0 else { return nil }
+        defer { close(descriptor) }
+        var buffer = [CChar](repeating: 0, count: Int(MAXPATHLEN))
+        guard fcntl(descriptor, F_GETPATH, &buffer) == 0 else { return nil }
+        return String(decoding: buffer.prefix { $0 != 0 }.map { UInt8(bitPattern: $0) }, as: UTF8.self)
+    }
+
     /// Every process's executable path (those we're allowed to see).
     public static func executables() -> [(pid: pid_t, path: String)] {
         let capacity = Int(proc_listallpids(nil, 0)) + 64
