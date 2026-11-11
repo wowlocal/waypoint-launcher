@@ -331,23 +331,20 @@ final class GameCell: NSView {
 
     /// Whether `makeMenu` has anything to show, without building it.
     private var offersMenu: Bool {
-        guard let state, !state.isRunning else { return false }
+        guard let state else { return false }
         switch state.phase {
-        case .idle, .failed: return state.game.isSupported || state.game.isInstalled
+        // A running game still has its folders to show.
+        case .idle, .failed: return state.game.isInstalled || (state.game.isSupported && !state.isRunning)
         default: return false
         }
     }
 
     private func makeMenu() -> NSMenu? {
-        guard let state, let model, !state.isRunning else { return nil }
-        switch state.phase {
-        case .idle, .failed: break
-        default: return nil
-        }
+        guard let state, let model, offersMenu else { return nil }
         let game = state.game
         let menu = NSMenu()
         menu.autoenablesItems = false
-        if game.isSupported {
+        if game.isSupported, !state.isRunning {
             if model.availableUpdate(for: game) != nil {
                 menu.addItem(ActionItem("Play Without Updating") { Task { await model.play(game) } })
             }
@@ -371,8 +368,15 @@ final class GameCell: NSView {
                 menu.addItem(ActionItem("Verify Files", enabled: state.canUpdate) { Task { await model.update(game, verify: true) } })
             }
         }
-        // Unsupported games too: removing one is the one thing left to do with it.
         if game.isInstalled {
+            if !menu.items.isEmpty { menu.addItem(.separator()) }
+            menu.addItem(ActionItem("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([game.finderItem]) })
+            if let addOns = game.addOnsFolder {
+                menu.addItem(ActionItem("Open AddOns Folder") { NSWorkspace.shared.open(addOns) })
+            }
+        }
+        // Unsupported games too: removing one is the one thing left to do with it.
+        if game.isInstalled, !state.isRunning {
             if !menu.items.isEmpty { menu.addItem(.separator()) }
             let uninstall = ActionItem("Uninstall…", enabled: model.canUninstall(game)) { [weak self] in
                 guard let window = self?.window else { return }
@@ -465,6 +469,10 @@ final class InstallableCell: NSView {
             downloadTooltip = { [weak model] in
                 downloadDetails(update, bytesPerSecond: model?.downloadBytesPerSecond(uid: uid), status: "Downloading…")
             }
+        case .uninstalling(let step):
+            // A cancelled install's data going to the Trash.
+            fraction = nil
+            detail.stringValue = step
         default:
             break
         }
@@ -524,7 +532,6 @@ private final class DownloadButtons: NSObject {
         pauseResume.action = #selector(togglePause)
         cancel.target = self
         cancel.action = #selector(cancelDownload)
-        cancel.toolTip = "Stop this download. Downloaded data is kept for next time."
     }
 
     func show(_ controls: DownloadControls, phase: AppModel.Phase, uid: String, model: AppModel) {
@@ -549,6 +556,9 @@ private final class DownloadButtons: NSObject {
         keepAwake.showKeepAwake(controls.keepsMacAwake)
         keepAwake.isEnabled = controls.canPause || controls.canResume
         cancel.isHidden = !controls.canCancel
+        // An install asks what becomes of its data; anything else keeps it.
+        let help = model.isInstallDownload(uid: uid) ? "Stop this install" : "Stop this download. Downloaded data is kept for next time."
+        if cancel.toolTip != help { cancel.toolTip = help }
     }
 
     @objc private func togglePause() {
@@ -560,9 +570,16 @@ private final class DownloadButtons: NSObject {
         }
     }
 
+    /// An install that never finished asks whether its data stays or goes
+    /// to the Trash. Anything else keeps it without asking: an update's
+    /// data is the installed game's own.
     @objc private func cancelDownload() {
         guard let uid, let model else { return }
-        model.cancelDownload(uid: uid)
+        if let window = cancel.window, let install = model.unfinishedInstall(uid: uid) {
+            CancelInstallAlert.present(install, uid: uid, model: model, in: window)
+        } else {
+            model.cancelDownload(uid: uid)
+        }
     }
 
     @objc private func toggleKeepAwake() {

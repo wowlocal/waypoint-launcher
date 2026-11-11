@@ -325,3 +325,126 @@ private func wow(_ root: URL, _ code: String = "wow") -> ProductInstall {
     try store.remove(hots)
     #expect(store.load().isEmpty)
 }
+
+// MARK: An install that never finished
+
+/// What `InstallPlatform.claim` leaves before an install's first download.
+private let claim = ".waypoint-platform"
+
+@Test func anInstallThatNeverFinishedGoesToTheTrashWithItsFolder() throws {
+    let box = try Sandbox()
+    defer { box.cleanUp() }
+    let root = try box.make("Hearthstone", [claim, ".waypoint-staging/0a1b", "Data/data/data.000"])
+    let install = InstallableProduct.hearthstone.install(at: root, region: .eu, language: "enUS", tagString: "OSX EU? enUS text?")
+
+    let uninstaller = box.uninstaller(install, name: "Hearthstone", keeping: false)
+    let plan = try #require(try uninstaller.unfinishedPlan())
+    #expect(plan.removesFolder)
+    try uninstaller.carryOut(plan)
+    #expect(!box.exists("Hearthstone"))
+    #expect(box.exists("Trash/Hearthstone/Data/data/data.000"), "to the Trash, not deleted")
+}
+
+@Test func whatWasInTheFolderBeforeTheInstallStays() throws {
+    let box = try Sandbox()
+    defer { box.cleanUp() }
+    // The user picked a folder that already held things of their own.
+    let root = try box.make("StarCraft", ["Maps/old.scm", "notes.txt"])
+    try box.make("StarCraft", [claim, "Data/data/data.000", ".waypoint-staging/0a1b"])
+    let install = ProductInstall(uid: "s1", productCode: "s1", installPath: root.path, region: "eu")
+
+    let uninstaller = box.uninstaller(install, name: "StarCraft")
+    let plan = try #require(try uninstaller.unfinishedPlan())
+    #expect(!plan.removesFolder)
+    #expect(plan.items == [claim, ".waypoint-staging", "Data"])
+    try uninstaller.carryOut(plan)
+    #expect(box.exists("StarCraft/Maps/old.scm"))
+    #expect(box.exists("StarCraft/notes.txt"))
+    #expect(!box.exists("StarCraft/Data"))
+    #expect(box.exists("Trash/StarCraft/Data/data/data.000"))
+
+    // The Finder's own file being older doesn't keep a folder from going whole.
+    let viewed = try box.make("Viewed", [".DS_Store"])
+    try box.make("Viewed", [claim, "Data/data/data.000"])
+    let other = ProductInstall(uid: "s1", productCode: "s1", installPath: viewed.path, region: "eu")
+    #expect(try box.uninstaller(other, name: "StarCraft").unfinishedPlan()?.removesFolder == true)
+}
+
+@Test func aFolderNoInstallClaimedIsLeftAlone() throws {
+    let box = try Sandbox()
+    defer { box.cleanUp() }
+    // No claim file: an older Waypoint's download, or not a download at all.
+    let unclaimed = try box.make("Unclaimed", ["Data/data/data.000"])
+    #expect(try box.uninstaller(wow(unclaimed), name: "World of Warcraft").unfinishedPlan() == nil)
+    // Claimed only now, on resuming: everything in it is older than the claim.
+    try box.make("Unclaimed", [claim])
+    let plan = try #require(try box.uninstaller(wow(unclaimed), name: "World of Warcraft").unfinishedPlan())
+    #expect(plan.items == [claim], "only the claim itself is known to be the install's")
+}
+
+@Test func anInstalledGameIsNeverTakenForAnUnfinishedInstall() async throws {
+    let box = try Sandbox()
+    defer { box.cleanUp() }
+    // The app is in place: the install failed after its files were in, or
+    // the job is really an update.
+    let root = try box.make("World of Warcraft", [claim, wowApp, "Data/data/data.000"])
+    let uninstaller = box.uninstaller(wow(root), name: "World of Warcraft")
+    #expect(try uninstaller.unfinishedPlan() == nil)
+    await #expect(throws: UninstallError.notUnfinished("World of Warcraft")) { try await uninstaller.removeUnfinished() }
+    #expect(box.exists("World of Warcraft/\(wowApp)"), "nothing moved")
+
+    // No app, but .build.info lists it: its records were being written.
+    let listed = try box.make("Listed", [claim, "Data/data/data.000"])
+    #expect(try box.uninstaller(wow(listed), name: "World of Warcraft").unfinishedPlan() != nil)
+    try Data("\(buildInfoHeader)\neu|1|aaaa|12.1.5|wow\n".utf8).write(to: listed.appendingPathComponent(".build.info"))
+    #expect(try box.uninstaller(wow(listed), name: "World of Warcraft").unfinishedPlan() == nil)
+    // Or it can't be read, so there is no telling what it lists.
+    try Data([0xff, 0xfe, 0xfd]).write(to: listed.appendingPathComponent(".build.info"))
+    #expect(try box.uninstaller(wow(listed), name: "World of Warcraft").unfinishedPlan() == nil)
+}
+
+@Test func anUnfinishedInstallIntoASharedFolderStays() throws {
+    let box = try Sandbox()
+    defer { box.cleanUp() }
+    // Classic Era is installed; retail was being added to its folder, so
+    // what retail downloaded is inside the storage Classic Era uses.
+    let root = try box.make("World of Warcraft", [claim, eraApp, "Data/data/data.000", "_retail_/.waypoint-staging/0a1b"])
+    try Data("\(buildInfoHeader)\neu|1|bbbb|1.15.8|wow_classic_era\n".utf8).write(to: root.appendingPathComponent(".build.info"))
+    #expect(try box.uninstaller(wow(root), name: "World of Warcraft").unfinishedPlan() == nil)
+
+    // The same when only another download says the folder is in use.
+    let fresh = try box.make("Fresh", [claim, "Data/data/data.000"])
+    #expect(try box.uninstaller(wow(fresh), name: "World of Warcraft", others: [wow(fresh, "wow_classic_era")]).unfinishedPlan() == nil)
+    #expect(try box.uninstaller(wow(fresh), name: "World of Warcraft").unfinishedPlan()?.removesFolder == true)
+}
+
+@Test func anUnfinishedReinstallLeavesTheAddOnsOfTheInstallBeforeIt() throws {
+    let box = try Sandbox()
+    defer { box.cleanUp() }
+    // Uninstalled earlier keeping its add-ons, then installed again and stopped.
+    try box.make("World of Warcraft", [
+        "_retail_/Interface/AddOns/Details/Details.toc", "_retail_/WTF/Config.wtf", "_classic_era_/Interface/AddOns/Questie/Questie.toc",
+    ])
+    let root = try box.make("World of Warcraft", [claim, "_retail_/.waypoint-staging/0a1b", "Data/data/data.000"])
+    // Even asked not to keep them: clearing a download never takes the user's files.
+    let uninstaller = box.uninstaller(wow(root), name: "World of Warcraft", keeping: false)
+    let plan = try #require(try uninstaller.unfinishedPlan())
+    #expect(!plan.removesFolder)
+    #expect(plan.keepsUserFiles)
+    #expect(plan.items == [claim, "Data", "_retail_/.waypoint-staging"])
+    var keeping = uninstaller
+    keeping.keepsUserFiles = true
+    try keeping.carryOut(plan)
+    #expect(box.exists("World of Warcraft/_retail_/Interface/AddOns/Details/Details.toc"))
+    #expect(box.exists("World of Warcraft/_retail_/WTF/Config.wtf"))
+    #expect(box.exists("World of Warcraft/_classic_era_/Interface/AddOns/Questie/Questie.toc"), "another version's add-ons stay too")
+    #expect(!box.exists("World of Warcraft/Data"))
+    #expect(box.exists("Trash/World of Warcraft/Data/data/data.000"))
+}
+
+@Test func anUnfinishedInstallWithNoFolderYetHasNothingToClear() throws {
+    let box = try Sandbox()
+    defer { box.cleanUp() }
+    let missing = box.dir.appendingPathComponent("Nowhere")
+    #expect(throws: UninstallError.folderMissing(missing.path)) { try box.uninstaller(wow(missing), name: "World of Warcraft").unfinishedPlan() }
+}

@@ -49,6 +49,27 @@ public struct UpdateProgress: Sendable, Equatable, Codable {
     public var totalFiles: Int
 
     public var fraction: Double { totalBytes == 0 ? 1 : Double(completedBytes) / Double(totalBytes) }
+
+    /// How long the rest takes at `bytesPerSecond`, or nil when that says
+    /// nothing: all of it is in, or the transfer has all but stopped.
+    public func secondsLeft(bytesPerSecond: Double) -> TimeInterval? {
+        guard totalBytes > completedBytes, bytesPerSecond >= 1_000 else { return nil }
+        return Double(totalBytes - completedBytes) / bytesPerSecond
+    }
+
+    /// "about 5 minutes left", "about 1 hour 20 minutes left". To the
+    /// minute, and to five minutes past the hour: the rate it comes from is
+    /// an average over ten seconds, so anything finer would only flicker.
+    public static func timeLeft(_ seconds: TimeInterval) -> String {
+        guard seconds >= 60 else { return "less than a minute left" }
+        guard seconds <= 24 * 3600 else { return "more than a day left" }
+        func count(_ value: Int, _ unit: String) -> String { "\(value) \(unit)\(value == 1 ? "" : "s")" }
+        var minutes = Int((seconds / 60).rounded())
+        guard minutes >= 60 else { return "about \(count(minutes, "minute")) left" }
+        minutes = Int((Double(minutes) / 5).rounded()) * 5
+        let hours = count(minutes / 60, "hour")
+        return minutes % 60 == 0 ? "about \(hours) left" : "about \(hours) \(count(minutes % 60, "minute")) left"
+    }
 }
 
 public enum UpdateError: Error, CustomStringConvertible {

@@ -39,6 +39,8 @@ public enum UninstallError: Error, LocalizedError, Equatable {
     case holdsOtherGames(String)
     case sharedFolder(String)
     case protectedFolder(String)
+    /// What was taken for an install that never finished isn't one (any more).
+    case notUnfinished(String)
 
     public var errorDescription: String? {
         switch self {
@@ -48,6 +50,7 @@ public enum UninstallError: Error, LocalizedError, Equatable {
         case .holdsOtherGames(let path): "Other games are installed inside “\(path)”, so Waypoint won’t move it to the Trash"
         case .sharedFolder(let path): "Other games share “\(path)” in a way Waypoint doesn’t know. Uninstall this one in Battle.net"
         case .protectedFolder(let path): "The game is installed right in “\(path)”, so Waypoint won’t move that folder to the Trash"
+        case .notUnfinished(let name): "\(name) is installed after all, or shares its folder with another game, so Waypoint left its files where they are"
         }
     }
 }
@@ -165,21 +168,87 @@ public struct GameUninstaller: Sendable {
         return FileManager.default.fileExists(atPath: home.path) ? home : nil
     }
 
+    // MARK: An install that never finished
+
+    /// What clearing away an install that never finished would move to the
+    /// Trash, or nil when it isn't plainly that: the game is on disk after
+    /// all, `.build.info` already lists it (or can't be read), or its folder
+    /// is shared with other games (what it downloaded is then inside the
+    /// archives they use, and stays for the next install or update to pick
+    /// up or clean).
+    ///
+    /// Only what the install itself put there goes: what appeared in the
+    /// folder since the install claimed it (`.waypoint-platform`, written
+    /// before the first download). Anything older stays where it is,
+    /// whoever's it is, and so do the user's own files from an earlier
+    /// install. A folder with nothing older in it goes whole.
+    public func unfinishedPlan() throws -> UninstallPlan? {
+        var keeping = self
+        keeping.keepsUserFiles = true
+        var plan = try keeping.plan()
+        let root = plan.root
+        let mine: Set = [install.productCode, install.uid]
+        let buildInfo = root.appendingPathComponent(".build.info")
+        guard !plan.sharesStorage, !GameCatalog.game(for: install).isInstalled,
+              !FileManager.default.fileExists(atPath: buildInfo.path) || (try? String(contentsOf: buildInfo, encoding: .utf8)) != nil,
+              !Self.buildInfoProducts(in: root).contains(where: mine.contains),
+              let claimed = Self.created(root.appendingPathComponent(InstallPlatform.claimFileName)) else { return nil }
+        let candidates = plan.removesFolder ? Self.names(in: root) : plan.items
+        let own = candidates.filter { name in Self.created(root.appendingPathComponent(name)).map { $0 >= claimed } == true }
+        guard !own.isEmpty else { return nil }
+        if !plan.removesFolder || candidates.contains(where: { $0 != ".DS_Store" && !own.contains($0) }) {
+            plan.removesFolder = false
+            plan.items = own
+        }
+        return plan
+    }
+
+    private static func created(_ url: URL) -> Date? {
+        try? url.resourceValues(forKeys: [.creationDateKey]).creationDate
+    }
+
+    /// Moves an install that never finished to the Trash, checking afresh
+    /// that it is one. Nothing is touched if it isn't.
+    @discardableResult
+    public func removeUnfinished() async throws -> UninstallPlan {
+        var keeping = self
+        keeping.keepsUserFiles = true
+        return try keeping.remove(unfinished: true)
+    }
+
     // MARK: Remove
 
     /// Plans afresh, then moves the game to the Trash and forgets it. If
     /// moving fails, everything is put back as it was.
     @discardableResult
     public func remove() async throws -> UninstallPlan {
+        try remove(unfinished: false)
+    }
+
+    private func remove(unfinished: Bool) throws -> UninstallPlan {
         // Not while Battle.net's records are being repaired: a repair that
         // had already listed this game would write its records again.
         try BattleNetInstallMetadata.exclusively {
-            let plan = try plan()
+            let plan: UninstallPlan
+            if unfinished {
+                guard let found = try unfinishedPlan() else { throw UninstallError.notUnfinished(displayName) }
+                plan = found
+            } else {
+                plan = try self.plan()
+            }
             guard RunningProcesses.inside(plan.root).isEmpty else {
                 throw UninstallError.gameRunning(sharedFolder: plan.sharesStorage ? plan.root.lastPathComponent : nil)
             }
             try BattleNet.ensureNotRunning()
-            try carryOut(plan)
+            // An unfinished install may still be written by another process
+            // (the command-line tool, a second copy of Waypoint), which this
+            // one's downloads don't show: it then holds the storage's lock.
+            let storages = unfinished ? Self.names(in: plan.root)
+                .map { plan.root.appendingPathComponent($0).appendingPathComponent("data", isDirectory: true) }
+                .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true } : []
+            try withExtendedLifetime(try storages.map(StorageLock.init)) {
+                try carryOut(plan)
+            }
             return plan
         }
     }

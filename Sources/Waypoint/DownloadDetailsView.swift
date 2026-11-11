@@ -121,7 +121,9 @@ func downloadDetails(_ progress: UpdateProgress?, bytesPerSecond: Double?, statu
     let total = (Double(progress.totalBytes) / 1_000_000).formatted(.number.precision(.fractionLength(2)))
     let downloaded = "\(done) of \(total) MB"
     if let bytesPerSecond {
-        return "\(preciseSize(UInt64(max(0, bytesPerSecond))))/s\n\(downloaded)"
+        let rate = "\(preciseSize(UInt64(max(0, bytesPerSecond))))/s"
+        guard let seconds = progress.secondsLeft(bytesPerSecond: bytesPerSecond) else { return "\(rate)\n\(downloaded)" }
+        return "\(rate) · \(UpdateProgress.timeLeft(seconds))\n\(downloaded)"
     } else {
         return "\(status)\n\(downloaded)"
     }

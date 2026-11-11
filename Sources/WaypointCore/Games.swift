@@ -38,6 +38,29 @@ public struct Game: Identifiable, Equatable, Sendable {
         return InstallableProduct.forProduct(install.productCode)?.supportedPlatforms.contains(.macOS) == true &&
             appURL != nil && (runsNatively || Rosetta.isInstalled)
     }
+
+    /// What to select in the Finder to show where the game is: its app, a
+    /// Windows game's program, or failing both the install folder.
+    public var finderItem: URL {
+        if let appURL { return appURL }
+        let root = URL(fileURLWithPath: install.installPath, isDirectory: true)
+        if let title = WindowsTitle.forInstall(install) {
+            let program = root.appendingPathComponent(title.executablePath)
+            if FileManager.default.fileExists(atPath: program.path) { return program }
+        }
+        return root
+    }
+
+    /// A World of Warcraft version's add-ons folder, once there is one: the
+    /// game makes it the first time it runs.
+    public var addOnsFolder: URL? {
+        guard family == .worldOfWarcraft else { return nil }
+        let folder = URL(fileURLWithPath: install.installPath, isDirectory: true)
+            .appendingPathComponent(GameCatalog.wowFolder(for: install.productCode), isDirectory: true)
+            .appendingPathComponent("Interface/AddOns", isDirectory: true)
+        var isDirectory: ObjCBool = false
+        return FileManager.default.fileExists(atPath: folder.path, isDirectory: &isDirectory) && isDirectory.boolValue ? folder : nil
+    }
 }
 
 public enum GameCatalog {

@@ -92,3 +92,31 @@ private actor DownloadSignalForSpeed {
         else { opened = true }
     }
 }
+
+@Test func timeLeftComesFromWhatRemainsAndTheRate() {
+    let progress = UpdateProgress(completedBytes: 1_000_000_000, totalBytes: 13_000_000_000, completedFiles: 0, totalFiles: 1)
+    #expect(progress.secondsLeft(bytesPerSecond: 40_000_000) == 300)
+    #expect(progress.secondsLeft(bytesPerSecond: 0) == nil, "a stalled transfer says nothing")
+    #expect(progress.secondsLeft(bytesPerSecond: 500) == nil)
+    let done = UpdateProgress(completedBytes: 5, totalBytes: 5, completedFiles: 1, totalFiles: 1)
+    #expect(done.secondsLeft(bytesPerSecond: 40_000_000) == nil)
+    // Reused data can put a resumed download past its own total.
+    let past = UpdateProgress(completedBytes: 6, totalBytes: 5, completedFiles: 1, totalFiles: 1)
+    #expect(past.secondsLeft(bytesPerSecond: 40_000_000) == nil)
+}
+
+@Test func timeLeftIsRoundedToWhatTheRateCanSupport() {
+    #expect(UpdateProgress.timeLeft(12) == "less than a minute left")
+    #expect(UpdateProgress.timeLeft(60) == "about 1 minute left")
+    #expect(UpdateProgress.timeLeft(89) == "about 1 minute left")
+    #expect(UpdateProgress.timeLeft(90) == "about 2 minutes left")
+    #expect(UpdateProgress.timeLeft(300) == "about 5 minutes left")
+    #expect(UpdateProgress.timeLeft(59 * 60) == "about 59 minutes left")
+    #expect(UpdateProgress.timeLeft(59 * 60 + 30) == "about 1 hour left")
+    #expect(UpdateProgress.timeLeft(80 * 60) == "about 1 hour 20 minutes left")
+    #expect(UpdateProgress.timeLeft(83 * 60) == "about 1 hour 25 minutes left")
+    #expect(UpdateProgress.timeLeft(118 * 60) == "about 2 hours left")
+    #expect(UpdateProgress.timeLeft(24 * 3600) == "about 24 hours left")
+    #expect(UpdateProgress.timeLeft(24 * 3600 + 1) == "more than a day left")
+    #expect(UpdateProgress.timeLeft(3 * 24 * 3600) == "more than a day left")
+}

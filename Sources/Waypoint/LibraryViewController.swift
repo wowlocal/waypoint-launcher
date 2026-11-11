@@ -33,6 +33,7 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
                 return (row.showsEdition, progress, error)
             case .installable(let row):
                 if case .failed = row.phase { return (false, false, true) }
+                if case .uninstalling = row.phase { return (false, false, false) }
                 return (false, true, false)
             }
         }
@@ -180,7 +181,7 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
             let phase = model.phase(of: product)
             if phase != .idle { rows.append(.installable(InstallableRowState(product, phase: phase, model: model))) }
             switch phase {
-            case .updating, .pausing, .paused: continue
+            case .updating, .pausing, .paused, .uninstalling: continue
             default: break
             }
             installChoices.append(product)

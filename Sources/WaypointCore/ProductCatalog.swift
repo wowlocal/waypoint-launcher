@@ -249,8 +249,11 @@ struct CatalogDocument: Sendable {
         var hash: String
         var name: String
         var order: Int
-        var condition: Data?
-        var isConditional: Bool { condition != nil }
+        /// Where the fragment applies, when the catalog puts a condition on
+        /// it (`requires`); nil when it always applies. Worked out once, as
+        /// the document is read: the regions are few and the conditions many.
+        var regions: Set<Region>?
+        var isConditional: Bool { regions != nil }
     }
 
     struct Entry: Sendable {
@@ -287,9 +290,17 @@ struct CatalogDocument: Sendable {
             guard fragment["decryption_key_id"] == nil,
                   let hash = fragment["hash"] as? String, Self.isHash(hash),
                   let name = fragment["name"] as? String else { return nil }
-            if let requirement = fragment["requires"], !(requirement is [String: Any]), !(requirement is Bool) { return nil }
-            return Fragment(hash: hash, name: name, order: index,
-                            condition: fragment["requires"].flatMap { try? JSONSerialization.data(withJSONObject: $0, options: .fragmentsAllowed) })
+            var regions: Set<Region>?
+            if let requirement = fragment["requires"] {
+                if let flag = requirement as? Bool {
+                    regions = flag ? Set(Region.allCases) : []
+                } else if let condition = requirement as? [String: Any] {
+                    regions = Set(Region.allCases.filter { Self.matches(condition, region: $0) == true })
+                } else {
+                    return nil
+                }
+            }
+            return Fragment(hash: hash, name: name, order: index, regions: regions)
         }
         strings = Self.strings(in: root)
         typeCategories = Self.categories(in: root)
@@ -297,12 +308,7 @@ struct CatalogDocument: Sendable {
     }
 
     func fragments(for region: Region) -> [Fragment] {
-        allFragments.filter { fragment in
-            guard let condition = fragment.condition else { return true }
-            guard let value = try? JSONSerialization.jsonObject(with: condition, options: .fragmentsAllowed) else { return false }
-            if let flag = value as? Bool { return flag }
-            return (value as? [String: Any]).flatMap { Self.matches($0, region: region) } == true
-        }
+        allFragments.filter { $0.regions?.contains(region) ?? true }
     }
 
     func entries(in data: Data, region: Region, supportedCodenames: Set<String>, overrides: [Data] = []) throws -> [Entry] {

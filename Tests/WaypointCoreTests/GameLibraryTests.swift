@@ -108,3 +108,25 @@ private func makeLibraryApp(at url: URL) throws {
     try Data([0x0a, 0x80]).write(to: folderFile)
     #expect(library.installs().map(\.installPath) == [folders[2].path], "Standalone installs remain a fallback when folder metadata is corrupt")
 }
+
+@Test func aGameShowsItsAppInTheFinderAndAWoWVersionItsAddOnsOnceItHasThem() throws {
+    let dir = FileManager.default.temporaryDirectory.appendingPathComponent("waypoint-folders-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: dir) }
+    let root = dir.appendingPathComponent("World of Warcraft", isDirectory: true)
+    try makeLibraryApp(at: root.appendingPathComponent("_retail_/World of Warcraft.app"))
+    let install = ProductInstall(uid: "wow", productCode: "wow", installPath: root.path, region: "eu")
+
+    var game = GameCatalog.game(for: install)
+    #expect(game.finderItem.standardizedFileURL == root.appendingPathComponent("_retail_/World of Warcraft.app").standardizedFileURL)
+    #expect(game.addOnsFolder == nil, "the game makes the folder when it first runs")
+
+    let addOns = root.appendingPathComponent("_retail_/Interface/AddOns", isDirectory: true)
+    try FileManager.default.createDirectory(at: addOns, withIntermediateDirectories: true)
+    #expect(game.addOnsFolder?.standardizedFileURL == addOns.standardizedFileURL)
+
+    // A game whose app can't be found still has a folder to show; only WoW has add-ons.
+    game.appURL = nil
+    game.family = .other
+    #expect(game.finderItem.standardizedFileURL == root.standardizedFileURL)
+    #expect(game.addOnsFolder == nil)
+}

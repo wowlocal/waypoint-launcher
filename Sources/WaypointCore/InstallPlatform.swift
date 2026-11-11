@@ -27,7 +27,7 @@ public enum InstallPlatform: String, Codable, Sendable, CaseIterable {
     /// build record is authoritative, even when Waypoint's record is stale.
     func validate(install: ProductInstall, fileManager: FileManager = .default) throws {
         let root = URL(fileURLWithPath: install.installPath)
-        let marker = root.appendingPathComponent(".waypoint-platform")
+        let marker = root.appendingPathComponent(Self.claimFileName)
         if fileManager.fileExists(atPath: marker.path) {
             let data = try Data(contentsOf: marker)
             guard data == Data((rawValue + "\n").utf8) else {
@@ -69,13 +69,17 @@ public enum InstallPlatform: String, Codable, Sendable, CaseIterable {
         }
     }
 
+    /// The file `claim` leaves in an install folder. Whatever is in the
+    /// folder and older than it was there before Waypoint installed anything.
+    static let claimFileName = ".waypoint-platform"
+
     /// Claim a new folder before the first resumable write. O_EXCL prevents
     /// two installers from claiming an empty root for different platforms.
     func claim(install: ProductInstall) throws {
         try validate(install: install)
         let root = URL(fileURLWithPath: install.installPath)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
-        let path = root.appendingPathComponent(".waypoint-platform").path
+        let path = root.appendingPathComponent(Self.claimFileName).path
         let fd = open(path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o600)
         if fd < 0 {
             if errno == EEXIST { try validate(install: install); return }

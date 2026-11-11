@@ -508,6 +508,9 @@ final class AppModel {
 
     func canCancelDownload(uid: String) -> Bool { downloads[uid]?.canCancel == true && !isUninstalling(uid: uid) }
 
+    /// A new install's download, rather than an update of an installed game.
+    func isInstallDownload(uid: String) -> Bool { downloads[uid]?.request?.kind == .install }
+
     /// Stop tracking a paused job. Its verified data stays available for a
     /// later install/update; no writer is active when canCancel is true.
     func cancelDownload(uid: String) {
@@ -516,6 +519,68 @@ final class AppModel {
         reload()
         phases.removeValue(forKey: uid)
         Log.notice(.cdn, "cancelled", "keeping downloaded data", ["uid": uid])
+    }
+
+    /// An install that never finished, which cancelling can also clear away.
+    struct UnfinishedInstall {
+        var name: String
+        /// What would go to the Trash.
+        var plan: UninstallPlan
+        fileprivate var uninstaller: GameUninstaller
+    }
+
+    /// The install behind `uid`, when cancelling it can offer to move what
+    /// it downloaded to the Trash: a paused or failed install of a game
+    /// that isn't on disk, into a folder nothing else uses. Nil for updates
+    /// and language changes, whose data is the installed game's own, for a
+    /// folder other games or downloads share, and when nothing in the
+    /// folder is plainly this install's (see `GameUninstaller.unfinishedPlan`).
+    func unfinishedInstall(uid: String) -> UnfinishedInstall? {
+        guard canCancelDownload(uid: uid), let request = downloads[uid]?.request, request.kind == .install else { return nil }
+        let folder = Self.folderKey(request.install.installPath)
+        guard !uninstallingFolders.contains(folder), !cleaningFolders.contains(folder),
+              !downloads.keys.contains(where: { $0 != uid && jobFolders[$0] == folder }) else { return nil }
+        let name = request.product?.displayName ?? GameCatalog.game(for: request.install).displayName
+        // Other downloads count as games too: one into a folder inside this
+        // one keeps the folder from going.
+        let others = discoveredGames.map(\.install) + downloads.filter { $0.key != uid }.values.compactMap(\.request).map(\.install)
+        let uninstaller = GameUninstaller(install: request.install, displayName: name, keepsUserFiles: true, otherInstalls: others)
+        guard let plan = try? uninstaller.unfinishedPlan() else { return nil }
+        return UnfinishedInstall(name: name, plan: plan, uninstaller: uninstaller)
+    }
+
+    /// Cancels an install that never finished and moves what it downloaded
+    /// to the Trash. Checks again that it is one: if anything changed since
+    /// the question was asked, nothing happens and the download stays.
+    func cancelDownloadMovingToTrash(uid: String) async {
+        guard let install = unfinishedInstall(uid: uid) else { return }
+        let folder = Self.folderKey(install.plan.root.path)
+        uninstallingFolders.insert(folder)
+        phases[uid] = .uninstalling("Moving to the Trash…")
+        Log.notice(.cdn, "cancel_requested", "moving downloaded data to the Trash", ["uid": uid, "path": folder])
+        var failure: Error?
+        do {
+            try await install.uninstaller.removeUnfinished()
+        } catch {
+            failure = error
+        }
+        // Either way the row is the download's again: gone with it, or back
+        // to paused or failed.
+        uninstallingFolders.remove(folder)
+        phases.removeValue(forKey: uid)
+        if let failure {
+            Log.error(.cdn, "cancel_failed", "downloaded data stays", ["uid": uid, "error": failure])
+            // Said in full: the errors that stop this (Battle.net running,
+            // another writer) have no text of their own for an alert.
+            let alert = NSAlert()
+            alert.messageText = "Waypoint couldn’t move \(install.name)’s download to the Trash"
+            alert.informativeText = "Nothing was moved, and the download is still there to resume or cancel.\n\n\(errorMessage(failure))"
+            alert.runModal()
+            return
+        }
+        discardDownload(uid: uid)
+        reload()
+        Log.notice(.cdn, "cancelled", "moved downloaded data to the Trash", ["uid": uid])
     }
 
     func canResumeDownload(uid: String) -> Bool {
