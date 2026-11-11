@@ -153,8 +153,10 @@ public enum GameCatalog {
     }
 }
 
-/// Finds installed games from every source we know about.
-public struct GameLibrary {
+/// Finds installed games from every source we know about. It only reads, so
+/// it may be used from any thread: the one member that isn't Sendable is the
+/// file manager, and `FileManager.default` is safe to share.
+public struct GameLibrary: @unchecked Sendable {
     public var agentDatabase: URL
     /// Folders to scan for a `.product.db`, so games keep working after the
     /// Battle.net app is removed.

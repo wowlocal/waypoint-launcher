@@ -3,6 +3,19 @@ import Observation
 import CryptoKit
 import WaypointCore
 
+/// What a look at the library reads from outside Waypoint: the installed
+/// games (records and folders on disk) and the running processes. Reading
+/// takes several milliseconds, and may be done off the main thread.
+private struct LibraryScan: Sendable {
+    var games: [Game]
+    var processes: [(pid: pid_t, path: String)]
+
+    init(_ library: GameLibrary) {
+        games = library.games()
+        processes = RunningProcesses.executables()
+    }
+}
+
 @MainActor
 @Observable
 final class AppModel {
@@ -101,6 +114,16 @@ final class AppModel {
     @ObservationIgnored private var repairsMetadataAgain = false
     /// Waits for Battle.net to quit, then repairs.
     @ObservationIgnored private var metadataRepairRetry: Task<Void, Never>?
+    /// How many times the games (`show`) and which of them run
+    /// (`refreshRunning`) have been set. What a scan read off the main thread
+    /// isn't shown if the same was set meanwhile: that came from a read on
+    /// the main thread, and there's no telling which of the two is later.
+    @ObservationIgnored private var scansShown = 0
+    @ObservationIgnored private var runningShown = 0
+    @ObservationIgnored private var scanOffMainThread: Task<Void, Never>?
+    /// Waypoint was returned to again while a scan was being read; another
+    /// follows it.
+    @ObservationIgnored private var scansAgain = false
 
     init() {
         let info = Bundle.main.infoDictionary ?? [:]
@@ -130,8 +153,10 @@ final class AppModel {
         observers.append(NotificationCenter.default.addObserver(
             forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
-                self?.reload()
+                self?.reloadOffMainThread()
                 _ = Task {
+                    // Both go by the games the scan finds.
+                    while let scan = self?.scanOffMainThread { await scan.value }
                     await self?.refreshCatalog()
                     await self?.checkForUpdates()
                 }
@@ -211,14 +236,51 @@ final class AppModel {
         rescan()
     }
 
-    /// Reads which games are installed and running. Cheap enough for every
-    /// return to Waypoint; the repair of Battle.net's records is not, and
-    /// runs beside it (see `repairInstallMetadata`).
+    /// `reload` for coming back to Waypoint, which happens far more often
+    /// than anything changes: the disk and the process list are read off the
+    /// main thread, so the window comes forward without waiting for them.
+    private func reloadOffMainThread() {
+        repairInstallMetadata()
+        scanOffMainThreadOnce()
+    }
+
+    private func scanOffMainThreadOnce() {
+        guard scanOffMainThread == nil else {
+            scansAgain = true
+            return
+        }
+        let library = library, scans = scansShown, running = runningShown
+        scanOffMainThread = Task.detached(priority: .userInitiated) { [weak self] in
+            let scan = LibraryScan(library)
+            await self?.scannedOffMainThread(scan, afterScans: scans, running: running)
+        }
+    }
+
+    private func scannedOffMainThread(_ scan: LibraryScan, afterScans scans: Int, running: Int) {
+        scanOffMainThread = nil
+        if scans == scansShown {
+            show(scan.games, processes: running == runningShown ? scan.processes : nil)
+        }
+        if scansAgain {
+            scansAgain = false
+            scanOffMainThreadOnce()
+        }
+    }
+
+    /// Reads which games are installed and running, and shows that. Cheap
+    /// next to the repair of Battle.net's records, which runs beside it (see
+    /// `repairInstallMetadata`).
     private func rescan() {
+        show(library.games(), processes: nil)
+    }
+
+    /// `found`: the games on record, installed or not. `processes`: the
+    /// process list read with them, or nil to read it now.
+    private func show(_ found: [Game], processes: [(pid: pid_t, path: String)]?) {
+        scansShown += 1
         downloadQueue.restoreAvailableJobs()
         // Battle.net's records outlive a game whose files are gone (moved to
         // the Trash, or uninstalled here): only what's on disk is listed.
-        let found = library.games()
         discoveredGames = found.filter(\.isInstalled)
         var all = discoveredGames
         if let pendingHeroesInstall {
@@ -240,7 +302,7 @@ final class AppModel {
             addedHeroes = true
             return true
         }
-        refreshRunning()
+        refreshRunning(processes: processes)
         Log.info(.library, "scanned", nil, ["games": games.map { "\($0.install.uid)@\($0.install.version ?? "?")" }.joined(separator: ","),
                                             "missing": found.filter { !$0.isInstalled }.map(\.id).joined(separator: ",")])
     }
@@ -1015,26 +1077,29 @@ final class AppModel {
         alert.runModal()
     }
 
-    private func refreshRunning() {
-        let runningApps = NSWorkspace.shared.runningApplications.compactMap { $0.bundleURL?.standardizedFileURL }
-        // A Windows game has no app to ask about: find its processes. One
-        // read of the process list serves every Windows game.
+    /// Which games are running, by their processes: a Mac game's run its
+    /// app's executable, a Windows game's are found by `WineProcesses`.
+    /// `processes`: the list from `RunningProcesses.executables()` to go by;
+    /// nil reads it now.
+    private func refreshRunning(processes: [(pid: pid_t, path: String)]? = nil) {
+        runningShown += 1
+        // One read of the process list serves every game. Launch Services
+        // knows the running apps too, but telling where each one is costs a
+        // round trip per app, on every return to Waypoint.
+        let processes = processes ?? RunningProcesses.executables()
         let windowsGames = discoveredGames.filter {
             $0.install.platform == .windows && WindowsTitle.forInstall($0.install)?.isEnabled == true
         }
         var windowsProcesses: [String: [Int32]] = [:]
-        if !windowsGames.isEmpty {
-            let processes = RunningProcesses.executables()
-            for game in windowsGames {
-                guard let title = WindowsTitle.forInstall(game.install) else { continue }
-                windowsProcesses[game.id] = WineProcesses.gameAndLaunchers(
-                    in: URL(fileURLWithPath: game.install.installPath), title: title, processes: processes)
-            }
+        for game in windowsGames {
+            guard let title = WindowsTitle.forInstall(game.install) else { continue }
+            windowsProcesses[game.id] = WineProcesses.gameAndLaunchers(
+                in: URL(fileURLWithPath: game.install.installPath), title: title, processes: processes)
         }
         running = Set(discoveredGames.filter { game in
             if game.install.platform == .windows { return windowsProcesses[game.id]?.isEmpty == false }
-            guard let app = game.appURL?.standardizedFileURL else { return false }
-            return runningApps.contains(app)
+            guard let app = game.appURL else { return false }
+            return RunningProcesses.isRunning(bundle: app, in: processes)
         }.map(\.id)).union(windowsSessions.keys)
         for game in windowsGames {
             for pid in windowsProcesses[game.id] ?? [] { observeWindowsExit(pid: pid, game: game) }
