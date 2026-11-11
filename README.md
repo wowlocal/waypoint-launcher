@@ -13,7 +13,7 @@ Install, update and launch Blizzard games without the Battle.net app. The launch
 [![Swift 6](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)](#build)
 [![Unofficial](https://img.shields.io/badge/Blizzard-unofficial-8a8a8a)](#disclaimer)
 
-<img src="docs/screenshot.png" width="600" alt="Waypoint library with Hearthstone, Warcraft III and the account switcher">
+<img src="docs/screenshot.png" width="600" alt="Waypoint library with colorful game icons, artwork and six installed games">
 
 **English** · [Русский](README.ru.md)
 

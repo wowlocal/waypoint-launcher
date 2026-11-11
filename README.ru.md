@@ -13,7 +13,7 @@
 [![Swift 6](https://img.shields.io/badge/Swift-6-F05138?logo=swift&logoColor=white)](#сборка)
 [![Unofficial](https://img.shields.io/badge/Blizzard-unofficial-8a8a8a)](#дисклеймер)
 
-<img src="docs/screenshot.png" width="600" alt="Библиотека Waypoint: Hearthstone, Warcraft III и переключение аккаунта">
+<img src="docs/screenshot.png" width="600" alt="Библиотека Waypoint с цветными иконками, обложками и шестью установленными играми">
 
 [English](README.md) · **Русский**
 
