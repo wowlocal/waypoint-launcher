@@ -11,10 +11,9 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
     private enum Row {
         case game(GameRowState)
         case installable(InstallableRowState)
-        // PROTOTYPE (available games)
         case availableHeader(count: Int, expanded: Bool)
         /// `key`: the uid its install would have.
-        case available(InstallableProduct, key: String)
+        case available(InstallableProduct, key: String, picture: URL?, icon: URL?)
 
         /// The same for a game while it is offered, being installed and
         /// installed, so its row moves from one place to the next rather
@@ -24,7 +23,7 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
             case .game(let row): "title \(row.game.id)"
             case .installable(let row): "title \(row.uid)"
             case .availableHeader: "available header"
-            case .available(_, let key): "title \(key)"
+            case .available(_, let key, _, _): "title \(key)"
             }
         }
 
@@ -39,7 +38,11 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
         }
 
         var hasBanner: Bool {
-            if case .game(let row) = self { row.banner != nil && BannerView.style.isCard } else { false }
+            switch self {
+            case .game(let row): row.banner != nil
+            case .installable(let row): row.picture != nil
+            case .availableHeader, .available: false
+            }
         }
 
         /// A game's or an install's row: the ones with a hairline between them.
@@ -90,9 +93,8 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
     private let accountMenu = NSMenu()
     private var accountItem: NSMenuToolbarItem?
     private var subtitle = ""
-    /// PROTOTYPE (available games): whether the list under the heading shows.
-    private var showsAvailableGames = UserDefaults.standard.object(forKey: "showsAvailableGames") as? Bool
-        ?? (ProcessInfo.processInfo.environment["WAYPOINT_AVAILABLE"] == "1") {
+    /// Whether the games that can be installed show under their heading.
+    private var showsAvailableGames = UserDefaults.standard.bool(forKey: "showsAvailableGames") {
         didSet { UserDefaults.standard.set(showsAvailableGames, forKey: "showsAvailableGames") }
     }
 
@@ -214,14 +216,15 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
     private func render() {
         var rows = model.games.map { Row.game(GameRowState($0, model: model)) }
         var installChoices: [InstallableProduct] = []
-        // PROTOTYPE (available games): the ones with no row above.
+        // The ones with no row above.
         var available: [Row] = []
         for product in model.installable {
-            let phase = model.phase(of: product)
+            let phase = model.rowPhase(of: product)
             if phase != .idle {
                 rows.append(.installable(InstallableRowState(product, phase: phase, model: model)))
             } else {
-                available.append(.available(product, key: model.installKey(for: product)))
+                let artwork = model.artwork(productCode: product.productCode)
+                available.append(.available(product, key: model.installKey(for: product), picture: artwork.picture, icon: artwork.icon))
             }
             switch phase {
             case .updating, .pausing, .paused: continue
@@ -289,7 +292,7 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
             if previousRows.map(\.id) != current || previousRows.map(\.kind) != rows.map(\.kind) {
                 table.reloadData()
             } else {
-                update(from: previousRows)
+                update(from: previousRows.map { $0 })
             }
             return
         }
@@ -313,21 +316,21 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
         }
         // Rows came, went or changed places: slide them there.
         let previous = previousRows.map(\.id)
-        if previous != current { arrange(from: previous, to: current) }
-        update(from: previous == current ? previousRows : nil)
+        if previous != current { arrange(from: previous, to: newRows) }
+        let before = Dictionary(uniqueKeysWithValues: previousRows.map { ($0.id, $0) })
+        update(from: rows.map { before[$0.id] })
     }
 
     /// Shows the rows' new content (progress, say) in the cells they have,
     /// so a button under the pointer isn't swapped out mid-click. `previous`:
-    /// the same rows as they were, to tell which changed height.
-    private func update(from previous: [Row]?) {
+    /// each row as it was, nil for a new one, to tell which changed height.
+    private func update(from previous: [Row?]) {
         table.enumerateAvailableRowViews { rowView, row in
             configure(rowView.view(atColumn: 0) as? NSView, at: row)
         }
         // Retiling the table on every progress report interrupts native
         // tooltips. Only invalidate heights when the row's layout changes.
-        guard let previous else { return }
-        let resized = IndexSet(rows.indices.filter { rows[$0].layout != previous[$0].layout })
+        let resized = IndexSet(rows.indices.filter { row in previous[row].map { $0.layout != rows[row].layout } ?? false })
         guard !resized.isEmpty else { return }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0
@@ -335,12 +338,15 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
         }
     }
 
-    /// Takes the table from the rows `previous` (ids) to `current`, animated:
-    /// rows that are gone fade out, those that stay slide to their new
-    /// places, new ones fade in. The table applies each call to the rows as
-    /// they are by then, so the steps are worked out the same way.
-    private func arrange(from previous: [String], to current: [String]) {
+    /// Takes the table from the rows with the ids `previous` to `final`,
+    /// animated: rows that are gone fade out, those that stay slide to
+    /// their new places, new ones appear. The table applies each call to the
+    /// rows as they are by then, so the steps are worked out the same way,
+    /// and `rows` is what the table holds at each step, should it ask.
+    private func arrange(from previous: [String], to final: [Row]) {
+        let current = final.map(\.id)
         let staying = Set(previous).intersection(current)
+        rows = final.filter { staying.contains($0.id) }
         table.beginUpdates()
         table.removeRows(at: IndexSet(previous.indices.filter { !staying.contains(previous[$0]) }), withAnimation: .effectFade)
         var order = previous.filter(staying.contains)
@@ -351,22 +357,15 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
             order.insert(id, at: place)
         }
         table.endUpdates()
-        // New rows are put in place at once and faded in here: added with
-        // the table's own animation, several rows at a time keep its guess
-        // at their height and overlap.
+        rows = final
+        // New rows are put in place at once: added with the table's own
+        // animation, several rows at a time keep its guess at their height
+        // and overlap.
         let new = IndexSet(current.indices.filter { !staying.contains(current[$0]) })
         guard !new.isEmpty else { return }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0
             table.insertRows(at: new, withAnimation: [])
-        }
-        for row in new {
-            guard let rowView = table.rowView(atRow: row, makeIfNecessary: false) else { continue }
-            rowView.alphaValue = 0
-            NSAnimationContext.runAnimationGroup { context in
-                context.duration = 0.2
-                rowView.animator().alphaValue = 1
-            }
         }
     }
 
@@ -385,9 +384,9 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
                 self.showsAvailableGames.toggle()
                 self.render()
             }
-        case .available(let product, _):
+        case .available(let product, _, let picture, let icon):
             let cell = view as? AvailableGameCell
-            cell?.configure(product)
+            cell?.configure(product, picture: picture, icon: icon)
             cell?.install = { [weak self] in self?.install(product) }
         }
     }

@@ -254,3 +254,65 @@ func liveCatalogDiscoversWoWForever() async throws {
     #expect(forever.launchArguments.contains("-launcherlogin"))
     #expect(forever.codename == "WoW")
 }
+
+@Test func catalogEntriesCarryTheirPicturesByHash() throws {
+    func hash(_ digit: Character) -> String { String(repeating: digit, count: 32) }
+    var fragment = try #require(JSONSerialization.jsonObject(with: catalogFixture("world-of-warcraft")) as? [String: Any])
+    fragment["files"] = [
+        "default": [
+            "wow#KEY_ART": ["hash": hash("1")], "wow#ICON": ["hash": hash("2")],
+            "wow#FOREVER_INSTALL": ["hash": hash("3")], "wow#FOREVER_ICON": ["hash": hash("4")],
+            "wow#NOT_A_HASH": ["hash": "../../etc/passwd"],
+        ],
+        // Per-language files are not what a row shows.
+        "jaJP": ["wow#KEY_ART": ["hash": hash("9")]],
+    ]
+    var products = try #require(fragment["products"] as? [[String: Any]])
+    var base = try #require(products[0]["base"] as? [String: Any])
+    base["key_art"] = "wow#KEY_ART"
+    base["icon_svg"] = "wow#ICON"
+    var types = try #require(base["types"] as? [String: [String: Any]])
+    types["wowf"]?["install_background"] = "wow#FOREVER_INSTALL"
+    types["wowf"]?["override_product_id"] = "WoWF"
+    base["types"] = types
+    products[0]["base"] = base
+    // The product a flavor shows as: its icon is the flavor's, its key art
+    // only stands in where the flavor has no picture of its own.
+    products.append(["id": "WoWF", "base": ["icon_svg": "wow#FOREVER_ICON", "key_art": "wow#NOT_A_HASH"]])
+    fragment["products"] = products
+    let document = try CatalogDocument(data: catalogFixture("root"))
+    let entries = try document.entries(in: JSONSerialization.data(withJSONObject: fragment), region: .eu, supportedCodenames: ["WoW"])
+    #expect(entries.first { $0.productCode == "wow" }?.artwork == ProductArtwork(keyArt: hash("1"), icon: hash("2")))
+    let forever = try #require(entries.first { $0.productCode == "wowf" })
+    #expect(forever.artwork == ProductArtwork(keyArt: hash("3"), icon: hash("4")))
+    #expect(forever.product(config: try ProductConfig(json: catalogFixture("wowf-product")))?.artwork == forever.artwork)
+
+    // A file whose hash isn't one is as good as absent.
+    base["key_art"] = "wow#NOT_A_HASH"
+    products[0]["base"] = base
+    fragment["products"] = products
+    let unnamed = try document.entries(in: JSONSerialization.data(withJSONObject: fragment), region: .eu, supportedCodenames: ["WoW"])
+    #expect(unnamed.first { $0.productCode == "wow" }?.artwork == ProductArtwork(keyArt: nil, icon: hash("2")))
+
+    // A catalog without pictures, as the fixture is: no artwork, and a
+    // product saved before there was any still decodes.
+    let plain = try document.entries(in: catalogFixture("world-of-warcraft"), region: .eu, supportedCodenames: ["WoW"])
+    #expect(plain.allSatisfy { $0.artwork == nil })
+    var saved = try #require(JSONSerialization.jsonObject(with: JSONEncoder().encode(InstallableProduct.hearthstone)) as? [String: Any])
+    saved["artwork"] = nil
+    #expect(try JSONDecoder().decode(InstallableProduct.self, from: JSONSerialization.data(withJSONObject: saved)) == InstallableProduct.hearthstone)
+}
+
+@Test func artworkCacheOnlyServesWellNamedFilesItHas() throws {
+    let directory = FileManager.default.temporaryDirectory.appendingPathComponent("waypoint-artwork-\(UUID().uuidString)")
+    defer { try? FileManager.default.removeItem(at: directory) }
+    try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true)
+    let cache = ArtworkCache(directory: directory)
+    let hash = String(repeating: "a", count: 32)
+    #expect(cache.file(hash) == nil)
+    try Data("picture".utf8).write(to: directory.appendingPathComponent(hash))
+    #expect(cache.file(hash)?.lastPathComponent == hash)
+    try Data("other".utf8).write(to: directory.appendingPathComponent("notes.txt"))
+    #expect(cache.file("notes.txt") == nil)
+    #expect(cache.file("../" + hash) == nil)
+}

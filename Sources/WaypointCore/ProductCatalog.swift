@@ -1,3 +1,4 @@
+import CryptoKit
 import Foundation
 
 /// Synchronous lookups for launch/install code, backed by a periodically
@@ -259,6 +260,7 @@ struct CatalogDocument: Sendable {
         var displayName: String
         var codename: String
         var ssoArgument: String?
+        var artwork: ProductArtwork? = nil
 
         func product(config: ProductConfig) -> InstallableProduct? {
             guard config.hasPlatformConfiguration,
@@ -271,7 +273,7 @@ struct CatalogDocument: Sendable {
             return InstallableProduct(uid: uid, productCode: productCode, displayName: displayName, folderName: folder,
                 codename: codename, appPath: ([config.subfolder, binary].filter { !$0.isEmpty }).joined(separator: "/"),
                 launchArguments: arguments, flavorFolder: config.subfolder.isEmpty ? nil : config.subfolder,
-                isContainerless: config.isContainerless, languages: config.supportedLocales)
+                isContainerless: config.isContainerless, languages: config.supportedLocales, artwork: artwork)
         }
     }
 
@@ -279,6 +281,7 @@ struct CatalogDocument: Sendable {
     private var strings: [String: String]
     private var typeCategories: [String: String]
     private var liveCategories: Set<String>
+    private var files: [String: String]
 
     init(data: Data) throws {
         let root = try Self.object(data)
@@ -294,6 +297,7 @@ struct CatalogDocument: Sendable {
         strings = Self.strings(in: root)
         typeCategories = Self.categories(in: root)
         liveCategories = Self.liveCategories(in: root)
+        files = Self.files(in: root)
     }
 
     func fragments(for region: Region) -> [Fragment] {
@@ -321,6 +325,11 @@ struct CatalogDocument: Sendable {
         let categories = typeCategories.merging(Self.categories(in: root)) { _, new in new }
         let live = liveCategories.union(Self.liveCategories(in: root))
         let installs = root["installs"] as? [String: [String: Any]] ?? [:]
+        let files = files.merging(Self.files(in: root)) { _, new in new }
+        // A type may show as another product: WoW's Classic flavors do.
+        let bases = (root["products"] as? [[String: Any]] ?? []).reduce(into: [String: [String: Any]]()) { result, product in
+            if let id = product["id"] as? String, let base = product["base"] as? [String: Any] { result[id] = base }
+        }
         var result: [Entry] = []
         for product in root["products"] as? [[String: Any]] ?? [] {
             guard let base = product["base"] as? [String: Any], let codename = base["program_id"] as? String,
@@ -338,8 +347,10 @@ struct CatalogDocument: Sendable {
                 if Self.isDisabled(Self.merge(base, type), region: region, strings: strings) { continue }
                 let nameKey = type["selector_display_name"] as? String ?? type["name"] as? String ?? base["name"] as? String
                 guard let nameKey, let name = strings[nameKey] ?? (nameKey.contains("#") ? nil : nameKey), !name.isEmpty else { continue }
+                let shownAs = (type["override_product_id"] as? String).flatMap { bases[$0] }
                 result.append(Entry(uid: uid, productCode: code, displayName: name, codename: codename,
-                                    ssoArgument: install["sso_launch_argument"] as? String))
+                                    ssoArgument: install["sso_launch_argument"] as? String,
+                                    artwork: Self.artwork(type: type, base: base, shownAs: shownAs, files: files)))
             }
         }
         return result
@@ -425,6 +436,27 @@ struct CatalogDocument: Sendable {
         })
     }
 
+    /// File id (`hearthstone#HS_KEY_ART`) -> content hash, of the file
+    /// for every language. Some have versions per language (Japanese and
+    /// Chinese box art); those aren't used.
+    private static func files(in root: [String: Any]) -> [String: String] {
+        let files = (root["files"] as? [String: Any])?["default"] as? [String: Any] ?? [:]
+        return files.reduce(into: [:]) { result, file in
+            if let hash = (file.value as? [String: Any])?["hash"] as? String, isHash(hash) { result[file.key] = hash }
+        }
+    }
+
+    /// A type's own picture where it has one (WoW's Classic flavors have
+    /// only the one their install screen shows), else its product's key art.
+    /// The icon is the vector one, sharp at any size.
+    private static func artwork(type: [String: Any], base: [String: Any], shownAs: [String: Any]?,
+                                files: [String: String]) -> ProductArtwork? {
+        func hash(_ id: Any?) -> String? { (id as? String).flatMap { files[$0] } }
+        let keyArt = hash(type["key_art"]) ?? hash(type["install_background"]) ?? hash(shownAs?["key_art"]) ?? hash(base["key_art"])
+        let icon = hash(type["icon_svg"]) ?? hash(shownAs?["icon_svg"]) ?? hash(base["icon_svg"])
+        return keyArt == nil && icon == nil ? nil : ProductArtwork(keyArt: keyArt, icon: icon)
+    }
+
     private static func strings(in root: [String: Any]) -> [String: String] {
         let strings = root["strings"] as? [String: [String: String]] ?? [:]
         return (strings["default"] ?? [:]).merging(strings["enUS"] ?? [:]) { _, english in english }
@@ -437,5 +469,82 @@ struct CatalogDocument: Sendable {
     static func isRelativePath(_ value: String) -> Bool {
         !value.isEmpty && !value.hasPrefix("/") && !value.contains("\\") && !value.contains("\0") &&
             value.split(separator: "/", omittingEmptySubsequences: false).allSatisfy { !$0.isEmpty && $0 != "." && $0 != ".." }
+    }
+}
+
+/// A game's pictures in Blizzard's launcher catalog: the content hashes
+/// (MD5) of files on the catalog's CDN, which are also their names there.
+public struct ProductArtwork: Sendable, Equatable, Codable {
+    /// Box art, taller than wide.
+    public var keyArt: String?
+    /// The game's emblem, as SVG.
+    public var icon: String?
+
+    public init(keyArt: String? = nil, icon: String? = nil) {
+        self.keyArt = keyArt
+        self.icon = icon
+    }
+}
+
+/// The catalog's pictures on this Mac, each in a file named by its hash.
+/// Nothing ships with Waypoint: they come from the CDN the catalog itself
+/// comes from, once, and are checked against their hash.
+public struct ArtworkCache: Sendable {
+    public var directory: URL
+    /// The largest file worth keeping; the catalog's are under 2 MB.
+    static let largest = 16 << 20
+
+    public init(directory: URL = CDNClient.defaultCacheDirectory.deletingLastPathComponent().appendingPathComponent("artwork", isDirectory: true)) {
+        self.directory = directory
+    }
+
+    /// The file for `hash`, if it has been downloaded.
+    public func file(_ hash: String) -> URL? {
+        guard CatalogDocument.isHash(hash) else { return nil }
+        let file = directory.appendingPathComponent(hash)
+        return FileManager.default.fileExists(atPath: file.path) ? file : nil
+    }
+
+    /// Downloads those of `hashes` that aren't here yet, calling `arrived`
+    /// with each as it is saved. Returns the ones that failed: not found,
+    /// too large, or not what their hash says. A failure to reach the CDN at
+    /// all fails none of them; they are simply still missing.
+    @discardableResult
+    public func download(_ hashes: Set<String>, region: Region, versions: VersionService = VersionService(),
+                         arrived: @Sendable (String) -> Void = { _ in }) async -> Set<String> {
+        let missing = hashes.filter { CatalogDocument.isHash($0) && file($0) == nil }.sorted()
+        guard !missing.isEmpty else { return [] }
+        let fm = FileManager.default
+        var saved = 0
+        var failed: Set<String> = []
+        do {
+            let cdn = try await versions.cdn(product: "catalogs", region: region)
+            try fm.createDirectory(at: directory, withIntermediateDirectories: true)
+            for hash in missing {
+                try Task.checkCancellation()
+                do {
+                    let temporary = try await cdn.download(.data, hash)
+                    defer { try? fm.removeItem(at: temporary) }
+                    let size = (try? fm.attributesOfItem(atPath: temporary.path)[.size] as? Int) ?? 0
+                    guard size > 0, size <= Self.largest, let data = try? Data(contentsOf: temporary),
+                          Insecure.MD5.hash(data: data).map({ String(format: "%02x", $0) }).joined() == hash else {
+                        throw TACTError.checksumMismatch(hash)
+                    }
+                    try data.write(to: directory.appendingPathComponent(hash), options: .atomic)
+                    saved += 1
+                    arrived(hash)
+                } catch {
+                    if Task.isCancelled || NetworkRetry.isCancellation(error) { throw error }
+                    failed.insert(hash)
+                    Log.warning(.library, "artwork_unavailable", nil, ["hash": hash, "error": error])
+                }
+            }
+        } catch {
+            if !(Task.isCancelled || NetworkRetry.isCancellation(error)) {
+                Log.warning(.library, "artwork_download_failed", nil, ["error": error])
+            }
+        }
+        if saved > 0 { Log.info(.library, "artwork_downloaded", nil, ["files": saved, "of": missing.count]) }
+        return failed
     }
 }

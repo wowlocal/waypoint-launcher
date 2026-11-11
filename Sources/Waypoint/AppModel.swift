@@ -45,6 +45,19 @@ final class AppModel {
 
     private(set) var games: [Game] = []
     private var catalogRevision = 0
+    /// Goes up when pictures arrive, so the rows showing them render again.
+    private var artworkRevision = 0
+    @ObservationIgnored private let artworkCache = ArtworkCache()
+    @ObservationIgnored private var artworkDownload: Task<Void, Never>?
+    /// Hash -> its file, for those found here since pictures last arrived:
+    /// a row that has its picture doesn't ask the disk again on each render.
+    @ObservationIgnored private var artworkFiles: [String: URL] = [:]
+    /// Pictures that failed to download: left alone until the next launch.
+    @ObservationIgnored private var missingArtwork: Set<String> = []
+    /// A catalog saved by a version that didn't record pictures has none
+    /// until it is read again. That is asked for once a launch, rather than
+    /// waiting out the hour between readings.
+    @ObservationIgnored private var askedForArtwork = false
     private var isRefreshingCatalog = false
     private var lastCatalogAttempt: Date?
     private var lastCatalogRegion: Region?
@@ -414,12 +427,61 @@ final class AppModel {
             if region != (regionOverride ?? Region.preferred(games: games)) { Task { await refreshCatalog() } }
         }
         do {
-            try await ProductCatalog.shared.refresh(region: region)
+            let withoutArtwork = !askedForArtwork && ProductCatalog.shared.nativeProducts.allSatisfy { $0.artwork == nil }
+            try await ProductCatalog.shared.refresh(region: region, force: withoutArtwork)
+            askedForArtwork = true
             catalogRevision += 1
             reload()
+            downloadArtwork(region: region)
         } catch {
             Log.warning(.library, "catalog_refresh_failed", nil, ["error": error])
         }
+    }
+
+    // MARK: Artwork
+
+    /// Fetches the pictures and icons the catalog names for the games
+    /// Waypoint knows, after launch and off the main thread; a row shows its
+    /// own as soon as it has arrived. Those already here cost a look at the
+    /// disk and no request, and one that failed waits for the next launch.
+    private func downloadArtwork(region: Region) {
+        guard artworkDownload == nil else { return }
+        let hashes = Set(InstallableProduct.all.compactMap(\.artwork).flatMap { [$0.keyArt, $0.icon].compactMap { $0 } })
+            .subtracting(missingArtwork)
+        guard !hashes.isEmpty else { return }
+        let cache = artworkCache
+        artworkDownload = Task.detached(priority: .utility) { [weak self] in
+            let failed = await cache.download(hashes, region: region) { _ in
+                Task { @MainActor in self?.artworkArrived() }
+            }
+            await self?.artworkDownloadEnded(failed: failed)
+        }
+    }
+
+    private func artworkArrived() {
+        artworkFiles = [:]
+        artworkRevision += 1
+    }
+
+    private func artworkDownloadEnded(failed: Set<String>) {
+        artworkDownload = nil
+        missingArtwork.formUnion(failed)
+    }
+
+    /// The picture and the icon the catalog has for a game, where they have
+    /// been downloaded.
+    func artwork(productCode: String) -> (picture: URL?, icon: URL?) {
+        _ = artworkRevision
+        _ = catalogRevision
+        let artwork = InstallableProduct.forProduct(productCode)?.artwork
+        func downloaded(_ hash: String?) -> URL? {
+            guard let hash else { return nil }
+            if let file = artworkFiles[hash] { return file }
+            guard let file = artworkCache.file(hash) else { return nil }
+            artworkFiles[hash] = file
+            return file
+        }
+        return (downloaded(artwork?.keyArt), downloaded(artwork?.icon))
     }
 
     /// Games Waypoint can install that aren't installed yet.
@@ -437,6 +499,16 @@ final class AppModel {
 
     func installKey(for product: InstallableProduct) -> String { defaultPlatform(for: product).installKey(uid: product.uid) }
     func phase(of product: InstallableProduct) -> Phase { phase(uid: installKey(for: product)) }
+
+    /// `phase(of:)` for the library's rows. An install that has just
+    /// finished still counts as installing until its job is gone and its
+    /// game is in the list: for that moment it is neither, and its row would
+    /// drop back among the games on offer and return.
+    func rowPhase(of product: InstallableProduct) -> Phase {
+        let phase = phase(of: product)
+        guard phase == .idle, let job = downloads[installKey(for: product)], case .completed = job.state else { return phase }
+        return .updating(job.progress)
+    }
 
     /// What an install would download, for the install sheet, and what an
     /// interrupted install into that folder already has.

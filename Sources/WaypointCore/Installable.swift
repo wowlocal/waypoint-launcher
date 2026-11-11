@@ -30,6 +30,9 @@ public struct InstallableProduct: Sendable, Identifiable, Equatable, Codable {
     public var isContainerless: Bool
     /// Game languages, as Blizzard locale codes.
     public var languages: [String]
+    /// The game's pictures in Blizzard's launcher catalog, once a catalog
+    /// refresh has found them.
+    public var artwork: ProductArtwork? = nil
 
     /// Whether the spoken language can differ from the text language. Only
     /// WoW's manifests keep speech and text files apart (and its Config.wtf
