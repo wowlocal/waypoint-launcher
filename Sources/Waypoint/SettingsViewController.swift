@@ -1,12 +1,14 @@
 import AppKit
 import WaypointCore
 
-/// Settings (⌘,): sign-in, download speed and the opt-in menu bar item.
+/// Settings (⌘,): sign-in, download speed, game artwork and the opt-in menu
+/// bar item.
 @MainActor
 final class SettingsViewController: NSViewController {
     private let model: AppModel
     private let regionPopup = NSPopUpButton()
     private let menuBarCheckbox = NSButton(checkboxWithTitle: "Show Waypoint in the menu bar", target: nil, action: nil)
+    private let artworkCheckbox = NSButton(checkboxWithTitle: "Show game artwork", target: nil, action: nil)
     private let speedSlider = NSSlider(value: Double(DownloadSpeedLimit.choices.count - 1), minValue: 0,
                                        maxValue: Double(DownloadSpeedLimit.choices.count - 1), target: nil, action: nil)
     private let speedValue = NSTextField.label(.body, monospacedDigits: true)
@@ -33,6 +35,13 @@ final class SettingsViewController: NSViewController {
         regionNote.stringValue = "The Battle.net region games sign in to."
         menuBarCheckbox.target = self
         menuBarCheckbox.action = #selector(menuBarChanged)
+        artworkCheckbox.target = self
+        artworkCheckbox.action = #selector(artworkChanged)
+        let artworkNote = NSTextField(wrappingLabelWithString: "A picture behind each game, and icons for games that aren’t installed. Downloaded from Blizzard’s catalog (about 6 MB); turning this off deletes the downloaded files.")
+        artworkNote.font = .preferredFont(forTextStyle: .subheadline)
+        artworkNote.textColor = .secondaryLabelColor
+        artworkNote.preferredMaxLayoutWidth = 320
+        artworkNote.widthAnchor.constraint(equalToConstant: 320).isActive = true
         speedSlider.numberOfTickMarks = DownloadSpeedLimit.choices.count
         speedSlider.allowsTickMarkValuesOnly = true
         speedSlider.isContinuous = true
@@ -65,6 +74,8 @@ final class SettingsViewController: NSViewController {
             [NSTextField(labelWithString: "Region:"), regionPopup],
             [NSGridCell.emptyContentView, regionNote],
             [NSTextField(labelWithString: "Menu bar:"), menuBarCheckbox],
+            [NSTextField(labelWithString: "Artwork:"), artworkCheckbox],
+            [NSGridCell.emptyContentView, artworkNote],
             [NSTextField(labelWithString: "Download speed:"), speedRow],
             [NSGridCell.emptyContentView, speedNote],
             [NSTextField(labelWithString: "Account:"), accountLabel],
@@ -78,6 +89,7 @@ final class SettingsViewController: NSViewController {
         grid.row(at: 2).topPadding = 12
         grid.row(at: 3).topPadding = 12
         grid.row(at: 5).topPadding = 12
+        grid.row(at: 7).topPadding = 12
 
         let container = NSView()
         grid.translatesAutoresizingMaskIntoConstraints = false
@@ -92,6 +104,7 @@ final class SettingsViewController: NSViewController {
 
         observeChanges { [weak self] in self?.renderRegion() }
         observeChanges { [weak self] in self?.renderSavedLogin() }
+        observeChanges { [weak self] in self?.renderArtwork() }
         // ⌘-dragging the item out of the menu bar turns the setting off.
         defaultsObserver = NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification, object: nil, queue: .main) { [weak self] _ in
@@ -111,6 +124,14 @@ final class SettingsViewController: NSViewController {
 
     private func renderMenuBar() {
         menuBarCheckbox.state = UserDefaults.standard.bool(forKey: MenuBarItem.defaultsKey) ? .on : .off
+    }
+
+    private func renderArtwork() {
+        artworkCheckbox.state = model.showsArtwork ? .on : .off
+    }
+
+    @objc private func artworkChanged() {
+        model.showsArtwork = artworkCheckbox.state == .on
     }
 
     @objc private func regionChanged() {
