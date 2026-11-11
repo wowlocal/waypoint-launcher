@@ -13,28 +13,8 @@ struct GameRowState {
     var canUpdate: Bool
     var showsEdition: Bool
     var download: DownloadControls
-    // PROTOTYPE (banners, played time)
-    /// The picture to show behind the row, if the person has put one there.
+    /// The game's picture, once it has been downloaded.
     var banner: URL?
-    /// nil: Waypoint hasn't seen this game played.
-    var played: PlayedTime?
-}
-
-/// PROTOTYPE: how long a game has been played, counted from its process.
-struct PlayedTime: Equatable {
-    var total: TimeInterval
-    var lastSession: TimeInterval?
-    /// How long it has been running now, while it runs.
-    var runningFor: TimeInterval?
-
-    /// "7h 48m", "8m", "under a minute".
-    static func text(_ seconds: TimeInterval) -> String {
-        let minutes = Int(seconds / 60)
-        if minutes < 1 { return "under a minute" }
-        if minutes < 60 { return "\(minutes)m" }
-        // Past ten hours the minutes are noise.
-        return minutes % 60 == 0 || minutes >= 600 ? "\(minutes / 60)h" : "\(minutes / 60)h \(minutes % 60)m"
-    }
 }
 
 extension GameRowState {
@@ -44,7 +24,7 @@ extension GameRowState {
                   canUpdate: model.canUpdate(game), showsEdition: game.install.productCode == "hero" &&
                     (WindowsHeroes.isAvailable || model.heroesEdition(.windows) != nil),
                   download: DownloadControls(uid: game.id, model: model),
-                  banner: GameBanners.shared.file(for: game.id), played: nil)
+                  banner: model.artwork(productCode: game.install.productCode).picture)
     }
 }
 
@@ -55,12 +35,17 @@ struct InstallableRowState {
     /// The download job's key: the product's uid on the platform it installs for.
     var uid: String
     var download: DownloadControls
+    /// The game's picture and icon, where there are any.
+    var picture: URL?
+    var icon: URL?
 }
 
 extension InstallableRowState {
     @MainActor init(_ product: InstallableProduct, phase: AppModel.Phase, model: AppModel) {
         let uid = model.installKey(for: product)
-        self.init(product: product, phase: phase, uid: uid, download: DownloadControls(uid: uid, model: model))
+        let artwork = model.artwork(productCode: product.productCode)
+        self.init(product: product, phase: phase, uid: uid, download: DownloadControls(uid: uid, model: model),
+                  picture: artwork.picture, icon: artwork.icon)
     }
 }
 
@@ -70,15 +55,12 @@ struct DownloadControls: Equatable {
     var canResume = false
     var canCancel = false
     var keepsMacAwake = false
-    /// PROTOTYPE (download line): the rate right now, while it downloads.
-    var bytesPerSecond: Double?
 }
 
 extension DownloadControls {
     @MainActor init(uid: String, model: AppModel) {
         self.init(canPause: model.canPauseDownload(uid: uid), canResume: model.canResumeDownload(uid: uid),
-                  canCancel: model.canCancelDownload(uid: uid), keepsMacAwake: model.keepsMacAwake(uid: uid),
-                  bytesPerSecond: model.downloadBytesPerSecond(uid: uid))
+                  canCancel: model.canCancelDownload(uid: uid), keepsMacAwake: model.keepsMacAwake(uid: uid))
     }
 }
 
@@ -125,24 +107,6 @@ final class GameCell: NSView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
-    /// PROTOTYPE: behind everything else. A picture is a rounded shape a
-    /// little wider than the row's content; a wash of color has no edges and
-    /// runs the row's full height, out to the window's edge.
-    private func makeBanner() -> BannerView {
-        let banner = BannerView()
-        banner.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(banner, positioned: .below, relativeTo: row)
-        let card = BannerView.style.isCard
-        NSLayoutConstraint.activate([
-            banner.leadingAnchor.constraint(equalTo: leadingAnchor, constant: -8),
-            banner.trailingAnchor.constraint(equalTo: trailingAnchor, constant: card ? 8 : 16),
-            banner.topAnchor.constraint(equalTo: topAnchor, constant: card ? 3 : 0),
-            banner.bottomAnchor.constraint(equalTo: bottomAnchor, constant: card ? -3 : 0),
-        ])
-        self.banner = banner
-        return banner
-    }
-
     /// Heroes of the Storm's Windows or macOS choice, under the name.
     private func makeEdition() -> NSPopUpButton {
         let edition = NSPopUpButton()
@@ -164,7 +128,8 @@ final class GameCell: NSView {
         self.state = state
         self.model = model
         // A picture is its own edge: no hairline above it.
-        separator.isHidden = !showsSeparator || (state.banner != nil && BannerView.style.isCard)
+        separator.isHidden = !showsSeparator || state.banner != nil
+        showPicture(state.banner, on: &banner, in: self, below: row)
         let game = state.game
         let app = game.appURL ?? (game.install.productCode == "hero" ? model.heroesEdition(.macOS)?.appURL : nil)
         let windows = WindowsTitle.forInstall(game.install).map {
@@ -179,17 +144,6 @@ final class GameCell: NSView {
                 if app == nil, windows != nil { iconPath = nil }
                 icon.showFileIcon(at: path)
             }
-        }
-        if BannerView.style == .icontint, let app {
-            let banner = banner ?? makeBanner()
-            banner.show(iconAt: app.path)
-            banner.isHidden = false
-        } else if BannerView.style != .icontint, let file = state.banner {
-            let banner = banner ?? makeBanner()
-            banner.show(picture: file)
-            banner.isHidden = false
-        } else {
-            banner?.isHidden = true
         }
         name.stringValue = game.displayName
         if state.showsEdition {
@@ -221,7 +175,7 @@ final class GameCell: NSView {
             }
         case .updating(let update):
             fraction = update?.fraction ?? 0
-            detail.stringValue = progressDescription(update, waiting: "Checking files…", bytesPerSecond: state.download.bytesPerSecond)
+            detail.stringValue = progressDescription(update, waiting: "Checking files…")
             downloadTooltip = { [weak model] in
                 downloadDetails(update, bytesPerSecond: model?.downloadBytesPerSecond(uid: game.id), status: "Downloading…")
             }
@@ -242,8 +196,7 @@ final class GameCell: NSView {
                 detail.stringValue = GameUpdate.canUpdate(game.install) ? "Update available" : "Update available in Battle.net"
                 detail.textColor = .systemOrange
             } else {
-                detail.stringValue = Self.summary(of: game, played: state.played)
-                if let last = state.played?.lastSession { detailTooltip = "Last session: \(PlayedTime.text(last))" }
+                detail.stringValue = Self.summary(of: game)
             }
         }
 
@@ -270,7 +223,7 @@ final class GameCell: NSView {
         } else if state.isRunning, case .failed = state.phase, !hasDownloadControls {
             show(status: "Needs attention")
         } else if state.isRunning, !hasDownloadControls {
-            showRunning(for: state.played?.runningFor)
+            showRunning()
         } else if !game.isSupported, !hasDownloadControls {
             show(status: !game.isInstalled ? "Not installed" : (game.install.platform == .windows ? "Windows support unavailable" : (game.runsNatively ? "Unsupported" : "Needs Rosetta")))
         } else {
@@ -329,9 +282,9 @@ final class GameCell: NSView {
         status.isHidden = false
     }
 
-    /// "Running", after a green dot; "Running · 8m" when it's known since when.
-    private func showRunning(for time: TimeInterval?) {
-        show(status: time.map { "Running · \(PlayedTime.text($0))" } ?? "Running")
+    /// "Running", after a green dot.
+    private func showRunning() {
+        show(status: "Running")
         let dot = statusDot ?? {
             let dot = NSImageView(image: .symbol("circle.fill", pointSize: 7) ?? NSImage())
             dot.contentTintColor = .systemGreen
@@ -451,7 +404,7 @@ final class GameCell: NSView {
 
     /// "36.6.3 · EU", plus "Intel" for games that need Rosetta. The full
     /// version is in the name's tooltip.
-    private static func summary(of game: Game, played: PlayedTime?) -> String {
+    private static func summary(of game: Game) -> String {
         var parts: [String] = []
         if let version = game.install.version {
             parts.append(version.split(separator: ".").prefix(3).joined(separator: "."))
@@ -462,7 +415,6 @@ final class GameCell: NSView {
             if WindowsTitle.forInstall(game.install)?.isQualified == false { parts.append("Preview") }
         }
         else if game.appURL != nil, !game.runsNatively { parts.append("Intel") }
-        if let played { parts.append("\(PlayedTime.text(played.total)) played") }
         return parts.joined(separator: " · ")
     }
 }
@@ -472,7 +424,8 @@ final class GameCell: NSView {
 final class InstallableCell: NSView {
     static let identifier = NSUserInterfaceItemIdentifier("installable")
 
-    private let icon = NSImageView()
+    private let icon = ProductIconView()
+    private var banner: BannerView?
     private let name = NSTextField.label(.headline)
     private let downloadDetailsView = DownloadDetailsView()
     private var detail: NSTextField { downloadDetailsView.label }
@@ -486,7 +439,8 @@ final class InstallableCell: NSView {
     init() {
         super.init(frame: .zero)
         identifier = Self.identifier
-        icon.image = NSWorkspace.shared.icon(for: .applicationBundle)
+        // Until the game's own icon has been downloaded.
+        icon.placeholder = NSWorkspace.shared.icon(for: .applicationBundle)
         button.target = self
         button.action = #selector(install)
         layOutRow(row, in: self, icon: icon, text: NSStackView(), lines: [name, downloadDetailsView], details: downloadDetailsView,
@@ -499,7 +453,9 @@ final class InstallableCell: NSView {
     func configure(_ state: InstallableRowState, model: AppModel, showsSeparator: Bool) {
         self.state = state
         self.model = model
-        separator.isHidden = !showsSeparator
+        separator.isHidden = !showsSeparator || state.picture != nil
+        icon.file = state.icon
+        showPicture(state.picture, on: &banner, in: self, below: row)
         name.stringValue = state.product.displayName
         var detailTooltip: String?
         detail.textColor = .secondaryLabelColor
@@ -524,7 +480,7 @@ final class InstallableCell: NSView {
             downloadTooltip = { downloadDetails(update, bytesPerSecond: nil, status: pausing ? "Pausing…" : "Paused") }
         case .updating(let update):
             fraction = update?.fraction ?? 0
-            detail.stringValue = progressDescription(update, waiting: "Preparing…", bytesPerSecond: state.download.bytesPerSecond)
+            detail.stringValue = progressDescription(update, waiting: "Preparing…")
             downloadTooltip = { [weak model] in
                 downloadDetails(update, bytesPerSecond: model?.downloadBytesPerSecond(uid: uid), status: "Downloading…")
             }
@@ -555,8 +511,8 @@ final class InstallableCell: NSView {
     }
 }
 
-/// PROTOTYPE (available games): the heading over the games that can be
-/// installed. Clicking it shows or hides them.
+/// The heading over the games that can be installed. Clicking it shows or
+/// hides them.
 @MainActor
 final class AvailableHeaderCell: NSView {
     static let identifier = NSUserInterfaceItemIdentifier("available header")
@@ -583,7 +539,11 @@ final class AvailableHeaderCell: NSView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
+    private var showing: (count: Int, expanded: Bool)?
+
     func configure(count: Int, expanded: Bool) {
+        guard showing?.count != count || showing?.expanded != expanded else { return }
+        showing = (count, expanded)
         let font = NSFont.systemFont(ofSize: NSFont.preferredFont(forTextStyle: .subheadline).pointSize, weight: .semibold)
         let title = NSMutableAttributedString(string: " Available Games", attributes: [.font: font, .foregroundColor: NSColor.secondaryLabelColor])
         title.append(NSAttributedString(string: "  \(count)", attributes: [.font: font, .foregroundColor: NSColor.tertiaryLabelColor]))
@@ -598,8 +558,7 @@ final class AvailableHeaderCell: NSView {
     @objc private func clicked() { toggle?() }
 }
 
-/// PROTOTYPE (available games): a game that isn't installed. Smaller and
-/// quieter than an installed one: its icon (its initial, without one), its
+/// A game that isn't installed. Smaller and quieter than an installed one: its icon (its initial, without one), its
 /// name, Install, and its picture fainter than an installed game's.
 @MainActor
 final class AvailableGameCell: NSView {
@@ -640,71 +599,111 @@ final class AvailableGameCell: NSView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
-    func configure(_ product: InstallableProduct) {
+    func configure(_ product: InstallableProduct, picture: URL?, icon file: URL?) {
         name.stringValue = product.displayName
         icon.letter = String(product.displayName.prefix(1)).uppercased()
-        icon.image = GameBanners.shared.file(for: product.uid + ".icon").flatMap(NSImage.init(contentsOf:))
+        icon.file = file
         button.setAccessibilityLabel("Install \(product.displayName)")
-        if BannerView.style.isCard, let file = GameBanners.shared.file(for: product.uid) {
-            let banner = banner ?? {
-                let banner = BannerView()
-                banner.strength = 0.75
-                banner.translatesAutoresizingMaskIntoConstraints = false
-                addSubview(banner, positioned: .below, relativeTo: row)
-                NSLayoutConstraint.activate([
-                    banner.leadingAnchor.constraint(equalTo: leadingAnchor, constant: -8),
-                    banner.trailingAnchor.constraint(equalTo: trailingAnchor, constant: 8),
-                    banner.topAnchor.constraint(equalTo: topAnchor, constant: 2),
-                    banner.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2),
-                ])
-                self.banner = banner
-                return banner
-            }()
-            banner.show(picture: file)
-            banner.isHidden = false
-        } else {
-            banner?.isHidden = true
-        }
+        showPicture(picture, on: &banner, in: self, below: row, strength: 0.75, inset: 2)
     }
 
     @objc private func clicked() { install?() }
 }
 
-/// A game's icon from the catalog on a rounded tile, as most of them come;
-/// some come as a bare emblem, which gets the same tile. Without an icon, the
-/// game's initial.
+/// A game's icon on a rounded dark tile, as Blizzard shows them. The catalog's
+/// icons are bare emblems in SVG, so they are sharp on any display; the file
+/// is read and drawn off the main thread, once for each size it shows at.
+/// Without an icon: `placeholder`, else the game's initial.
 @MainActor
-private final class ProductIconView: NSView {
+final class ProductIconView: NSView {
     var letter = "" { didSet { if letter != oldValue { needsDisplay = true } } }
-    var image: NSImage? { didSet { needsDisplay = true } }
+    var placeholder: NSImage? { didSet { needsDisplay = true } }
+    var file: URL? {
+        didSet {
+            guard file != oldValue else { return }
+            icon = nil
+            requested = 0
+            needsLayout = true
+            needsDisplay = true
+        }
+    }
+
+    private var icon: CGImage?
+    private var requested = 0
+
+    override func layout() {
+        super.layout()
+        guard let file, bounds.width > 0 else { return }
+        let pixels = Int(convertToBacking(bounds).width.rounded(.up))
+        guard pixels != requested else { return }
+        requested = pixels
+        GameBanners.shared.icon(of: file, pixels: pixels) { [weak self] icon in
+            guard let self, self.file == file, self.requested == pixels else { return }
+            self.icon = icon
+            self.needsDisplay = true
+        }
+    }
+
+    /// Moved to a display with another pixel density: draw it again for that one.
+    override func viewDidChangeBackingProperties() {
+        super.viewDidChangeBackingProperties()
+        needsLayout = true
+    }
 
     override func draw(_ dirtyRect: NSRect) {
-        let tile = NSBezierPath(roundedRect: bounds, xRadius: 8, yRadius: 8)
-        guard let image else {
+        let tile = NSBezierPath(roundedRect: bounds, xRadius: bounds.width / 4, yRadius: bounds.width / 4)
+        if let icon, let context = NSGraphicsContext.current?.cgContext {
+            // The dark blue of Blizzard's own tiles.
+            NSColor(srgbRed: 0.11, green: 0.15, blue: 0.26, alpha: 1).setFill()
+            tile.fill()
+            context.interpolationQuality = .high
+            context.draw(icon, in: bounds)
+        } else if let placeholder {
+            placeholder.draw(in: bounds)
+        } else {
             NSColor.quaternarySystemFill.setFill()
             tile.fill()
             let text = NSAttributedString(string: letter, attributes: [
-                .font: NSFont.systemFont(ofSize: 15, weight: .semibold), .foregroundColor: NSColor.secondaryLabelColor,
+                .font: NSFont.systemFont(ofSize: (bounds.height * 0.47).rounded(), weight: .semibold),
+                .foregroundColor: NSColor.secondaryLabelColor,
             ])
             let size = text.size()
             text.draw(at: NSPoint(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2))
-            return
         }
-        // The dark blue of Blizzard's own tiles.
-        NSColor(srgbRed: 0.11, green: 0.15, blue: 0.26, alpha: 1).setFill()
-        tile.fill()
-        tile.addClip()
-        NSGraphicsContext.current?.imageInterpolation = .high
-        // A bare emblem reaches the picture's edges; keep it off the tile's.
-        let bare = image.cgImage(forProposedRect: nil, context: nil, hints: nil).flatMap { NSBitmapImageRep(cgImage: $0).colorAt(x: 1, y: 1) }
-            .map { $0.alphaComponent < 0.5 } ?? false
-        image.draw(in: bare ? bounds.insetBy(dx: 4, dy: 4) : bounds)
     }
 
     override func viewDidChangeEffectiveAppearance() {
         super.viewDidChangeEffectiveAppearance()
         needsDisplay = true
     }
+}
+
+/// Shows `file` as the picture behind the trailing part of `row` in `cell`,
+/// making the view the first time; nil hides it. The view is a little wider
+/// than the row's content on the trailing side, as the row's hairline is.
+@MainActor
+private func showPicture(_ file: URL?, on banner: inout BannerView?, in cell: NSView, below row: NSView,
+                         strength: CGFloat = 1, inset: CGFloat = 3) {
+    guard let file else {
+        banner?.isHidden = true
+        return
+    }
+    let view = banner ?? {
+        let view = BannerView()
+        view.strength = strength
+        view.translatesAutoresizingMaskIntoConstraints = false
+        cell.addSubview(view, positioned: .below, relativeTo: row)
+        NSLayoutConstraint.activate([
+            view.widthAnchor.constraint(equalTo: cell.widthAnchor, multiplier: BannerView.share, constant: 16 * BannerView.share),
+            view.trailingAnchor.constraint(equalTo: cell.trailingAnchor, constant: 8),
+            view.topAnchor.constraint(equalTo: cell.topAnchor, constant: inset),
+            view.bottomAnchor.constraint(equalTo: cell.bottomAnchor, constant: -inset),
+        ])
+        return view
+    }()
+    banner = view
+    view.show(picture: file)
+    view.isHidden = false
 }
 
 /// A download's buttons, right of its progress: keep the Mac awake, pause or
@@ -850,21 +849,11 @@ private func layOutRow(_ row: NSStackView, in cell: NSView, icon: NSView, text: 
 }
 
 /// "42% · 1.2 GB of 3 GB", or `waiting` before the first progress report.
-/// PROTOTYPE: with a rate, "… · 43 MB/s · 5 min left".
-private func progressDescription(_ progress: UpdateProgress?, waiting: String, bytesPerSecond: Double? = nil) -> String {
+private func progressDescription(_ progress: UpdateProgress?, waiting: String) -> String {
     guard let progress else { return waiting }
     let done = ByteCountFormatter.string(fromByteCount: Int64(progress.completedBytes), countStyle: .file)
     let total = ByteCountFormatter.string(fromByteCount: Int64(progress.totalBytes), countStyle: .file)
-    let percent = "\(Int(progress.fraction * 100))%"
-    guard let bytesPerSecond, bytesPerSecond > 0, progress.totalBytes > progress.completedBytes else {
-        return "\(percent) · \(done) of \(total)"
-    }
-    // The line has to fit beside three buttons in a narrow window: the
-    // amount done is left to the tooltip.
-    let rate = ByteCountFormatter.string(fromByteCount: Int64(bytesPerSecond), countStyle: .file)
-    let minutes = max(1, Int((Double(progress.totalBytes - progress.completedBytes) / bytesPerSecond / 60).rounded()))
-    let left = minutes < 90 ? "\(minutes) min" : "\(minutes / 60) h \(minutes % 60) min"
-    return "\(percent) of \(total) · \(rate)/s · \(left) left"
+    return "\(Int(progress.fraction * 100))% · \(done) of \(total)"
 }
 
 private func downloadStatus(_ progress: UpdateProgress?, label: String) -> String {
