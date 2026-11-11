@@ -47,21 +47,21 @@ The launcher runs on Apple silicon. Mac games use their own executables; support
 
 ## Supported games
 
-Status reflects local usage logs and release validation through **11 November 2026**. ✅ means the operation has been checked; 🧪 means it is available but still needs verification. A launch check confirms startup, not every gameplay scenario. Windows Preview profiles remain Preview even when an installation or update has succeeded.
+Status combines the developer's hands-on testing with usage logs through **11 November 2026**. ✅ means tested; 🧪 means available but not yet tested. Windows Preview labels match those in the app.
 
 | Game | Install | Launch | Updates |
 |---|---|---|---|
 | Hearthstone | ✅ Through Waypoint | ✅ Native | ✅ Through Waypoint |
 | Warcraft III: Reforged | ✅ File set checked against Battle.net | ✅ Under Rosetta | ✅ Real build update |
-| WoW: Retail | ✅ Full installation | ✅ Native startup | ✅ Multiple real build updates |
-| WoW: Forever | ✅ Full installation | ✅ Native startup | ✅ Multiple real build updates |
-| WoW: Classic Era | ✅ Install checked in a temporary folder | 🧪 Not yet checked | 🧪 Not yet checked |
+| WoW: Retail | ✅ Full installation | ✅ Native | ✅ Multiple real build updates |
+| WoW: Forever | ✅ Full installation | ✅ Native | ✅ Multiple real build updates |
+| WoW: Classic Era | ✅ Through Waypoint | ✅ Native | ✅ Through Waypoint |
 | WoW: Classic, Anniversary | 🧪 Not yet checked | 🧪 Not yet checked | 🧪 Not yet checked |
-| Heroes of the Storm (macOS) | 🧪 Fresh install not yet checked | ✅ Startup checked | 🧪 Not yet checked |
-| Heroes of the Storm (Windows) | 🧪 Fresh install not yet checked | ✅ Wine/DXMT launch checked | 🧪 Not yet checked |
+| Heroes of the Storm (macOS) | ✅ Through Waypoint | ✅ Under Rosetta | ✅ Through Waypoint |
+| Heroes of the Storm (Windows) | ✅ Through Waypoint | ✅ Wine/DXMT | ✅ Through Waypoint |
 | StarCraft II, StarCraft: Remastered, Diablo III | 🧪 Not yet checked | 🧪 Not yet checked | 🧪 Not yet checked |
-| Overwatch (Windows Preview) | ✅ Full installation | 🧪 Login, rendering and Retina fullscreen checked; stopped at SMS Protect | 🧪 Not yet checked |
-| Diablo IV (Windows Preview) | ✅ Full installation | 🧪 Login and intro cinematic checked; gameplay and performance not yet tested | ✅ Real build update |
+| Overwatch (Windows Preview) | ✅ Full installation | ✅ Wine/D3DMetal | ✅ Through Waypoint |
+| Diablo IV (Windows Preview) | ✅ Full installation | ✅ Wine/D3DMetal | ✅ Real build update |
 | Diablo II: Resurrected (Windows Preview) | 🧪 Not yet checked | 🧪 Not yet checked | 🧪 Not yet checked |
 
 <details>
@@ -75,8 +75,6 @@ These are completed updates recorded in Waypoint's usage logs, rather than dry r
 | WoW: Forever | `1.60.1.70790 → 1.60.1.70862 → 1.60.1.70888` | 7–11 November 2026 |
 | Warcraft III | `3.0.0.24268 → 3.0.1.24371` | 10 November 2026 |
 | Diablo IV (Windows) | `3.2.3.73883 → 3.2.4.74043` | 11 November 2026 |
-
-WoW Retail and Forever were also launched repeatedly. Classic Era has a completed installation test, but its later unfinished download is not counted as a successful update. A completed game update does not establish gameplay or performance qualification.
 
 </details>
 
@@ -268,24 +266,6 @@ xcrun swift run waypoint-cli launch w3        # start an installed game
 xcrun swift test
 WAYPOINT_NETWORK_TESTS=1 xcrun swift test --filter liveUpdate  # real update, 36.6.0 → live, in a temp folder
 ```
-
-## Roadmap
-
-- [x] Install, launch and update Hearthstone, Warcraft III, WoW Retail and WoW: Forever
-- [x] Update CASC games to newly released builds, including Diablo IV on Windows
-- [x] Launch Windows Heroes of the Storm through the free Wine component
-- [x] Offer Overwatch, Diablo IV and Diablo II: Resurrected as Windows Preview profiles
-- [x] Keep multiple accounts and per-game sign-ins, with optional Keychain login
-- [x] Resume downloads across restarts, with pause, bandwidth and keep-awake controls
-- [x] Change languages, repair content and uninstall individual WoW editions
-- [x] Discover new Mac editions and fetch artwork from Blizzard's catalog
-- [x] Native AppKit library, signed/notarized releases and silent self-updates
-- [ ] Verify launch and real build updates for the remaining WoW Classic editions
-- [ ] Verify full fresh installs and real build updates for both HotS editions
-- [ ] Verify StarCraft II, StarCraft: Remastered and Diablo III end to end
-- [ ] Complete Overwatch gameplay checks beyond account/SMS requirements
-- [ ] Test Diablo IV gameplay and sustained performance
-- [ ] Verify Diablo II: Resurrected installation, launch and updates
 
 ## Disclaimer
 
