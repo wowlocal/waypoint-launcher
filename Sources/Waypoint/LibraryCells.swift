@@ -66,16 +66,20 @@ final class GameCell: NSView {
     private let icon = GameIconView()
     private let name = NSTextField.label(.headline)
     private let downloadDetailsView = DownloadDetailsView()
-    private var progress: NSProgressIndicator { downloadDetailsView.progress }
     private var detail: NSTextField { downloadDetailsView.label }
-    private let statusDot = NSImageView(image: .symbol("circle.fill", pointSize: 7) ?? NSImage())
-    private let status = NSTextField.label(.body, color: .secondaryLabelColor)
-    private let spinner = NSProgressIndicator.spinner()
     private let button = NSButton.rowAction("Play")
-    private let downloadButtons = DownloadButtons()
     private let moreButton = NSButton.rowIcon("ellipsis", label: "More")
     private let separator = NSBox.separator()
-    private let edition = NSPopUpButton()
+    private let row = NSStackView()
+    private let text = NSStackView()
+    // The rest is made when a row first shows it. Most rows never do, and
+    // making it all took as long again as the views every row shows: that
+    // was a fifth of the time from launch to the window.
+    private var edition: NSPopUpButton?
+    private var statusDot: NSImageView?
+    private var status: NSTextField?
+    private var spinner: NSProgressIndicator?
+    private var downloadButtons: DownloadButtons?
     private var iconPath: String?
     private var state: GameRowState?
     private var model: AppModel?
@@ -88,8 +92,15 @@ final class GameCell: NSView {
         moreButton.target = self
         moreButton.action = #selector(showMore)
         moreButton.toolTip = "More"
-        statusDot.contentTintColor = .systemGreen
-        statusDot.setAccessibilityElement(false)
+        layOutRow(row, in: self, icon: icon, text: text, lines: [name, downloadDetailsView], details: downloadDetailsView,
+                  trailing: [button, moreButton], separator: separator)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    /// Heroes of the Storm's Windows or macOS choice, under the name.
+    private func makeEdition() -> NSPopUpButton {
+        let edition = NSPopUpButton()
         edition.addItems(withTitles: ["Windows (recommended)", "macOS"])
         edition.menu?.autoenablesItems = false
         edition.controlSize = .small
@@ -98,14 +109,11 @@ final class GameCell: NSView {
         edition.cell?.lineBreakMode = .byTruncatingTail
         edition.target = self
         edition.action = #selector(changeEdition)
-        let row = layOutRow(in: self, icon: icon, text: [name, edition, downloadDetailsView], details: downloadDetailsView,
-                            trailing: [statusDot, status, spinner] + downloadButtons.transferViews
-                                + [button, downloadButtons.cancel, moreButton],
-                            separator: separator)
-        row.setCustomSpacing(5, after: statusDot)
+        text.insert(edition, after: name)
+        edition.widthAnchor.constraint(lessThanOrEqualTo: text.widthAnchor).isActive = true
+        self.edition = edition
+        return edition
     }
-
-    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
     func configure(_ state: GameRowState, model: AppModel, showsSeparator: Bool) {
         self.state = state
@@ -127,16 +135,21 @@ final class GameCell: NSView {
             }
         }
         name.stringValue = game.displayName
-        edition.isHidden = !state.showsEdition
-        edition.item(at: 0)?.title = WindowsHeroes.isAvailable ? "Windows (recommended)" : "Windows"
-        edition.item(at: 0)?.isEnabled = WindowsHeroes.isAvailable
-        edition.selectItem(at: game.install.platform == .windows ? 0 : 1)
-        let isUninstalling = if case .uninstalling = state.phase { true } else { false }
-        edition.isEnabled = !state.isRunning && !model.isSigningIn && state.phase != .launching && !isUninstalling
+        if state.showsEdition {
+            let edition = edition ?? makeEdition()
+            edition.isHidden = false
+            edition.item(at: 0)?.title = WindowsHeroes.isAvailable ? "Windows (recommended)" : "Windows"
+            edition.item(at: 0)?.isEnabled = WindowsHeroes.isAvailable
+            edition.selectItem(at: game.install.platform == .windows ? 0 : 1)
+            let isUninstalling = if case .uninstalling = state.phase { true } else { false }
+            edition.isEnabled = !state.isRunning && !model.isSigningIn && state.phase != .launching && !isUninstalling
+        } else {
+            edition?.isHidden = true
+        }
         let versionTooltip = game.install.version.map { "Version \($0)" }
         if name.toolTip != versionTooltip { name.toolTip = versionTooltip }
 
-        var showsProgress = false
+        var fraction: Double?
         var showsError = false
         var downloadTooltip: (() -> String)?
         var detailTooltip: String?
@@ -144,22 +157,19 @@ final class GameCell: NSView {
         switch state.phase {
         case .preparingWindows(let update):
             if let update {
-                progress.doubleValue = update.fraction
-                showsProgress = true
+                fraction = update.fraction
                 detail.stringValue = "Windows components: " + progressDescription(update, waiting: "Downloading…")
             } else {
                 detail.stringValue = "Preparing Windows version…"
             }
         case .updating(let update):
-            progress.doubleValue = update?.fraction ?? 0
-            showsProgress = true
+            fraction = update?.fraction ?? 0
             detail.stringValue = progressDescription(update, waiting: "Checking files…")
             downloadTooltip = { [weak model] in
                 downloadDetails(update, bytesPerSecond: model?.downloadBytesPerSecond(uid: game.id), status: "Downloading…")
             }
         case .pausing(let update), .paused(let update):
-            progress.doubleValue = update?.fraction ?? 0
-            showsProgress = true
+            fraction = update?.fraction ?? 0
             let pausing = if case .pausing = state.phase { true } else { false }
             detail.stringValue = downloadStatus(update, label: pausing ? "Pausing…" : "Paused")
             downloadTooltip = { downloadDetails(update, bytesPerSecond: nil, status: pausing ? "Pausing…" : "Paused") }
@@ -181,13 +191,16 @@ final class GameCell: NSView {
 
         if detail.toolTip != detailTooltip { detail.toolTip = detailTooltip }
         downloadDetailsView.showsError = showsError
-        progress.isHidden = !showsProgress
+        downloadDetailsView.fraction = fraction
         downloadDetailsView.details = downloadTooltip
-        downloadButtons.show(state.download, phase: state.phase, uid: game.id, model: model)
-        status.isHidden = true
-        statusDot.isHidden = true
-        spinner.isHidden = true
-        spinner.stopAnimation(nil)
+        if downloadButtons != nil || DownloadButtons.haveAny(for: state.download, phase: state.phase) {
+            let buttons = downloadButtons ?? makeDownloadButtons()
+            buttons.show(state.download, phase: state.phase, uid: game.id, model: model)
+        }
+        status?.isHidden = true
+        statusDot?.isHidden = true
+        spinner?.isHidden = true
+        spinner?.stopAnimation(nil)
         var showsButton = false
         // Its own progress shows rather than Running or Unsupported.
         let hasDownloadControls: Bool = switch state.phase {
@@ -199,8 +212,7 @@ final class GameCell: NSView {
         } else if state.isRunning, case .failed = state.phase, !hasDownloadControls {
             show(status: "Needs attention")
         } else if state.isRunning, !hasDownloadControls {
-            show(status: "Running")
-            statusDot.isHidden = false
+            showRunning()
         } else if !game.isSupported, !hasDownloadControls {
             show(status: !game.isInstalled ? "Not installed" : (game.install.platform == .windows ? "Windows support unavailable" : (game.runsNatively ? "Unsupported" : "Needs Rosetta")))
         } else {
@@ -233,7 +245,7 @@ final class GameCell: NSView {
     }
 
     @objc private func changeEdition() {
-        guard let model, let state, state.game.install.productCode == "hero" else { return }
+        guard let model, let state, let edition, state.game.install.productCode == "hero" else { return }
         let platform: InstallPlatform = edition.indexOfSelectedItem == 0 ? .windows : .macOS
         guard platform == .macOS || WindowsHeroes.isAvailable else { return }
         if model.heroesEdition(platform)?.isInstalled == true {
@@ -244,15 +256,53 @@ final class GameCell: NSView {
         }
     }
 
+    // The status, the spinner, and a download's keep-awake and pause buttons
+    // go left of the main button. Only one of the three shows at a time (the
+    // green dot comes with "Running"), so their order among them is free.
+
     private func show(status text: String) {
+        let status = status ?? {
+            let status = NSTextField.label(.body, color: .secondaryLabelColor)
+            row.insert(status, before: button)
+            self.status = status
+            return status
+        }()
         status.stringValue = text
         status.isHidden = false
     }
 
+    /// "Running", after a green dot.
+    private func showRunning() {
+        show(status: "Running")
+        let dot = statusDot ?? {
+            let dot = NSImageView(image: .symbol("circle.fill", pointSize: 7) ?? NSImage())
+            dot.contentTintColor = .systemGreen
+            dot.setAccessibilityElement(false)
+            row.insert(dot, before: status ?? button)
+            row.setCustomSpacing(5, after: dot)
+            statusDot = dot
+            return dot
+        }()
+        dot.isHidden = false
+    }
+
     private func showSpinner(_ help: String) {
+        let spinner = spinner ?? {
+            let spinner = NSProgressIndicator.spinner()
+            row.insert(spinner, before: button)
+            self.spinner = spinner
+            return spinner
+        }()
         spinner.toolTip = help
         spinner.isHidden = false
         spinner.startAnimation(nil)
+    }
+
+    private func makeDownloadButtons() -> DownloadButtons {
+        let buttons = DownloadButtons()
+        buttons.place(in: row, around: button)
+        downloadButtons = buttons
+        return buttons
     }
 
     /// Resume (a download that stopped), Update or Play: what the button says.
@@ -362,11 +412,11 @@ final class InstallableCell: NSView {
     private let icon = NSImageView()
     private let name = NSTextField.label(.headline)
     private let downloadDetailsView = DownloadDetailsView()
-    private var progress: NSProgressIndicator { downloadDetailsView.progress }
     private var detail: NSTextField { downloadDetailsView.label }
     private let button = NSButton.rowAction("Try Again…")
     private let downloadButtons = DownloadButtons()
     private let separator = NSBox.separator()
+    private let row = NSStackView()
     private var state: InstallableRowState?
     private var model: AppModel?
 
@@ -376,8 +426,9 @@ final class InstallableCell: NSView {
         icon.image = NSWorkspace.shared.icon(for: .applicationBundle)
         button.target = self
         button.action = #selector(install)
-        layOutRow(in: self, icon: icon, text: [name, downloadDetailsView], details: downloadDetailsView,
-                  trailing: downloadButtons.transferViews + [button, downloadButtons.cancel], separator: separator)
+        layOutRow(row, in: self, icon: icon, text: NSStackView(), lines: [name, downloadDetailsView], details: downloadDetailsView,
+                  trailing: [button], separator: separator)
+        downloadButtons.place(in: row, around: button)
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
@@ -389,13 +440,14 @@ final class InstallableCell: NSView {
         name.stringValue = state.product.displayName
         var detailTooltip: String?
         detail.textColor = .secondaryLabelColor
-        progress.isHidden = false
+        // Before the first report: an empty bar.
+        var fraction: Double? = 0
         var downloadTooltip: (() -> String)?
         var showsButton = false
         let uid = state.uid
         switch state.phase {
         case .failed(let message):
-            progress.isHidden = true
+            fraction = nil
             detail.stringValue = message
             detailTooltip = message
             detail.textColor = .systemRed
@@ -404,11 +456,11 @@ final class InstallableCell: NSView {
             showsButton = true
         case .pausing(let update), .paused(let update):
             let pausing = if case .pausing = state.phase { true } else { false }
-            progress.doubleValue = update?.fraction ?? 0
+            fraction = update?.fraction ?? 0
             detail.stringValue = downloadStatus(update, label: pausing ? "Pausing…" : "Paused")
             downloadTooltip = { downloadDetails(update, bytesPerSecond: nil, status: pausing ? "Pausing…" : "Paused") }
         case .updating(let update):
-            progress.doubleValue = update?.fraction ?? 0
+            fraction = update?.fraction ?? 0
             detail.stringValue = progressDescription(update, waiting: "Preparing…")
             downloadTooltip = { [weak model] in
                 downloadDetails(update, bytesPerSecond: model?.downloadBytesPerSecond(uid: uid), status: "Downloading…")
@@ -418,6 +470,7 @@ final class InstallableCell: NSView {
         }
         if detail.toolTip != detailTooltip { detail.toolTip = detailTooltip }
         downloadDetailsView.showsError = showsButton
+        downloadDetailsView.fraction = fraction
         downloadDetailsView.details = downloadTooltip
         downloadButtons.show(state.download, phase: state.phase, uid: uid, model: model)
         button.isHidden = !showsButton
@@ -441,13 +494,27 @@ final class InstallableCell: NSView {
 private final class DownloadButtons: NSObject {
     private let keepAwake = NSButton.downloadKeepAwake()
     private let pauseResume = NSButton.rowIcon("pause.fill", label: "Pause")
-    /// Goes last in the row, after Resume or Try Again when one is showing.
-    let cancel = NSButton.rowIcon("xmark", label: "Cancel download")
+    private let cancel = NSButton.rowIcon("xmark", label: "Cancel download")
     private var uid: String?
     private weak var model: AppModel?
 
-    /// Showing only while the download runs or is paused.
-    var transferViews: [NSView] { [keepAwake, pauseResume] }
+    /// Whether `show` would leave any button showing: a row with none
+    /// needn't make them.
+    static func haveAny(for controls: DownloadControls, phase: AppModel.Phase) -> Bool {
+        switch phase {
+        case .updating, .pausing, .paused: true
+        default: controls.canCancel
+        }
+    }
+
+    /// Adds the buttons to `row`: keep-awake and pause left of `button`
+    /// (they show only while the download runs or is paused), cancel right
+    /// of it, after Resume or Try Again when one is showing.
+    func place(in row: NSStackView, around button: NSView) {
+        row.insert(cancel, after: button)
+        row.insert(keepAwake, before: button)
+        row.insert(pauseResume, before: button)
+    }
 
     override init() {
         super.init()
@@ -505,20 +572,24 @@ private final class DownloadButtons: NSObject {
     }
 }
 
-/// A library row: a 48-point icon, a column of text that takes the free
-/// width, and whatever of `trailing` is showing on the right. `details` (the
-/// progress bar's view) spans the text column. `separator` is the hairline
-/// above the row, from the text's leading edge.
+/// A library row: a 48-point icon, a column of text (`lines`, in `text`)
+/// that takes the free width, and whatever of `trailing` is showing on the
+/// right. `details` (the progress bar's view) spans the text column.
+/// `separator` is the hairline above the row, from the text's leading edge.
+/// A cell adds the views it makes later to `row` and `text` itself.
 @MainActor
-@discardableResult
-private func layOutRow(in cell: NSView, icon: NSView, text views: [NSView], details: NSView, trailing: [NSView],
-                       separator: NSView) -> NSStackView {
+private func layOutRow(_ row: NSStackView, in cell: NSView, icon: NSView, text: NSStackView, lines: [NSView],
+                       details: NSView, trailing: [NSView], separator: NSView) {
     (icon as? NSImageView)?.imageScaling = .scaleProportionallyUpOrDown
-    let text = NSStackView.column(views, spacing: 3)
+    text.setViews(lines, in: .leading)
+    text.orientation = .vertical
+    text.alignment = .leading
+    text.spacing = 3
+    text.detachesHiddenViews = true
     text.setContentHuggingPriority(.init(1), for: .horizontal)
     // Keep the lines together rather than spread over the icon's height.
     text.setHuggingPriority(.defaultHigh, for: .vertical)
-    let row = NSStackView(views: [icon, text] + trailing)
+    row.setViews([icon, text] + trailing, in: .leading)
     row.orientation = .horizontal
     row.alignment = .centerY
     row.distribution = .fill
@@ -536,7 +607,7 @@ private func layOutRow(in cell: NSView, icon: NSView, text views: [NSView], deta
     }
     // Reserve padding outside the stack so automatic table row heights
     // include it even when the edition picker or download adds lines.
-    NSLayoutConstraint.activate(views.map { $0.widthAnchor.constraint(lessThanOrEqualTo: text.widthAnchor) } + [
+    NSLayoutConstraint.activate(lines.map { $0.widthAnchor.constraint(lessThanOrEqualTo: text.widthAnchor) } + [
         details.widthAnchor.constraint(equalTo: text.widthAnchor),
         row.leadingAnchor.constraint(equalTo: cell.leadingAnchor),
         row.trailingAnchor.constraint(equalTo: cell.trailingAnchor),
@@ -548,7 +619,6 @@ private func layOutRow(in cell: NSView, icon: NSView, text views: [NSView], deta
         separator.leadingAnchor.constraint(equalTo: text.leadingAnchor),
         separator.trailingAnchor.constraint(equalTo: cell.trailingAnchor),
     ])
-    return row
 }
 
 /// "42% · 1.2 GB of 3 GB", or `waiting` before the first progress report.

@@ -6,8 +6,23 @@ import WaypointCore
 /// numbers can update without dismissing it.
 @MainActor
 final class DownloadDetailsView: NSStackView {
-    let progress = NSProgressIndicator.bar()
     let label = NSTextField.label(.subheadline, color: .secondaryLabelColor, monospacedDigits: true)
+    /// Made when progress is first shown: most rows never show any.
+    private var progress: NSProgressIndicator?
+
+    /// How much of the download is done, 0 to 1, on a bar above the label.
+    /// nil: no bar.
+    var fraction: Double? {
+        didSet {
+            guard let fraction else {
+                progress?.isHidden = true
+                return
+            }
+            let bar = progress ?? makeProgress()
+            bar.doubleValue = fraction
+            bar.isHidden = false
+        }
+    }
 
     var details: (() -> String)? {
         didSet {
@@ -38,15 +53,20 @@ final class DownloadDetailsView: NSStackView {
         alignment = .leading
         spacing = 3
         detachesHiddenViews = true
-        setViews([progress, label], in: .center)
+        setViews([label], in: .center)
         setContentHuggingPriority(.init(1), for: .horizontal)
         // No taller than the bar and its line, or the line drifts from the name.
         setHuggingPriority(.defaultHigh, for: .vertical)
+        label.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor).isActive = true
+    }
+
+    private func makeProgress() -> NSProgressIndicator {
+        let bar = NSProgressIndicator.bar()
+        insert(bar, before: label)
         // The bar is as wide as the row's text column (see `layOutRow`).
-        NSLayoutConstraint.activate([
-            progress.widthAnchor.constraint(equalTo: widthAnchor),
-            label.widthAnchor.constraint(lessThanOrEqualTo: widthAnchor),
-        ])
+        bar.widthAnchor.constraint(equalTo: widthAnchor).isActive = true
+        progress = bar
+        return bar
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
