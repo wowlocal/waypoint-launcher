@@ -11,11 +11,42 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
     private enum Row {
         case game(GameRowState)
         case installable(InstallableRowState)
+        // PROTOTYPE (available games)
+        case availableHeader(count: Int, expanded: Bool)
+        /// `key`: the uid its install would have.
+        case available(InstallableProduct, key: String)
 
+        /// The same for a game while it is offered, being installed and
+        /// installed, so its row moves from one place to the next rather
+        /// than one row going and another appearing.
         var id: String {
             switch self {
-            case .game(let row): "game \(row.game.id)"
-            case .installable(let row): "installable \(row.product.uid)"
+            case .game(let row): "title \(row.game.id)"
+            case .installable(let row): "title \(row.uid)"
+            case .availableHeader: "available header"
+            case .available(_, let key): "title \(key)"
+            }
+        }
+
+        /// Which kind of cell shows the row.
+        var kind: Int {
+            switch self {
+            case .game: 0
+            case .installable: 1
+            case .availableHeader: 2
+            case .available: 3
+            }
+        }
+
+        var hasBanner: Bool {
+            if case .game(let row) = self { row.banner != nil && BannerView.style.isCard } else { false }
+        }
+
+        /// A game's or an install's row: the ones with a hairline between them.
+        var isGame: Bool {
+            switch self {
+            case .game, .installable: true
+            case .availableHeader, .available: false
             }
         }
 
@@ -34,6 +65,8 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
             case .installable(let row):
                 if case .failed = row.phase { return (false, false, true) }
                 return (false, true, false)
+            case .availableHeader, .available:
+                return (false, false, false)
             }
         }
     }
@@ -57,6 +90,11 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
     private let accountMenu = NSMenu()
     private var accountItem: NSMenuToolbarItem?
     private var subtitle = ""
+    /// PROTOTYPE (available games): whether the list under the heading shows.
+    private var showsAvailableGames = UserDefaults.standard.object(forKey: "showsAvailableGames") as? Bool
+        ?? (ProcessInfo.processInfo.environment["WAYPOINT_AVAILABLE"] == "1") {
+        didSet { UserDefaults.standard.set(showsAvailableGames, forKey: "showsAvailableGames") }
+    }
 
     private(set) lazy var toolbar: NSToolbar = {
         let toolbar = NSToolbar(identifier: "Library")
@@ -176,14 +214,26 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
     private func render() {
         var rows = model.games.map { Row.game(GameRowState($0, model: model)) }
         var installChoices: [InstallableProduct] = []
+        // PROTOTYPE (available games): the ones with no row above.
+        var available: [Row] = []
         for product in model.installable {
             let phase = model.phase(of: product)
-            if phase != .idle { rows.append(.installable(InstallableRowState(product, phase: phase, model: model))) }
+            if phase != .idle {
+                rows.append(.installable(InstallableRowState(product, phase: phase, model: model)))
+            } else {
+                available.append(.available(product, key: model.installKey(for: product)))
+            }
             switch phase {
             case .updating, .pausing, .paused: continue
             default: break
             }
             installChoices.append(product)
+        }
+        // Under the installed ones. With none installed, the empty state
+        // offers the same list.
+        if !rows.isEmpty, !available.isEmpty {
+            rows.append(.availableHeader(count: available.count, expanded: showsAvailableGames))
+            if showsAvailableGames { rows += available }
         }
         show(rows)
         // Menu items belong to one menu, so each menu gets its own.
@@ -226,35 +276,119 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
     }
 
     private func show(_ newRows: [Row]) {
-        let sameRows = newRows.map(\.id) == rows.map(\.id)
-        let previousRows = rows
+        var previousRows = rows
         rows = newRows
         scrollView.isHidden = rows.isEmpty
         emptyState.isHidden = !rows.isEmpty
-        guard sameRows else {
-            table.reloadData()
+        let current = rows.map(\.id)
+        // Nothing on screen to move, or the person asked for less motion:
+        // load the list as it is now.
+        guard view.window?.isVisible == true, !previousRows.isEmpty, !rows.isEmpty,
+              Set(previousRows.map(\.id)).count == previousRows.count, Set(current).count == current.count,
+              previousRows.map(\.id) == current || !NSWorkspace.shared.accessibilityDisplayShouldReduceMotion else {
+            if previousRows.map(\.id) != current || previousRows.map(\.kind) != rows.map(\.kind) {
+                table.reloadData()
+            } else {
+                update(from: previousRows)
+            }
             return
         }
-        // Same rows, new content (progress, say): update them in place, so a
-        // button under the pointer isn't swapped out mid-click.
-        let resizedRows = IndexSet(rows.indices.filter { rows[$0].layout != previousRows[$0].layout })
+        // A row that stays may need another cell: a game offered, then being
+        // installed, then installed. It gets it where it is, before any row
+        // moves: a cell swapped during the move came out the wrong size.
+        let now = Dictionary(uniqueKeysWithValues: rows.map { ($0.id, $0) })
+        let replaced = IndexSet(previousRows.indices.filter { row in
+            guard let after = now[previousRows[row].id] else { return false }
+            return after.kind != previousRows[row].kind
+        })
+        if !replaced.isEmpty {
+            for row in replaced { previousRows[row] = now[previousRows[row].id] ?? previousRows[row] }
+            rows = previousRows
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0
+                table.removeRows(at: replaced, withAnimation: [])
+                table.insertRows(at: replaced, withAnimation: [])
+            }
+            rows = newRows
+        }
+        // Rows came, went or changed places: slide them there.
+        let previous = previousRows.map(\.id)
+        if previous != current { arrange(from: previous, to: current) }
+        update(from: previous == current ? previousRows : nil)
+    }
+
+    /// Shows the rows' new content (progress, say) in the cells they have,
+    /// so a button under the pointer isn't swapped out mid-click. `previous`:
+    /// the same rows as they were, to tell which changed height.
+    private func update(from previous: [Row]?) {
         table.enumerateAvailableRowViews { rowView, row in
             configure(rowView.view(atColumn: 0) as? NSView, at: row)
         }
         // Retiling the table on every progress report interrupts native
         // tooltips. Only invalidate heights when the row's layout changes.
-        guard !resizedRows.isEmpty else { return }
+        guard let previous else { return }
+        let resized = IndexSet(rows.indices.filter { rows[$0].layout != previous[$0].layout })
+        guard !resized.isEmpty else { return }
         NSAnimationContext.runAnimationGroup { context in
             context.duration = 0
-            table.noteHeightOfRows(withIndexesChanged: resizedRows)
+            table.noteHeightOfRows(withIndexesChanged: resized)
         }
     }
 
-    /// A hairline separates each row from the one above it.
+    /// Takes the table from the rows `previous` (ids) to `current`, animated:
+    /// rows that are gone fade out, those that stay slide to their new
+    /// places, new ones fade in. The table applies each call to the rows as
+    /// they are by then, so the steps are worked out the same way.
+    private func arrange(from previous: [String], to current: [String]) {
+        let staying = Set(previous).intersection(current)
+        table.beginUpdates()
+        table.removeRows(at: IndexSet(previous.indices.filter { !staying.contains(previous[$0]) }), withAnimation: .effectFade)
+        var order = previous.filter(staying.contains)
+        for (place, id) in current.filter(staying.contains).enumerated() where order[place] != id {
+            guard let from = order.firstIndex(of: id) else { continue }
+            table.moveRow(at: from, to: place)
+            order.remove(at: from)
+            order.insert(id, at: place)
+        }
+        table.endUpdates()
+        // New rows are put in place at once and faded in here: added with
+        // the table's own animation, several rows at a time keep its guess
+        // at their height and overlap.
+        let new = IndexSet(current.indices.filter { !staying.contains(current[$0]) })
+        guard !new.isEmpty else { return }
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            table.insertRows(at: new, withAnimation: [])
+        }
+        for row in new {
+            guard let rowView = table.rowView(atRow: row, makeIfNecessary: false) else { continue }
+            rowView.alphaValue = 0
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.2
+                rowView.animator().alphaValue = 1
+            }
+        }
+    }
+
+    /// A hairline separates each game's row from the one above it, unless
+    /// one of the two has a banner.
     private func configure(_ view: NSView?, at row: Int) {
+        let separated = row > 0 && rows[row - 1].isGame && !rows[row - 1].hasBanner
         switch rows[row] {
-        case .game(let state): (view as? GameCell)?.configure(state, model: model, showsSeparator: row > 0)
-        case .installable(let state): (view as? InstallableCell)?.configure(state, model: model, showsSeparator: row > 0)
+        case .game(let state): (view as? GameCell)?.configure(state, model: model, showsSeparator: separated)
+        case .installable(let state): (view as? InstallableCell)?.configure(state, model: model, showsSeparator: separated)
+        case .availableHeader(let count, let expanded):
+            let header = view as? AvailableHeaderCell
+            header?.configure(count: count, expanded: expanded)
+            header?.toggle = { [weak self] in
+                guard let self else { return }
+                self.showsAvailableGames.toggle()
+                self.render()
+            }
+        case .available(let product, _):
+            let cell = view as? AvailableGameCell
+            cell?.configure(product)
+            cell?.install = { [weak self] in self?.install(product) }
         }
     }
 
@@ -308,6 +442,8 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
         let view: NSView = switch rows[row] {
         case .game: tableView.makeView(withIdentifier: GameCell.identifier, owner: nil) ?? GameCell()
         case .installable: tableView.makeView(withIdentifier: InstallableCell.identifier, owner: nil) ?? InstallableCell()
+        case .availableHeader: tableView.makeView(withIdentifier: AvailableHeaderCell.identifier, owner: nil) ?? AvailableHeaderCell()
+        case .available: tableView.makeView(withIdentifier: AvailableGameCell.identifier, owner: nil) ?? AvailableGameCell()
         }
         configure(view, at: row)
         return view

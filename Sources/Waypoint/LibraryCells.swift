@@ -13,6 +13,28 @@ struct GameRowState {
     var canUpdate: Bool
     var showsEdition: Bool
     var download: DownloadControls
+    // PROTOTYPE (banners, played time)
+    /// The picture to show behind the row, if the person has put one there.
+    var banner: URL?
+    /// nil: Waypoint hasn't seen this game played.
+    var played: PlayedTime?
+}
+
+/// PROTOTYPE: how long a game has been played, counted from its process.
+struct PlayedTime: Equatable {
+    var total: TimeInterval
+    var lastSession: TimeInterval?
+    /// How long it has been running now, while it runs.
+    var runningFor: TimeInterval?
+
+    /// "7h 48m", "8m", "under a minute".
+    static func text(_ seconds: TimeInterval) -> String {
+        let minutes = Int(seconds / 60)
+        if minutes < 1 { return "under a minute" }
+        if minutes < 60 { return "\(minutes)m" }
+        // Past ten hours the minutes are noise.
+        return minutes % 60 == 0 || minutes >= 600 ? "\(minutes / 60)h" : "\(minutes / 60)h \(minutes % 60)m"
+    }
 }
 
 extension GameRowState {
@@ -21,7 +43,8 @@ extension GameRowState {
                   update: model.availableUpdate(for: game), canPlay: model.canPlay(game),
                   canUpdate: model.canUpdate(game), showsEdition: game.install.productCode == "hero" &&
                     (WindowsHeroes.isAvailable || model.heroesEdition(.windows) != nil),
-                  download: DownloadControls(uid: game.id, model: model))
+                  download: DownloadControls(uid: game.id, model: model),
+                  banner: GameBanners.shared.file(for: game.id), played: nil)
     }
 }
 
@@ -47,12 +70,15 @@ struct DownloadControls: Equatable {
     var canResume = false
     var canCancel = false
     var keepsMacAwake = false
+    /// PROTOTYPE (download line): the rate right now, while it downloads.
+    var bytesPerSecond: Double?
 }
 
 extension DownloadControls {
     @MainActor init(uid: String, model: AppModel) {
         self.init(canPause: model.canPauseDownload(uid: uid), canResume: model.canResumeDownload(uid: uid),
-                  canCancel: model.canCancelDownload(uid: uid), keepsMacAwake: model.keepsMacAwake(uid: uid))
+                  canCancel: model.canCancelDownload(uid: uid), keepsMacAwake: model.keepsMacAwake(uid: uid),
+                  bytesPerSecond: model.downloadBytesPerSecond(uid: uid))
     }
 }
 
@@ -80,6 +106,7 @@ final class GameCell: NSView {
     private var status: NSTextField?
     private var spinner: NSProgressIndicator?
     private var downloadButtons: DownloadButtons?
+    private var banner: BannerView?
     private var iconPath: String?
     private var state: GameRowState?
     private var model: AppModel?
@@ -97,6 +124,24 @@ final class GameCell: NSView {
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    /// PROTOTYPE: behind everything else. A picture is a rounded shape a
+    /// little wider than the row's content; a wash of color has no edges and
+    /// runs the row's full height, out to the window's edge.
+    private func makeBanner() -> BannerView {
+        let banner = BannerView()
+        banner.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(banner, positioned: .below, relativeTo: row)
+        let card = BannerView.style.isCard
+        NSLayoutConstraint.activate([
+            banner.leadingAnchor.constraint(equalTo: leadingAnchor, constant: -8),
+            banner.trailingAnchor.constraint(equalTo: trailingAnchor, constant: card ? 8 : 16),
+            banner.topAnchor.constraint(equalTo: topAnchor, constant: card ? 3 : 0),
+            banner.bottomAnchor.constraint(equalTo: bottomAnchor, constant: card ? -3 : 0),
+        ])
+        self.banner = banner
+        return banner
+    }
 
     /// Heroes of the Storm's Windows or macOS choice, under the name.
     private func makeEdition() -> NSPopUpButton {
@@ -118,7 +163,8 @@ final class GameCell: NSView {
     func configure(_ state: GameRowState, model: AppModel, showsSeparator: Bool) {
         self.state = state
         self.model = model
-        separator.isHidden = !showsSeparator
+        // A picture is its own edge: no hairline above it.
+        separator.isHidden = !showsSeparator || (state.banner != nil && BannerView.style.isCard)
         let game = state.game
         let app = game.appURL ?? (game.install.productCode == "hero" ? model.heroesEdition(.macOS)?.appURL : nil)
         let windows = WindowsTitle.forInstall(game.install).map {
@@ -133,6 +179,17 @@ final class GameCell: NSView {
                 if app == nil, windows != nil { iconPath = nil }
                 icon.showFileIcon(at: path)
             }
+        }
+        if BannerView.style == .icontint, let app {
+            let banner = banner ?? makeBanner()
+            banner.show(iconAt: app.path)
+            banner.isHidden = false
+        } else if BannerView.style != .icontint, let file = state.banner {
+            let banner = banner ?? makeBanner()
+            banner.show(picture: file)
+            banner.isHidden = false
+        } else {
+            banner?.isHidden = true
         }
         name.stringValue = game.displayName
         if state.showsEdition {
@@ -164,7 +221,7 @@ final class GameCell: NSView {
             }
         case .updating(let update):
             fraction = update?.fraction ?? 0
-            detail.stringValue = progressDescription(update, waiting: "Checking files…")
+            detail.stringValue = progressDescription(update, waiting: "Checking files…", bytesPerSecond: state.download.bytesPerSecond)
             downloadTooltip = { [weak model] in
                 downloadDetails(update, bytesPerSecond: model?.downloadBytesPerSecond(uid: game.id), status: "Downloading…")
             }
@@ -185,7 +242,8 @@ final class GameCell: NSView {
                 detail.stringValue = GameUpdate.canUpdate(game.install) ? "Update available" : "Update available in Battle.net"
                 detail.textColor = .systemOrange
             } else {
-                detail.stringValue = Self.summary(of: game)
+                detail.stringValue = Self.summary(of: game, played: state.played)
+                if let last = state.played?.lastSession { detailTooltip = "Last session: \(PlayedTime.text(last))" }
             }
         }
 
@@ -212,7 +270,7 @@ final class GameCell: NSView {
         } else if state.isRunning, case .failed = state.phase, !hasDownloadControls {
             show(status: "Needs attention")
         } else if state.isRunning, !hasDownloadControls {
-            showRunning()
+            showRunning(for: state.played?.runningFor)
         } else if !game.isSupported, !hasDownloadControls {
             show(status: !game.isInstalled ? "Not installed" : (game.install.platform == .windows ? "Windows support unavailable" : (game.runsNatively ? "Unsupported" : "Needs Rosetta")))
         } else {
@@ -271,9 +329,9 @@ final class GameCell: NSView {
         status.isHidden = false
     }
 
-    /// "Running", after a green dot.
-    private func showRunning() {
-        show(status: "Running")
+    /// "Running", after a green dot; "Running · 8m" when it's known since when.
+    private func showRunning(for time: TimeInterval?) {
+        show(status: time.map { "Running · \(PlayedTime.text($0))" } ?? "Running")
         let dot = statusDot ?? {
             let dot = NSImageView(image: .symbol("circle.fill", pointSize: 7) ?? NSImage())
             dot.contentTintColor = .systemGreen
@@ -389,7 +447,7 @@ final class GameCell: NSView {
 
     /// "36.6.3 · EU", plus "Intel" for games that need Rosetta. The full
     /// version is in the name's tooltip.
-    private static func summary(of game: Game) -> String {
+    private static func summary(of game: Game, played: PlayedTime?) -> String {
         var parts: [String] = []
         if let version = game.install.version {
             parts.append(version.split(separator: ".").prefix(3).joined(separator: "."))
@@ -400,6 +458,7 @@ final class GameCell: NSView {
             if WindowsTitle.forInstall(game.install)?.isQualified == false { parts.append("Preview") }
         }
         else if game.appURL != nil, !game.runsNatively { parts.append("Intel") }
+        if let played { parts.append("\(PlayedTime.text(played.total)) played") }
         return parts.joined(separator: " · ")
     }
 }
@@ -461,7 +520,7 @@ final class InstallableCell: NSView {
             downloadTooltip = { downloadDetails(update, bytesPerSecond: nil, status: pausing ? "Pausing…" : "Paused") }
         case .updating(let update):
             fraction = update?.fraction ?? 0
-            detail.stringValue = progressDescription(update, waiting: "Preparing…")
+            detail.stringValue = progressDescription(update, waiting: "Preparing…", bytesPerSecond: state.download.bytesPerSecond)
             downloadTooltip = { [weak model] in
                 downloadDetails(update, bytesPerSecond: model?.downloadBytesPerSecond(uid: uid), status: "Downloading…")
             }
@@ -485,6 +544,158 @@ final class InstallableCell: NSView {
         } else {
             window?.contentViewController?.presentAsSheet(InstallSheet(product: state.product, model: model))
         }
+    }
+}
+
+/// PROTOTYPE (available games): the heading over the games that can be
+/// installed. Clicking it shows or hides them.
+@MainActor
+final class AvailableHeaderCell: NSView {
+    static let identifier = NSUserInterfaceItemIdentifier("available header")
+
+    private let button = NSButton(title: "", target: nil, action: nil)
+    var toggle: (() -> Void)?
+
+    init() {
+        super.init(frame: .zero)
+        identifier = Self.identifier
+        button.isBordered = false
+        button.imagePosition = .imageLeading
+        button.imageHugsTitle = true
+        button.target = self
+        button.action = #selector(clicked)
+        button.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(button)
+        NSLayoutConstraint.activate([
+            button.leadingAnchor.constraint(equalTo: leadingAnchor),
+            button.topAnchor.constraint(equalTo: topAnchor, constant: 16),
+            button.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    func configure(count: Int, expanded: Bool) {
+        let font = NSFont.systemFont(ofSize: NSFont.preferredFont(forTextStyle: .subheadline).pointSize, weight: .semibold)
+        let title = NSMutableAttributedString(string: " Available Games", attributes: [.font: font, .foregroundColor: NSColor.secondaryLabelColor])
+        title.append(NSAttributedString(string: "  \(count)", attributes: [.font: font, .foregroundColor: NSColor.tertiaryLabelColor]))
+        button.attributedTitle = title
+        button.image = NSImage(systemSymbolName: expanded ? "chevron.down" : "chevron.right", accessibilityDescription: nil)?
+            .withSymbolConfiguration(.init(pointSize: 9, weight: .bold))
+        button.contentTintColor = .tertiaryLabelColor
+        button.setAccessibilityLabel("Available Games, \(count)")
+        button.setAccessibilityValue(expanded ? "expanded" : "collapsed")
+    }
+
+    @objc private func clicked() { toggle?() }
+}
+
+/// PROTOTYPE (available games): a game that isn't installed. Smaller and
+/// quieter than an installed one: its icon (its initial, without one), its
+/// name, Install, and its picture fainter than an installed game's.
+@MainActor
+final class AvailableGameCell: NSView {
+    static let identifier = NSUserInterfaceItemIdentifier("available")
+
+    private let icon = ProductIconView()
+    private let name = NSTextField.label(.body)
+    private let button = NSButton(title: "Install", target: nil, action: nil)
+    private let row = NSStackView()
+    private var banner: BannerView?
+    var install: (() -> Void)?
+
+    init() {
+        super.init(frame: .zero)
+        identifier = Self.identifier
+        if #available(macOS 26.0, *) { button.borderShape = .capsule }
+        button.target = self
+        button.action = #selector(clicked)
+        button.setContentHuggingPriority(.required, for: .horizontal)
+        name.setContentHuggingPriority(.init(1), for: .horizontal)
+        row.setViews([icon, name, button], in: .leading)
+        row.orientation = .horizontal
+        row.alignment = .centerY
+        // The icon sits in the middle of the installed games' icon column,
+        // the name starts where their names do.
+        row.setCustomSpacing(20, after: icon)
+        row.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(row)
+        NSLayoutConstraint.activate([
+            icon.widthAnchor.constraint(equalToConstant: 32),
+            icon.heightAnchor.constraint(equalToConstant: 32),
+            row.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 8),
+            row.trailingAnchor.constraint(equalTo: trailingAnchor),
+            row.topAnchor.constraint(equalTo: topAnchor, constant: 7),
+            row.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -7),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    func configure(_ product: InstallableProduct) {
+        name.stringValue = product.displayName
+        icon.letter = String(product.displayName.prefix(1)).uppercased()
+        icon.image = GameBanners.shared.file(for: product.uid + ".icon").flatMap(NSImage.init(contentsOf:))
+        button.setAccessibilityLabel("Install \(product.displayName)")
+        if BannerView.style.isCard, let file = GameBanners.shared.file(for: product.uid) {
+            let banner = banner ?? {
+                let banner = BannerView()
+                banner.strength = 0.75
+                banner.translatesAutoresizingMaskIntoConstraints = false
+                addSubview(banner, positioned: .below, relativeTo: row)
+                NSLayoutConstraint.activate([
+                    banner.leadingAnchor.constraint(equalTo: leadingAnchor, constant: -8),
+                    banner.trailingAnchor.constraint(equalTo: trailingAnchor, constant: 8),
+                    banner.topAnchor.constraint(equalTo: topAnchor, constant: 2),
+                    banner.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -2),
+                ])
+                self.banner = banner
+                return banner
+            }()
+            banner.show(picture: file)
+            banner.isHidden = false
+        } else {
+            banner?.isHidden = true
+        }
+    }
+
+    @objc private func clicked() { install?() }
+}
+
+/// A game's icon from the catalog on a rounded tile, as most of them come;
+/// some come as a bare emblem, which gets the same tile. Without an icon, the
+/// game's initial.
+@MainActor
+private final class ProductIconView: NSView {
+    var letter = "" { didSet { if letter != oldValue { needsDisplay = true } } }
+    var image: NSImage? { didSet { needsDisplay = true } }
+
+    override func draw(_ dirtyRect: NSRect) {
+        let tile = NSBezierPath(roundedRect: bounds, xRadius: 8, yRadius: 8)
+        guard let image else {
+            NSColor.quaternarySystemFill.setFill()
+            tile.fill()
+            let text = NSAttributedString(string: letter, attributes: [
+                .font: NSFont.systemFont(ofSize: 15, weight: .semibold), .foregroundColor: NSColor.secondaryLabelColor,
+            ])
+            let size = text.size()
+            text.draw(at: NSPoint(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2))
+            return
+        }
+        // The dark blue of Blizzard's own tiles.
+        NSColor(srgbRed: 0.11, green: 0.15, blue: 0.26, alpha: 1).setFill()
+        tile.fill()
+        tile.addClip()
+        NSGraphicsContext.current?.imageInterpolation = .high
+        // A bare emblem reaches the picture's edges; keep it off the tile's.
+        let bare = image.cgImage(forProposedRect: nil, context: nil, hints: nil).flatMap { NSBitmapImageRep(cgImage: $0).colorAt(x: 1, y: 1) }
+            .map { $0.alphaComponent < 0.5 } ?? false
+        image.draw(in: bare ? bounds.insetBy(dx: 4, dy: 4) : bounds)
+    }
+
+    override func viewDidChangeEffectiveAppearance() {
+        super.viewDidChangeEffectiveAppearance()
+        needsDisplay = true
     }
 }
 
@@ -622,11 +833,21 @@ private func layOutRow(_ row: NSStackView, in cell: NSView, icon: NSView, text: 
 }
 
 /// "42% · 1.2 GB of 3 GB", or `waiting` before the first progress report.
-private func progressDescription(_ progress: UpdateProgress?, waiting: String) -> String {
+/// PROTOTYPE: with a rate, "… · 43 MB/s · 5 min left".
+private func progressDescription(_ progress: UpdateProgress?, waiting: String, bytesPerSecond: Double? = nil) -> String {
     guard let progress else { return waiting }
     let done = ByteCountFormatter.string(fromByteCount: Int64(progress.completedBytes), countStyle: .file)
     let total = ByteCountFormatter.string(fromByteCount: Int64(progress.totalBytes), countStyle: .file)
-    return "\(Int(progress.fraction * 100))% · \(done) of \(total)"
+    let percent = "\(Int(progress.fraction * 100))%"
+    guard let bytesPerSecond, bytesPerSecond > 0, progress.totalBytes > progress.completedBytes else {
+        return "\(percent) · \(done) of \(total)"
+    }
+    // The line has to fit beside three buttons in a narrow window: the
+    // amount done is left to the tooltip.
+    let rate = ByteCountFormatter.string(fromByteCount: Int64(bytesPerSecond), countStyle: .file)
+    let minutes = max(1, Int((Double(progress.totalBytes - progress.completedBytes) / bytesPerSecond / 60).rounded()))
+    let left = minutes < 90 ? "\(minutes) min" : "\(minutes / 60) h \(minutes % 60) min"
+    return "\(percent) of \(total) · \(rate)/s · \(left) left"
 }
 
 private func downloadStatus(_ progress: UpdateProgress?, label: String) -> String {
