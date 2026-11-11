@@ -267,6 +267,12 @@ xcrun swift test
 WAYPOINT_NETWORK_TESTS=1 xcrun swift test --filter liveUpdate  # real update, 36.6.0 → live, in a temp folder
 ```
 
+## License
+
+Waypoint's original code and documentation are licensed under [0BSD](LICENSE). Commercial use, modification and redistribution are permitted without an attribution requirement.
+
+Third-party components and assets retain their own licenses, including [Sparkle](https://github.com/sparkle-project/Sparkle/blob/2.9.5/LICENSE), the [Windows runtime components](tools/wine-runtime/licenses/README.md), and [Apple's graphics component](Resources/WindowsGraphics/License.rtf). Blizzard game files, artwork and trademarks are not covered by Waypoint's license.
+
 ## Disclaimer
 
 Waypoint is an unofficial fan project. It is not affiliated with or endorsed by Blizzard Entertainment. Blizzard, Battle.net, Hearthstone, World of Warcraft, Warcraft, StarCraft, Diablo and Heroes of the Storm are trademarks of Blizzard Entertainment, Inc.

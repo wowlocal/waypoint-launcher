@@ -266,6 +266,12 @@ xcrun swift test
 WAYPOINT_NETWORK_TESTS=1 xcrun swift test --filter liveUpdate  # настоящее обновление 36.6.0 → актуальная, во временной папке
 ```
 
+## Лицензия
+
+Оригинальный код и документация Waypoint распространяются под [0BSD](LICENSE). Разрешены коммерческое использование, изменение и распространение без требования указывать авторство.
+
+Сторонние компоненты и материалы сохраняют свои лицензии, включая [Sparkle](https://github.com/sparkle-project/Sparkle/blob/2.9.5/LICENSE), [компоненты Windows](tools/wine-runtime/licenses/README.md) и [графический компонент Apple](Resources/WindowsGraphics/License.rtf). Лицензия Waypoint не распространяется на файлы игр, изображения и торговые марки Blizzard.
+
 ## Дисклеймер
 
 Waypoint — неофициальный фанатский проект. Он не связан с Blizzard Entertainment и не одобрен ею. Blizzard, Battle.net, Hearthstone, World of Warcraft, Warcraft, StarCraft, Diablo и Heroes of the Storm — торговые марки Blizzard Entertainment, Inc.
