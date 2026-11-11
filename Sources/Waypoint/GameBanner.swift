@@ -30,6 +30,13 @@ final class GameBanners {
         var pixels: Int
     }
 
+    /// Forgets everything made so far: artwork was turned off.
+    func removeAll() {
+        strips = [:]
+        icons = [:]
+        unusable = []
+    }
+
     /// The picture at `file` cut to fill `pixels`, to `then` on the main
     /// actor: at once if it has been made, else when it has. Sizes are
     /// rounded up to a few steps, so resizing the window makes few strips.
@@ -196,7 +203,16 @@ final class BannerView: NSView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
+    /// Hides the view and lets go of its picture.
+    func clear() {
+        isHidden = true
+        picture = nil
+        strip = nil
+        requested = .zero
+    }
+
     func show(picture file: URL) {
+        isHidden = false
         guard file != picture else { return }
         picture = file
         strip = nil

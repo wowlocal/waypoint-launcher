@@ -511,6 +511,11 @@ public struct ArtworkCache: Sendable {
         return FileManager.default.fileExists(atPath: file.path) ? file : nil
     }
 
+    /// Deletes every downloaded picture.
+    public func removeAll() {
+        try? FileManager.default.removeItem(at: directory)
+    }
+
     /// Downloads those of `hashes` that aren't here yet, calling `arrived`
     /// with each as it is saved. Returns the ones that failed: not found,
     /// too large, or not what their hash says. A failure to reach the CDN at

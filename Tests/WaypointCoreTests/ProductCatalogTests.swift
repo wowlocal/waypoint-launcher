@@ -315,4 +315,7 @@ func liveCatalogDiscoversWoWForever() async throws {
     try Data("other".utf8).write(to: directory.appendingPathComponent("notes.txt"))
     #expect(cache.file("notes.txt") == nil)
     #expect(cache.file("../" + hash) == nil)
+    cache.removeAll()
+    #expect(cache.file(hash) == nil)
+    #expect(!FileManager.default.fileExists(atPath: directory.path))
 }

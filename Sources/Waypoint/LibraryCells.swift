@@ -685,7 +685,7 @@ final class ProductIconView: NSView {
 private func showPicture(_ file: URL?, on banner: inout BannerView?, in cell: NSView, below row: NSView,
                          strength: CGFloat = 1, inset: CGFloat = 3) {
     guard let file else {
-        banner?.isHidden = true
+        banner?.clear()
         return
     }
     let view = banner ?? {
@@ -703,7 +703,6 @@ private func showPicture(_ file: URL?, on banner: inout BannerView?, in cell: NS
     }()
     banner = view
     view.show(picture: file)
-    view.isHidden = false
 }
 
 /// A download's buttons, right of its progress: keep the Mac awake, pause or

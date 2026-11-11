@@ -45,14 +45,43 @@ final class AppModel {
 
     private(set) var games: [Game] = []
     private var catalogRevision = 0
+    /// Whether rows show the games' pictures and icons from Blizzard's
+    /// catalog (Settings). Off: none is shown or downloaded, and those
+    /// downloaded are deleted.
+    var showsArtwork = UserDefaults.standard.object(forKey: "showsArtwork") as? Bool ?? true {
+        didSet {
+            guard showsArtwork != oldValue else { return }
+            UserDefaults.standard.set(showsArtwork, forKey: "showsArtwork")
+            artworkFiles = [:]
+            missingArtwork = []
+            if showsArtwork {
+                downloadArtwork(region: regionOverride ?? Region.preferred(games: games))
+            } else {
+                // After a download in flight has stopped, or a file it was
+                // saving would be left behind. A download started meanwhile
+                // (the setting turned back on) waits for this.
+                let download = artworkDownload, removal = artworkRemoval, cache = artworkCache
+                download?.cancel()
+                GameBanners.shared.removeAll()
+                artworkRemoval = Task.detached(priority: .utility) {
+                    await removal?.value
+                    await download?.value
+                    cache.removeAll()
+                }
+            }
+        }
+    }
     /// Goes up when pictures arrive, so the rows showing them render again.
     private var artworkRevision = 0
     @ObservationIgnored private let artworkCache = ArtworkCache()
     @ObservationIgnored private var artworkDownload: Task<Void, Never>?
+    /// Deleting the pictures, after the setting was turned off.
+    @ObservationIgnored private var artworkRemoval: Task<Void, Never>?
     /// Hash -> its file, for those found here since pictures last arrived:
     /// a row that has its picture doesn't ask the disk again on each render.
     @ObservationIgnored private var artworkFiles: [String: URL] = [:]
-    /// Pictures that failed to download: left alone until the next launch.
+    /// Pictures that failed to download: left alone until the next launch,
+    /// or until artwork is turned off and on.
     @ObservationIgnored private var missingArtwork: Set<String> = []
     /// A catalog saved by a version that didn't record pictures has none
     /// until it is read again. That is asked for once a launch, rather than
@@ -152,6 +181,12 @@ final class AppModel {
             Diagnostics.shared.flush()
         })
         regionOverride = UserDefaults.standard.string(forKey: "regionOverride").flatMap(Region.init(rawValue:))
+        // Artwork is off: nothing of it should be left, even if the last
+        // run ended before it could delete it.
+        if !showsArtwork {
+            let cache = artworkCache
+            Task.detached(priority: .utility) { cache.removeAll() }
+        }
         // Reads the logs only while that one-time import is still to do.
         downloadQueue.recoverLegacyInstalls(events: Diagnostics.shared.events())
         reload()
@@ -443,18 +478,20 @@ final class AppModel {
     /// Fetches the pictures and icons the catalog names for the games
     /// Waypoint knows, after launch and off the main thread; a row shows its
     /// own as soon as it has arrived. Those already here cost a look at the
-    /// disk and no request, and one that failed waits for the next launch.
+    /// disk and no request, and one that failed isn't asked for again in
+    /// this run.
     private func downloadArtwork(region: Region) {
-        guard artworkDownload == nil else { return }
+        guard showsArtwork, artworkDownload == nil else { return }
         let hashes = Set(InstallableProduct.all.compactMap(\.artwork).flatMap { [$0.keyArt, $0.icon].compactMap { $0 } })
             .subtracting(missingArtwork)
         guard !hashes.isEmpty else { return }
-        let cache = artworkCache
+        let cache = artworkCache, removal = artworkRemoval
         artworkDownload = Task.detached(priority: .utility) { [weak self] in
+            await removal?.value
             let failed = await cache.download(hashes, region: region) { _ in
                 Task { @MainActor in self?.artworkArrived() }
             }
-            await self?.artworkDownloadEnded(failed: failed)
+            await self?.artworkDownloadEnded(failed: failed, region: region, stopped: Task.isCancelled)
         }
     }
 
@@ -463,14 +500,18 @@ final class AppModel {
         artworkRevision += 1
     }
 
-    private func artworkDownloadEnded(failed: Set<String>) {
+    private func artworkDownloadEnded(failed: Set<String>, region: Region, stopped: Bool) {
         artworkDownload = nil
+        guard showsArtwork else { return }
         missingArtwork.formUnion(failed)
+        // Turned off and on again while it ran: it was stopped, so start over.
+        if stopped { downloadArtwork(region: region) }
     }
 
     /// The picture and the icon the catalog has for a game, where they have
     /// been downloaded.
     func artwork(productCode: String) -> (picture: URL?, icon: URL?) {
+        guard showsArtwork else { return (nil, nil) }
         _ = artworkRevision
         _ = catalogRevision
         let artwork = InstallableProduct.forProduct(productCode)?.artwork
