@@ -59,7 +59,7 @@ install_name_tool -add_rpath @executable_path/../Frameworks "$app/Contents/MacOS
 
 # Sparkle. Its XPC services exist for sandboxed apps; Waypoint isn't one.
 sparkle="$app/Contents/Frameworks/Sparkle.framework"
-ditto "$bin_dir/Sparkle.framework" "$sparkle"
+ditto --norsrc --noextattr "$bin_dir/Sparkle.framework" "$sparkle"
 rm -rf "$sparkle/Versions/B/XPCServices" "$sparkle/XPCServices"
 
 sparkle_keys="    <key>SUPublicEDKey</key><string>${sparkle_public_key}</string>"
@@ -103,6 +103,10 @@ ${sparkle_keys}
 </plist>
 PLIST
 plutil -lint -s "$app/Contents/Info.plist"
+
+# Build products can carry Finder metadata that codesign refuses. Clear only
+# the assembled bundle, never the source framework or user data.
+xattr -cr "$app"
 
 # Sign inside out: Sparkle's helpers, the framework, then the app.
 sign() {
