@@ -8,10 +8,14 @@ import WaypointCore
 /// takes several milliseconds, and may be done off the main thread.
 private struct LibraryScan: Sendable {
     var games: [Game]
+    /// Those on other drives, which the main thread doesn't read.
+    var otherDriveGames: [String: Game?]
     var processes: [(pid: pid_t, path: String)]
 
     init(_ library: GameLibrary) {
-        games = library.games()
+        var otherDrives = GameLibrary.OtherDrives()
+        games = library.games(otherDrives: &otherDrives)
+        otherDriveGames = otherDrives.read
         processes = RunningProcesses.executables()
     }
 }
@@ -44,6 +48,9 @@ final class AppModel {
     }
 
     private(set) var games: [Game] = []
+    /// The uids of games on other drives not read yet (at launch, until the
+    /// first scan off the main thread): neither listed nor offered.
+    private(set) var unreadGames: Set<String> = []
     private var catalogRevision = 0
     /// Whether rows show the games' pictures and icons from Blizzard's
     /// catalog (Settings). Off: none is shown or downloaded, and those
@@ -150,13 +157,19 @@ final class AppModel {
     /// Where games are found. Its remembered locations (File ▸ Locate
     /// Installed Games) are `locatedStore`'s, as last scanned off the main
     /// thread: the main thread doesn't read their records or mount drives.
-    /// Like any other game's, a located game's app is looked up by a scan
-    /// on the main thread (`rescan`).
-    @ObservationIgnored private var library = GameLibrary()
+    /// Nor does it read any other drive: a game there is as the last scan
+    /// off the main thread found it (`rescan`).
+    @ObservationIgnored private var library: GameLibrary = {
+        var library = GameLibrary()
+        library.readsOtherDrives = false
+        return library
+    }()
     @ObservationIgnored private let locatedStore = LocatedGames.Store()
     /// Goes up when a location is remembered or forgotten: a scan of the
     /// locations begun before then is out of date.
     @ObservationIgnored private var locationsRevision = 0
+    @ObservationIgnored private var rememberingEarlierInstalls: Task<Void, Never>?
+    @ObservationIgnored private var remembersEarlierInstallsAgain = false
     private(set) var isLocatingGames = false
 
     /// File ▸ Locate Installed Games: lists games already on disk (on
@@ -207,6 +220,8 @@ final class AppModel {
         if !found.isEmpty {
             locatedStore.add(found)
             locationsChanged()
+            // Games on another drive are listed once read off the main thread.
+            await scansFinished()
         }
         Log.notice(.library, "located", nil, ["games": found.flatMap(\.listedInstalls).map(\.key).joined(separator: ","),
                                               "kept": kept.map(\.id).joined(separator: ",")])
@@ -234,9 +249,11 @@ final class AppModel {
         guard canRemoveFromLibrary(game), let id = game.locationID else { return }
         Log.notice(.library, "removed_from_library", nil, ["uid": game.id, "offline": game.isOffline])
         locatedStore.remove(key: game.install.key, from: id)
-        // Waypoint's own record of it too, should it have updated the game.
-        // Battle.net's record, if it has one, is Battle.net's.
-        if game.isOffline { try? library.stateStore.remove(game.install) }
+        // Waypoint's own record of it too, so nothing (the repair of
+        // Battle.net's records) writes to its folder any more. Battle.net's
+        // record, if it has one, is Battle.net's; the location's list of
+        // what was removed keeps it from listing the game again.
+        try? library.stateStore.remove(game.install)
         updates.removeValue(forKey: game.id)
         locationsChanged()
     }
@@ -329,6 +346,7 @@ final class AppModel {
             forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.reloadOffMainThread()
+                self?.rememberEarlierInstallLocations()
                 _ = Task {
                     // Both go by the games the scan finds.
                     while let scan = self?.scanOffMainThread { await scan.value }
@@ -427,11 +445,18 @@ final class AppModel {
         let library = library, scans = scansShown, running = runningShown, revision = locationsRevision
         scanOffMainThread = Task.detached(priority: .userInitiated) { [weak self] in
             var library = library
-            // The remembered locations are read here only, never on the main thread.
+            // The remembered locations, and other drives, are read here
+            // only, never on the main thread.
+            library.readsOtherDrives = true
             library.located = LocatedGames.scan(library.located.locations)
             let scan = LibraryScan(library)
             await self?.scannedOffMainThread(scan, located: library.located, revision: revision, afterScans: scans, running: running)
         }
+    }
+
+    /// Returns once the scans off the main thread asked for so far are shown.
+    private func scansFinished() async {
+        while let scan = scanOffMainThread { await scan.value }
     }
 
     private func scannedOffMainThread(_ scan: LibraryScan, located: LocatedGames.Scan, revision: Int,
@@ -447,6 +472,11 @@ final class AppModel {
             locatedStore.update(with: located.locations)
         }
         if scans == scansShown {
+            // What the main thread knows of other drives from now on. A scan
+            // that isn't shown may predate an install or uninstall since;
+            // one that skipped other drives asked for another meanwhile.
+            library.otherDriveGames = scan.otherDriveGames
+            unreadGames = []
             show(scan.games, processes: running == runningShown ? scan.processes : nil)
         } else if locatedChanged {
             // What was shown meanwhile went by the locations as they were.
@@ -460,9 +490,14 @@ final class AppModel {
 
     /// Reads which games are installed and running, and shows that. Cheap
     /// next to the repair of Battle.net's records, which runs beside it (see
-    /// `repairInstallMetadata`).
+    /// `repairInstallMetadata`). Games on other drives are as last read
+    /// there, and are read again off the main thread.
     private func rescan() {
-        show(library.games(), processes: nil)
+        var otherDrives = GameLibrary.OtherDrives()
+        let found = library.games(otherDrives: &otherDrives)
+        unreadGames = otherDrives.unread
+        show(found, processes: nil)
+        if otherDrives.skipped { scanOffMainThreadOnce() }
     }
 
     /// `found`: the games on record, installed or not. `processes`: the
@@ -478,7 +513,7 @@ final class AppModel {
         var all = found.filter(\.isListed)
         if let pendingHeroesInstall {
             all.removeAll { $0.id == pendingHeroesInstall.key }
-            all.append(GameCatalog.game(for: pendingHeroesInstall))
+            all.append(library.game(for: pendingHeroesInstall))
         }
         // A game being uninstalled keeps its row until that's done.
         for game in games where !all.contains(where: { $0.id == game.id }) {
@@ -691,7 +726,7 @@ final class AppModel {
             if let product = request.product, !products.contains(where: { $0.uid == product.uid }) { products.append(product) }
         }
         return products.filter { product in
-            !games.contains { $0.install.uid == product.uid } &&
+            !games.contains { $0.install.uid == product.uid } && !unreadGames.contains(product.uid) &&
             (downloads[installKey(for: product)] != nil || product.supportedPlatforms != [.windows] || WindowsTitle(rawValue: product.productCode)?.isAvailable == true)
         }
     }
@@ -796,25 +831,50 @@ final class AppModel {
     /// say) is remembered like a located one: while its drive is away it
     /// stays in the library as disconnected, rather than offered again.
     private func rememberInstallLocation(_ install: ProductInstall) async {
+        // Installed again where it was removed from the library: listed again.
+        if locatedStore.restore(key: install.key, at: install.installPath) { locationsChanged(rescanning: false) }
         guard InstallLocations().isChosen(installPath: install.installPath) else { return }
         let url = URL(fileURLWithPath: install.installPath, isDirectory: true)
-        let location = await Task.detached(priority: .utility) { LocatedGames.Location(installedAt: url, install: install) }.value
+        let (location, game) = await Task.detached(priority: .utility) {
+            (LocatedGames.Location(installedAt: url, install: install), GameCatalog.game(for: install))
+        }.value
+        // Listed at once, though the main thread doesn't read other drives.
+        library.otherDriveGames[GameLibrary.factsKey(install)] = game
         locatedStore.record(location, installed: install.key)
         Log.info(.library, "install_location_remembered", nil, ["uid": install.key, "path": location.path])
         locationsChanged(rescanning: false)
     }
 
-    /// Games an earlier version installed outside the built-in folders are
-    /// remembered as if installed now, each once, when its drive is
-    /// connected: afterwards, Remove from Library and uninstalling forget
-    /// them for good.
+    /// Games an earlier version installed outside the built-in folders, and
+    /// those Battle.net installed on another drive, are remembered as if
+    /// installed now, each once, when its drive is connected and its files
+    /// are there: when the drive is away, they stay listed as disconnected
+    /// rather than offered again. Afterwards, Remove from Library and
+    /// uninstalling forget them for good.
     private func rememberEarlierInstallLocations() {
+        // One look at a time; one asked for meanwhile (a drive connected)
+        // follows it.
+        guard rememberingEarlierInstalls == nil else {
+            remembersEarlierInstallsAgain = true
+            return
+        }
         let adoptedKey = "adoptedInstallLocations"
         let adopted = UserDefaults.standard.stringArray(forKey: adoptedKey) ?? []
-        let store = library.stateStore, known = locatedStore.locations(), chosen = InstallLocations()
-        Task {
+        let library = library, known = locatedStore.locations(), chosen = InstallLocations()
+        rememberingEarlierInstalls = Task {
+            defer {
+                rememberingEarlierInstalls = nil
+                if remembersEarlierInstallsAgain {
+                    remembersEarlierInstallsAgain = false
+                    rememberEarlierInstallLocations()
+                }
+            }
             let (found, considered) = await Task.detached(priority: .utility) {
-                let installs = store.standaloneInstalls().filter {
+                let mounted = InstallVolume.mountedPaths()
+                // Battle.net's records don't say which drive a game is on;
+                // one on the startup disk is never away.
+                let battleNet = library.battleNetInstalls().filter { InstallVolume.isOnOtherDrive($0.installPath, mounted: mounted) }
+                let installs = (library.stateStore.standaloneInstalls() + battleNet).filter {
                     chosen.isChosen(installPath: $0.installPath) && !adopted.contains("\($0.key)|\($0.installPath)")
                 }
                 let found = LocatedGames.unremembered(installs, known: known, chosen: chosen)
@@ -828,7 +888,10 @@ final class AppModel {
                 }
                 return (found, considered.map { "\($0.key)|\($0.installPath)" })
             }.value
-            if !considered.isEmpty { UserDefaults.standard.set(adopted + considered, forKey: adoptedKey) }
+            if !considered.isEmpty {
+                let now = UserDefaults.standard.stringArray(forKey: adoptedKey) ?? []
+                UserDefaults.standard.set(now + considered.filter { !now.contains($0) }, forKey: adoptedKey)
+            }
             guard !found.isEmpty else { return }
             for location in found { locatedStore.record(location, installed: nil) }
             Log.notice(.library, "earlier_install_locations_remembered", nil, ["paths": found.map(\.path).joined(separator: ",")])
@@ -892,7 +955,7 @@ final class AppModel {
         let folder = Self.folderKey(request.install.installPath)
         guard !uninstallingFolders.contains(folder), !cleaningFolders.contains(folder),
               !downloads.keys.contains(where: { $0 != uid && jobFolders[$0] == folder }) else { return nil }
-        let name = request.product?.displayName ?? GameCatalog.game(for: request.install).displayName
+        let name = request.product?.displayName ?? GameCatalog.displayName(for: request.install)
         // Other downloads count as games too: one into a folder inside this
         // one keeps the folder from going.
         let others = discoveredGames.map(\.install) + downloads.filter { $0.key != uid }.values.compactMap(\.request).map(\.install)
@@ -1014,6 +1077,8 @@ final class AppModel {
             Log.error(.install, "uninstall_failed", nil, ["uid": game.id, "error": error])
             phases[game.id] = .failed(errorMessage(error))
             reload()
+            // On another drive, it is read again off the main thread.
+            await scansFinished()
             let gone = !games.contains(where: { $0.id == game.id })
             if gone || downloads[game.id] != nil {
                 // No row can say it: the game is gone all the same (putting it
@@ -1047,6 +1112,7 @@ final class AppModel {
         // located there), before its drive can be ejected and the game
         // kept as offline.
         if locatedStore.forget(key: game.install.key, at: game.install.installPath) { locationsChanged(rescanning: false) }
+        library.otherDriveGames.removeValue(forKey: GameLibrary.factsKey(game.install))
         reload()
         // What else a remembered location there holds is read again.
         if library.located.locations.contains(where: { $0.contains(game.install.installPath) }) { scanOffMainThreadOnce() }

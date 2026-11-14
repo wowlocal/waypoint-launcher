@@ -305,7 +305,7 @@ private func agentDatabase(_ install: ProductInstall) -> Data {
     store.add(again)
     #expect(store.locations().map(\.id) == again.map(\.id))
     store.remove(key: "hs_beta", from: again[0].id)
-    #expect(store.locations().isEmpty, "a location with nothing left listed is forgotten")
+    #expect(store.locations().map(\.listedInstalls) == [[]], "kept, so what it removed stays removed")
     store.add(again)
     store.remove(id: again[0].id)
     #expect(store.locations().isEmpty)
@@ -363,4 +363,135 @@ private func agentDatabase(_ install: ProductInstall) -> Data {
     #expect(LocatedGames.installs(at: sandbox).isEmpty)
     try Data([0xff]).write(to: sandbox.appendingPathComponent(".product.db"))
     #expect(LocatedGames.installs(at: sandbox).isEmpty)
+}
+
+@Test func theMainThreadTakesGamesOnOtherDrivesAsTheyWereLastRead() throws {
+    let fm = FileManager.default
+    let sandbox = fm.temporaryDirectory.appendingPathComponent("waypoint-other-drive-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: sandbox) }
+    // A drive stands in: what is under `drive` counts as on another one.
+    let drive = sandbox.appendingPathComponent("T7", isDirectory: true)
+    let folder = drive.appendingPathComponent("Hearthstone", isDirectory: true)
+    try makeLibraryApp(at: folder.appendingPathComponent("Hearthstone.app"))
+    let hearthstone = ProductInstall(uid: "hs_beta", productCode: "hsb", installPath: folder.path, region: "eu")
+    let local = sandbox.appendingPathComponent("World of Warcraft", isDirectory: true)
+    try makeLibraryApp(at: local.appendingPathComponent("_retail_/World of Warcraft.app"))
+    let wow = ProductInstall(uid: "wow", productCode: "wow", installPath: local.path, region: "eu")
+    try folderDatabase([hearthstone, wow]).write(to: sandbox.appendingPathComponent("product.db"))
+    // Waypoint's record of a game whose folder there was deleted.
+    let gone = ProductInstall(uid: "s1", productCode: "s1", installPath: drive.appendingPathComponent("StarCraft").path, region: "eu")
+    let records = InstallStateStore(file: sandbox.appendingPathComponent("installs.json"))
+    try fm.createDirectory(at: sandbox, withIntermediateDirectories: true)
+    try JSONEncoder().encode(["s1": InstalledBuild(buildConfig: "standalone", version: "1.0", install: gone)]).write(to: records.file)
+    var library = GameLibrary(agentDatabase: sandbox.appendingPathComponent("product.db"), searchRoots: [], stateStore: records)
+    let drivePath = drive.path
+    library.otherDrives = { _ in { $0.hasPrefix(drivePath) } }
+
+    // Off the main thread: read there, like any other.
+    var skipped = GameLibrary.OtherDrives()
+    let scanned = library.games(otherDrives: &skipped)
+    let read = skipped.read
+    #expect(!skipped.skipped)
+    #expect(scanned.filter(\.isInstalled).map(\.id) == ["hs_beta", "wow"])
+
+    // On the main thread, before any such read: not listed yet, and said so.
+    library.readsOtherDrives = false
+    #expect(library.games(otherDrives: &skipped).filter(\.isInstalled).map(\.id) == ["wow"])
+    #expect(skipped.skipped)
+    #expect(skipped.unread == ["hs_beta", "s1"], "neither listed nor offered until read")
+
+    // After it: as read then, without reading the drive again.
+    #expect(Set(read.keys) == [GameLibrary.factsKey(hearthstone), GameLibrary.factsKey(gone)], "what was read there, for the main thread")
+    #expect(read[GameLibrary.factsKey(gone)] == .some(nil), "found not there")
+    library.otherDriveGames = read
+    try fm.removeItem(at: folder.appendingPathComponent("Hearthstone.app"))
+    let shown = library.games(otherDrives: &skipped)
+    #expect(shown.filter(\.isInstalled).map(\.id) == ["hs_beta", "wow"])
+    #expect(skipped.skipped, "the next read off the main thread finds it gone")
+    #expect(skipped.unread.isEmpty, "known not there is read, not unread")
+    #expect(library.game(for: hearthstone).isInstalled)
+    library.readsOtherDrives = true
+    #expect(library.games().filter(\.isInstalled).map(\.id) == ["wow"])
+    #expect(!library.game(for: hearthstone).isInstalled)
+}
+
+@Test func aWindowsGameIsInstalledAsItWasRead() throws {
+    let fm = FileManager.default
+    let sandbox = fm.temporaryDirectory.appendingPathComponent("waypoint-windows-read-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: sandbox) }
+    guard let title = WindowsTitle.allCases.first else { return }
+    let install = title.product.install(at: sandbox, region: .eu, languages: GameLanguages(text: "enUS"), tagString: "Win EU enUS", platform: .windows)
+    let program = sandbox.appendingPathComponent(title.executablePath)
+    #expect(!GameCatalog.game(for: install).isInstalled)
+    try fm.createDirectory(at: program.deletingLastPathComponent(), withIntermediateDirectories: true)
+    try Data().write(to: program)
+    let game = GameCatalog.game(for: install)
+    #expect(game.isInstalled)
+    // Asking again (as each render does) doesn't look at the disk.
+    try fm.removeItem(at: program)
+    #expect(game.isInstalled)
+    #expect(!GameCatalog.game(for: install).isInstalled)
+}
+
+@Test func aGameRemovedFromTheLibraryStaysRemovedWhateverElseKnowsIt() throws {
+    let fm = FileManager.default
+    let sandbox = fm.temporaryDirectory.appendingPathComponent("waypoint-removed-\(UUID().uuidString)").resolvingSymlinksInPath()
+    defer { try? fm.removeItem(at: sandbox) }
+    let (defaults, suite) = scratchDefaults()
+    defer { defaults.removePersistentDomain(forName: suite) }
+    // StarCraft installed by Waypoint into another folder: Waypoint's record
+    // of it, the Agent's and the folder's (the repair wrote them), and the
+    // folder remembered.
+    let folder = sandbox.appendingPathComponent("StarCraft", isDirectory: true)
+    try makeLibraryApp(at: folder.appendingPathComponent("StarCraft.app"))
+    let starcraft = ProductInstall(uid: "s1", productCode: "s1", installPath: folder.path, region: "eu")
+    let agent = sandbox.appendingPathComponent("product.db")
+    try folderDatabase([starcraft]).write(to: agent)
+    try folderDatabase([starcraft]).write(to: folder.appendingPathComponent(".product.db"))
+    let records = InstallStateStore(file: sandbox.appendingPathComponent("installs.json"))
+    try JSONEncoder().encode(["s1": InstalledBuild(buildConfig: "standalone", version: "1.0", install: starcraft)])
+        .write(to: records.file)
+    let store = LocatedGames.Store(defaults: defaults)
+    store.record(LocatedGames.Location(installedAt: folder, install: starcraft), installed: starcraft.key)
+    let id = try #require(store.locations().first?.id)
+    var library = GameLibrary(agentDatabase: agent, searchRoots: [folder], stateStore: records)
+    func listed(connected: Bool = true) -> [Game] {
+        library.located = LocatedGames.scan(store.locations()) {
+            connected ? LocatedGames.Volumes.mounted() : LocatedGames.Volumes(paths: [], uuids: [])
+        }
+        return library.games().filter(\.isListed)
+    }
+
+    // Its drive connected, it can be removed from the library: it is
+    // listed from the remembered folder, though the Agent's record is the one used.
+    #expect(listed().map(\.id) == ["s1"])
+    #expect(listed().first?.locationID == id)
+    #expect(listed(connected: false).first?.locationID == id)
+
+    // Removed: not listed again from any record of it, connected or not.
+    store.remove(key: starcraft.key, from: id)
+    #expect(listed().isEmpty)
+    #expect(listed(connected: false).isEmpty)
+    try fm.removeItem(at: agent)
+    #expect(listed().isEmpty, "nor from the folder's record")
+    try fm.removeItem(at: folder.appendingPathComponent(".product.db"))
+    #expect(listed().isEmpty, "nor from Waypoint's own")
+    #expect(fm.fileExists(atPath: folder.appendingPathComponent("StarCraft.app").path), "its files stay")
+
+    // The folder located again: listed again.
+    try folderDatabase([starcraft]).write(to: folder.appendingPathComponent(".product.db"))
+    store.add(LocatedGames.locate(at: folder))
+    #expect(listed().map(\.id) == ["s1"])
+
+    // Or the game installed there again, by Waypoint: in a folder it
+    // remembers, or in a built-in one (which it doesn't remember as such).
+    store.remove(key: starcraft.key, from: try #require(store.locations().first?.id))
+    #expect(listed().isEmpty)
+    store.record(LocatedGames.Location(installedAt: folder, install: starcraft), installed: starcraft.key)
+    #expect(listed().map(\.id) == ["s1"])
+    store.remove(key: starcraft.key, from: try #require(store.locations().first?.id))
+    #expect(listed().isEmpty)
+    #expect(store.restore(key: starcraft.key, at: folder.path))
+    #expect(!store.restore(key: starcraft.key, at: folder.path))
+    #expect(listed().map(\.id) == ["s1"])
 }

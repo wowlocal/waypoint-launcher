@@ -168,7 +168,7 @@ final class InstallSheet: NSViewController {
                 text = reason
                 problem = true
             } else {
-                text = [volume.summary, volume.caution].compactMap { $0 }.joined(separator: "\n")
+                text = [volume.summary, volume.caution(platform: platform)].compactMap { $0 }.joined(separator: "\n")
             }
         case .success(nil):
             break
@@ -232,12 +232,15 @@ final class InstallSheet: NSViewController {
         panel.prompt = "Choose"
         panel.message = "\(product.displayName) will be installed in a \"\(folderName)\" folder here."
         panel.directoryURL = parentFolder
-        if panel.runModal() == .OK, let url = panel.url {
-            parentFolder = url
-            hasCustomParent = true
-            showLocation()
-            refreshSize() // another folder may hold a partial install, or not
-            readVolume()
+        guard let window = view.window else { return }
+        // On the install sheet, which waits for it; the rest of the app doesn't.
+        panel.beginSheetModal(for: window) { [weak self] response in
+            guard response == .OK, let url = panel.url, let self else { return }
+            self.parentFolder = url
+            self.hasCustomParent = true
+            self.showLocation()
+            self.refreshSize() // another folder may hold a partial install, or not
+            self.readVolume()
         }
     }
 

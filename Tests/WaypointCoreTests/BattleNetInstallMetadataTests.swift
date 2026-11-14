@@ -337,3 +337,34 @@ private struct MetadataFixture {
     #expect(try BattleNetInstallMetadata.create(record, at: destination))
     #expect(try Data(contentsOf: destination) == record)
 }
+
+@Test func aGameWhoseRecordsCantBeWrittenDoesntStopTheOthers() throws {
+    let f = try MetadataFixture(); defer { f.remove() }
+    // Another WoW folder, on a drive that is read-only (or a folder this
+    // user can't write to): no record can be made there.
+    let readOnly = f.root.appendingPathComponent("Read-only WoW")
+    try FileManager.default.createDirectory(at: readOnly.appendingPathComponent("_retail_/World of Warcraft.app/Contents"),
+                                            withIntermediateDirectories: true)
+    try Data(contentsOf: f.game.appendingPathComponent(".build.info")).write(to: readOnly.appendingPathComponent(".build.info"))
+    try FileManager.default.setAttributes([.posixPermissions: 0o555], ofItemAtPath: readOnly.path)
+    defer { try? FileManager.default.setAttributes([.posixPermissions: 0o755], ofItemAtPath: readOnly.path) }
+    var stuck = f.install()
+    stuck.installPath = readOnly.path
+
+    // Repaired first (by uid), and failing: the other game's records, and
+    // the Agent's database, are still written.
+    #expect(try BattleNetInstallMetadata.repair(installs: [f.install("wowf"), stuck], agentDatabase: f.database,
+                                              ensureNotRunning: {}) == 2)
+    #expect(!FileManager.default.fileExists(atPath: readOnly.appendingPathComponent(".product.db").path))
+    #expect(try ProductDB.parseInstallFile(Data(contentsOf: f.game.appendingPathComponent(".product.db")))?.uid == "wowf")
+    #expect(try ProductDB.parseDatabase(Data(contentsOf: f.database)).map(\.uid) == ["wowf"])
+
+    // Battle.net starting still stops all of it.
+    var checks = 0
+    #expect(throws: UpdateError.self) {
+        try BattleNetInstallMetadata.repair(installs: [f.install()], agentDatabase: f.database, ensureNotRunning: {
+            checks += 1
+            if checks == 2 { throw UpdateError.battleNetRunning(agentOnly: true) }
+        })
+    }
+}

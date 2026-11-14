@@ -36,16 +36,16 @@ private func makeApp(at url: URL) throws {
     #expect(startup.summary == "812 GB available")
     #expect(startup.problem(download: 80 * gb, platform: .macOS) == nil)
     #expect(startup.problem(download: nil, platform: .macOS) == nil, "nothing to say about space before the size is known")
-    #expect(startup.caution == nil)
+    #expect(startup.caution(platform: .macOS) == nil)
 
     let t7 = InstallVolume(name: "T7", availableCapacity: 812 * gb, format: "exfat")
     #expect(t7.summary == "812 GB available on “T7”")
-    #expect(t7.caution == "Formatted as ExFAT. Games run best from APFS.")
+    #expect(t7.caution(platform: .macOS) == "Formatted as ExFAT. Games run best from APFS.")
     #expect(t7.problem(download: 80 * gb, platform: .macOS) == nil, "ExFAT is allowed")
-    #expect(InstallVolume(name: "USB", availableCapacity: gb, format: "msdos").caution
+    #expect(InstallVolume(name: "USB", availableCapacity: gb, format: "msdos").caution(platform: .windows)
         == "Formatted as MS-DOS (FAT). Games run best from APFS.")
-    #expect(InstallVolume(name: "X5", availableCapacity: gb, format: "apfs").caution == nil)
-    #expect(InstallVolume(name: "Old", availableCapacity: gb, format: "hfs").caution == nil)
+    #expect(InstallVolume(name: "X5", availableCapacity: gb, format: "apfs").caution(platform: .macOS) == nil)
+    #expect(InstallVolume(name: "Old", availableCapacity: gb, format: "hfs").caution(platform: .macOS) == nil)
 
     // Space: the download, and the room the installers keep free.
     let small = InstallVolume(name: "T7", availableCapacity: 50 * gb)
@@ -61,15 +61,21 @@ private func makeApp(at url: URL) throws {
     #expect(InstallVolume(name: "Archive", availableCapacity: 812 * gb, isReadOnly: true).problem(download: nil, platform: .macOS)
         == "“Archive” is read-only.")
     #expect(InstallVolume(name: "NAS", availableCapacity: 812 * gb, isLocal: false, format: "smbfs").problem(download: nil, platform: .macOS)
-        == "“NAS” isn’t a drive connected to this Mac.")
+        == "Games can’t be installed on a network drive.")
     #expect(InstallVolume(name: "Macintosh HD", isStartupDisk: true, availableCapacity: 812 * gb, unwritableFolder: "Applications")
         .problem(download: nil, platform: .macOS) == "You don’t have permission to save in “Applications”.")
     #expect(InstallVolume(name: "Dev", availableCapacity: 812 * gb, isCaseSensitive: true).problem(download: nil, platform: .windows) == nil,
             "Wine copes with case-sensitive names")
     #expect(InstallVolume(name: "Dev", availableCapacity: 812 * gb, isCaseSensitive: true).problem(download: nil, platform: .macOS)
         == "“Dev” is case-sensitive, which Blizzard games don’t support.")
-    #expect(InstallVolume(name: "Macintosh HD", isStartupDisk: true, availableCapacity: 812 * gb, isCaseSensitive: true)
-        .problem(download: nil, platform: .macOS) == "The startup disk is case-sensitive, which Blizzard games don’t support.")
+    // Games were installed on a case-sensitive startup disk before: a
+    // caution, and Install stays.
+    let caseSensitiveStartup = InstallVolume(name: "Macintosh HD", isStartupDisk: true, availableCapacity: 812 * gb, isCaseSensitive: true)
+    #expect(caseSensitiveStartup.problem(download: nil, platform: .macOS) == nil)
+    #expect(caseSensitiveStartup.caution(platform: .macOS) == "The startup disk is case-sensitive, which Blizzard games may not support.")
+    #expect(caseSensitiveStartup.caution(platform: .windows) == nil)
+    #expect(InstallVolume(name: "Dev", availableCapacity: 812 * gb, isCaseSensitive: true).caution(platform: .macOS) == nil,
+            "another drive says so as its problem")
 }
 
 @Test func theFreeSpaceFallsBackToThePlainReadingAndIsMeasuredWhereTheFolderWillBe() throws {
@@ -280,6 +286,30 @@ private func makeApp(at url: URL) throws {
     // Its files gone too: no longer known there.
     try FileManager.default.removeItem(at: folder.appendingPathComponent("Hearthstone.app"))
     #expect(LocatedGames.scan([location]).locations.first?.installs.isEmpty == true)
+}
+
+@Test func aDriveEjectedWhileItIsScannedKeepsItsGamesAsDisconnected() throws {
+    let root = try sandbox("scan-ejected")
+    defer { try? FileManager.default.removeItem(at: root) }
+    // The drive is mounted when the scan starts, and gone by the time the
+    // folder is read: it isn't there any more.
+    let folder = root.appendingPathComponent("Ejected/Hearthstone", isDirectory: true)
+    let hearthstone = InstallableProduct.hearthstone.install(at: folder, region: .eu, language: "enUS", tagString: "OSX EU enUS")
+    let drive = UUID().uuidString
+    let location = LocatedGames.Location(path: folder.path, volumeUUID: drive, installs: [hearthstone])
+    var checks = 0
+    let ejected = LocatedGames.scan([location]) {
+        checks += 1
+        return LocatedGames.Volumes(paths: [], uuids: checks == 1 ? [drive] : [])
+    }
+    #expect(checks == 2, "asked again before the games were taken as gone")
+    #expect(ejected.disconnected == [location.id])
+    #expect(ejected.locations == [location], "the games last found there stay")
+
+    // Still mounted: the folder is gone, and so are its games.
+    let gone = LocatedGames.scan([location]) { LocatedGames.Volumes(paths: [], uuids: [drive]) }
+    #expect(gone.disconnected.isEmpty)
+    #expect(gone.locations.first?.installs.isEmpty == true)
 }
 
 @Test func aDriveIsKnownByItsVolumeNotJustItsName() throws {

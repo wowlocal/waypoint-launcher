@@ -39,46 +39,64 @@ public enum BattleNetInstallMetadata {
         var registeredUIDs = Set(try original.map(ProductDB.parseDatabase)?.map(\.uid) ?? [])
         var database = original ?? Data()
         var added = 0
+        // Battle.net starting stops the whole repair; anything else stops
+        // only the game it happened to (a read-only drive, say).
+        var running: (any Error)?
+        func ensureStillNotRunning() throws {
+            do { try ensureNotRunning() } catch { running = error; throw error }
+        }
         for install in installs.sorted(by: { $0.uid < $1.uid }) {
             guard install.platform == .macOS, let product = InstallableProduct.forProduct(install.productCode),
                   product.supportedPlatforms.contains(.macOS),
                   let build = install.buildConfig, build.count == 32, build.allSatisfy(\.isHexDigit),
                   let version = install.version, !version.isEmpty,
                   GameCatalog.game(for: install).isInstalled else { continue }
-            try install.platform.validate(install: install)
-            let root = URL(fileURLWithPath: install.installPath)
-            if !product.isContainerless {
-                guard let text = try? String(contentsOf: root.appendingPathComponent(".build.info"), encoding: .utf8),
-                      BPSV(text).rows.contains(where: {
-                          $0["Product"] == install.productCode && $0["Build Key"] == build && $0["Active"] == "1"
-                      }) else { continue }
-            }
-            let record = encode(install, subfolder: product.flavorFolder ?? "")
-            try ensureNotRunning()
-            if GameCatalog.family(for: install.productCode) == .worldOfWarcraft,
-               try prepareDataDirectory(root.appendingPathComponent("Data")) { added += 1 }
-            if try create(record, at: root.appendingPathComponent(".product.db")) {
-                added += 1
-                Log.notice(.install, "battlenet_folder_record_repaired", nil, ["uid": install.uid, "path": root.path])
-            } else {
-                let file = root.appendingPathComponent(".product.db")
-                let before = try Data(contentsOf: file)
-                let after = try updatingContentSelection(before, for: install)
-                if after != before {
-                    try ensureNotRunning()
-                    guard try Data(contentsOf: file) == before else { throw UpdateError.storageChanged }
-                    try after.write(to: file, options: .atomic)
-                    added += 1
+            do {
+                try install.platform.validate(install: install)
+                let root = URL(fileURLWithPath: install.installPath)
+                if !product.isContainerless {
+                    guard let text = try? String(contentsOf: root.appendingPathComponent(".build.info"), encoding: .utf8),
+                          BPSV(text).rows.contains(where: {
+                              $0["Product"] == install.productCode && $0["Build Key"] == build && $0["Active"] == "1"
+                          }) else { continue }
                 }
+                let record = encode(install, subfolder: product.flavorFolder ?? "")
+                try ensureStillNotRunning()
+                if GameCatalog.family(for: install.productCode) == .worldOfWarcraft,
+                   try prepareDataDirectory(root.appendingPathComponent("Data")) { added += 1 }
+                if try create(record, at: root.appendingPathComponent(".product.db")) {
+                    added += 1
+                    Log.notice(.install, "battlenet_folder_record_repaired", nil, ["uid": install.uid, "path": root.path])
+                } else {
+                    let file = root.appendingPathComponent(".product.db")
+                    let before = try Data(contentsOf: file)
+                    let after = try updatingContentSelection(before, for: install)
+                    if after != before {
+                        try ensureStillNotRunning()
+                        guard try Data(contentsOf: file) == before else { throw UpdateError.storageChanged }
+                        try after.write(to: file, options: .atomic)
+                        added += 1
+                    }
+                }
+                // Its entries in the Agent's database, kept once both are made.
+                var changes = 0
+                var updated = database
+                if original != nil, !registeredUIDs.contains(install.uid) {
+                    var writer = ProtoWriter()
+                    writer.bytes(1, record)
+                    updated.append(writer.data)
+                    changes += 1
+                }
+                let selected = try updatingContentSelection(updated, for: install)
+                if selected != updated { changes += 1 }
+                database = selected
+                registeredUIDs.insert(install.uid)
+                added += changes
+            } catch {
+                if let running { throw running }
+                Log.warning(.install, "battlenet_metadata_repair_skipped", nil, ["uid": install.uid, "path": install.installPath,
+                                                                                 "error": error])
             }
-            if original != nil, registeredUIDs.insert(install.uid).inserted {
-                var writer = ProtoWriter()
-                writer.bytes(1, record)
-                database.append(writer.data)
-                added += 1
-            }
-            let updated = try updatingContentSelection(database, for: install)
-            if updated != database { database = updated; added += 1 }
         }
         if let original, database != original {
             try ensureNotRunning()
