@@ -198,35 +198,53 @@ public enum LocatedGames {
         /// list of mounted volumes, so it may be used on the main thread. A
         /// location whose volume can't be told from its path counts as connected.
         public static func unscanned(_ locations: [Location], fileManager fm: FileManager = .default) -> Scan {
-            let mounted = Set((fm.mountedVolumeURLs(includingResourceValuesForKeys: [], options: []) ?? []).map(\.standardizedFileURL.path))
-            return Scan(locations: locations,
-                        disconnected: Set(locations.filter { !isMounted(path: $0.path, mounted: mounted) }.map(\.id)))
+            let mounted = InstallVolume.mountedPaths(fileManager: fm)
+            return Scan(locations: locations, disconnected: Set(locations.filter {
+                !InstallVolume.isMounted(path: $0.path, mounted: mounted, fileManager: fm)
+            }.map(\.id)))
         }
 
         public var connected: [Location] { locations.filter { !disconnected.contains($0.id) } }
         public var offline: [Location] { locations.filter { disconnected.contains($0.id) } }
     }
 
-    /// A path under `/Volumes/<name>` is on that volume; any other is on
-    /// the startup disk, which is always there.
-    static func isMounted(path: String, mounted: Set<String>) -> Bool {
-        let parts = URL(fileURLWithPath: path).standardizedFileURL.pathComponents
-        guard parts.count > 2, parts[1] == "Volumes" else { return true }
-        return mounted.contains("/Volumes/" + parts[2])
+    /// The volumes mounted at one moment: where, and which.
+    public struct Volumes: Sendable {
+        public var paths: Set<String>
+        public var uuids: Set<String>
+
+        public init(paths: Set<String>, uuids: Set<String>) {
+            self.paths = paths
+            self.uuids = uuids
+        }
+
+        /// Those mounted now. Reads only the list of mounted volumes.
+        public static func mounted(fileManager fm: FileManager = .default) -> Volumes {
+            let volumes = fm.mountedVolumeURLs(includingResourceValuesForKeys: [.volumeUUIDStringKey], options: []) ?? []
+            return Volumes(paths: Set(volumes.map(\.standardizedFileURL.path)),
+                           uuids: Set(volumes.compactMap { try? $0.resourceValues(forKeys: [.volumeUUIDStringKey]).volumeUUIDString }))
+        }
+
+        /// Whether `location`'s volume is among them: by its UUID, else by its path.
+        func contain(_ location: Location, fileManager fm: FileManager) -> Bool {
+            location.volumeUUID.map(uuids.contains) ?? InstallVolume.isMounted(path: location.path, mounted: paths, fileManager: fm)
+        }
     }
 
     /// Finds where each location is now and reads the games there. One on a
     /// volume that isn't mounted isn't touched: its games are those last
-    /// found there. Reads every connected location: off the main thread.
-    public static func scan(_ locations: [Location], fileManager fm: FileManager = .default) -> Scan {
+    /// found there. Nor is one whose volume goes away while it is read: games
+    /// that weren't found then count as on a drive that isn't connected, not
+    /// as gone. `volumes` reads which are mounted. Reads every connected
+    /// location: off the main thread.
+    public static func scan(_ locations: [Location], fileManager fm: FileManager = .default,
+                            volumes: () -> Volumes = { Volumes.mounted() }) -> Scan {
         guard !locations.isEmpty else { return Scan() }
-        let volumes = fm.mountedVolumeURLs(includingResourceValuesForKeys: [.volumeUUIDStringKey], options: []) ?? []
-        let mountedPaths = Set(volumes.map(\.standardizedFileURL.path))
-        let mountedUUIDs = Set(volumes.compactMap { try? $0.resourceValues(forKeys: [.volumeUUIDStringKey]).volumeUUIDString })
+        let mounted = volumes()
         var scan = Scan()
-        for var location in locations {
-            let mounted = location.volumeUUID.map(mountedUUIDs.contains) ?? isMounted(path: location.path, mounted: mountedPaths)
-            guard mounted else {
+        for original in locations {
+            var location = original
+            guard mounted.contain(location, fileManager: fm) else {
                 scan.locations.append(location)
                 scan.disconnected.insert(location.id)
                 continue
@@ -260,6 +278,14 @@ public enum LocatedGames {
                 // gone, and aren't kept as if their drive were away. The
                 // location stays, should the folder come back.
                 location.installs = []
+            }
+            // Games that weren't found: gone, or was the drive ejected while
+            // it was read? Only the list of mounted volumes can tell.
+            let found = Set(location.installs.map(\.key))
+            if original.installs.contains(where: { !found.contains($0.key) }), !volumes().contain(original, fileManager: fm) {
+                scan.locations.append(original)
+                scan.disconnected.insert(original.id)
+                continue
             }
             scan.locations.append(location)
         }

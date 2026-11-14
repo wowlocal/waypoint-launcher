@@ -40,12 +40,14 @@ public struct InstallVolume: Equatable, Sendable {
     /// Why a game can't be installed here, in one line; nil when it can.
     /// `download`: what the install downloads, once known.
     public func problem(download: UInt64?, platform: InstallPlatform) -> String? {
-        if !isLocal { return "\(quotedName) isn’t a drive connected to this Mac." }
+        if !isLocal { return "Games can’t be installed on a network drive." }
         if isReadOnly { return isStartupDisk ? "This location is read-only." : "\(quotedName) is read-only." }
         if let unwritableFolder { return "You don’t have permission to save in “\(unwritableFolder)”." }
         // Wine copes with case-sensitive names; Blizzard's Mac games don't.
-        if isCaseSensitive, platform == .macOS {
-            return "\(isStartupDisk ? "The startup disk" : quotedName) is case-sensitive, which Blizzard games don’t support."
+        // A case-sensitive startup disk gets a caution instead: games were
+        // installed there before, and there is nowhere else to offer.
+        if isCaseSensitive, platform == .macOS, !isStartupDisk {
+            return "\(quotedName) is case-sensitive, which Blizzard games don’t support."
         }
         if let download, let availableCapacity, availableCapacity < download + Self.headroom {
             // In whole gigabytes, rounded up: “needs 52 GB”, not “51.07 GB”.
@@ -65,11 +67,14 @@ public struct InstallVolume: Equatable, Sendable {
     }
 
     /// A file system games work on, but not as well.
-    public var caution: String? {
+    public func caution(platform: InstallPlatform) -> String? {
+        if isCaseSensitive, isStartupDisk, platform == .macOS {
+            return "The startup disk is case-sensitive, which Blizzard games may not support."
+        }
         switch format {
-        case "exfat": "Formatted as ExFAT. Games run best from APFS."
-        case "msdos": "Formatted as MS-DOS (FAT). Games run best from APFS."
-        default: nil
+        case "exfat": return "Formatted as ExFAT. Games run best from APFS."
+        case "msdos": return "Formatted as MS-DOS (FAT). Games run best from APFS."
+        default: return nil
         }
     }
 
@@ -136,15 +141,37 @@ public struct InstallVolume: Equatable, Sendable {
     public static func missingDrive(for path: String, fileManager fm: FileManager = .default) -> String? {
         let parts = URL(fileURLWithPath: path).standardizedFileURL.pathComponents
         guard parts.count > 2, parts[1] == "Volumes" else { return nil }
-        let mounted = Set((fm.mountedVolumeURLs(includingResourceValuesForKeys: [], options: []) ?? []).map(\.standardizedFileURL.path))
-        guard let missing = missingDrive(for: path, mounted: mounted) else { return nil }
-        // "/Volumes/Macintosh HD" is a link to the startup disk.
-        return (try? fm.destinationOfSymbolicLink(atPath: "/Volumes/" + parts[2])) == nil ? missing : nil
+        return missingDrive(for: path, mounted: mountedPaths(fileManager: fm), fileManager: fm)
     }
 
-    static func missingDrive(for path: String, mounted: Set<String>) -> String? {
-        guard !LocatedGames.isMounted(path: path, mounted: mounted) else { return nil }
+    static func missingDrive(for path: String, mounted: Set<String>, fileManager fm: FileManager = .default) -> String? {
+        guard !isMounted(path: path, mounted: mounted, fileManager: fm) else { return nil }
         return URL(fileURLWithPath: path).standardizedFileURL.pathComponents[2]
+    }
+
+    /// Where the mounted volumes are. Reads only the list of them.
+    public static func mountedPaths(fileManager fm: FileManager = .default) -> Set<String> {
+        Set((fm.mountedVolumeURLs(includingResourceValuesForKeys: [], options: []) ?? []).map(\.standardizedFileURL.path))
+    }
+
+    /// Whether the volume `path` is on is there. One under `/Volumes/<name>`
+    /// is on that volume, when one is mounted there; any other is on the
+    /// startup disk, which is always there, as is "/Volumes/Macintosh HD", a
+    /// link to it. Touches no other drive: `mounted` is the list of mounted
+    /// volumes, and a link is looked for only where none is mounted.
+    static func isMounted(path: String, mounted: Set<String>, fileManager fm: FileManager = .default) -> Bool {
+        let parts = URL(fileURLWithPath: path).standardizedFileURL.pathComponents
+        guard parts.count > 2, parts[1] == "Volumes" else { return true }
+        let volume = "/Volumes/" + parts[2]
+        return mounted.contains(volume) || (try? fm.destinationOfSymbolicLink(atPath: volume)) != nil
+    }
+
+    /// Whether `path` is on a drive other than the startup disk that is
+    /// connected: one mounted under `/Volumes`. Reading such a drive can be
+    /// slow, or fail as it is ejected, so the main thread doesn't.
+    public static func isOnOtherDrive(_ path: String, mounted: Set<String>) -> Bool {
+        let parts = URL(fileURLWithPath: path).standardizedFileURL.pathComponents
+        return parts.count > 2 && parts[1] == "Volumes" && mounted.contains("/Volumes/" + parts[2])
     }
 
     /// Never writes to the startup disk in place of a drive that isn't

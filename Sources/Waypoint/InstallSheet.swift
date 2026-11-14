@@ -168,7 +168,7 @@ final class InstallSheet: NSViewController {
                 text = reason
                 problem = true
             } else {
-                text = [volume.summary, volume.caution].compactMap { $0 }.joined(separator: "\n")
+                text = [volume.summary, volume.caution(platform: platform)].compactMap { $0 }.joined(separator: "\n")
             }
         case .success(nil):
             break
