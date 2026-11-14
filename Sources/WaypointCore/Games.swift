@@ -21,6 +21,9 @@ public struct Game: Identifiable, Equatable, Sendable {
     /// The remembered location (File ▸ Locate Installed Games) it is listed
     /// from, if any: Remove from Library forgets it there.
     public var locationID: String?
+    /// A Windows game's program was in its folder when this was read, so
+    /// asking whether it is installed doesn't read the disk again.
+    var hasWindowsProgram = false
 
     public enum Architecture: String, Sendable {
         case arm64, x86_64
@@ -32,13 +35,10 @@ public struct Game: Identifiable, Equatable, Sendable {
     /// that isn't connected. Either way it isn't offered for download again.
     public var isListed: Bool { isInstalled || isOffline }
 
+    /// As it was when the game was read (`GameCatalog.game`): never reads
+    /// the disk, so a view may ask as often as it likes.
     public var isInstalled: Bool {
-        if install.platform == .windows {
-            guard let title = WindowsTitle.forInstall(install) else { return false }
-            return FileManager.default.fileExists(atPath:
-                URL(fileURLWithPath: install.installPath).appendingPathComponent(title.executablePath).path)
-        }
-        return appURL != nil
+        install.platform == .windows ? hasWindowsProgram : appURL != nil
     }
 
     /// Whether Waypoint knows how to log this game in without Battle.net.
@@ -118,7 +118,11 @@ public enum GameCatalog {
     public static func game(for install: ProductInstall, fileManager: FileManager = .default) -> Game {
         let name = displayName(for: install)
         if install.platform == .windows {
-            return Game(install: install, family: .other, displayName: name, appURL: nil, architectures: [.x86_64])
+            let program = WindowsTitle.forInstall(install).map {
+                URL(fileURLWithPath: install.installPath).appendingPathComponent($0.executablePath).path
+            }
+            return Game(install: install, family: .other, displayName: name, appURL: nil, architectures: [.x86_64],
+                        hasWindowsProgram: program.map(fileManager.fileExists(atPath:)) ?? false)
         }
         let family = family(for: install.productCode)
         let root = URL(fileURLWithPath: install.installPath, isDirectory: true)
@@ -157,7 +161,7 @@ public enum GameCatalog {
              displayName: displayName(for: install), appURL: nil, architectures: [], isOffline: true)
     }
 
-    static func displayName(for install: ProductInstall) -> String {
+    public static func displayName(for install: ProductInstall) -> String {
         if install.platform == .windows { return WindowsTitle.forInstall(install)?.displayName ?? install.productCode }
         if let product = InstallableProduct.forProduct(install.productCode), product.supportedPlatforms.contains(.macOS) {
             return product.displayName
@@ -217,6 +221,25 @@ public struct GameLibrary: @unchecked Sendable {
     /// (`LocatedGames.scan`, off the main thread): their games only fill in
     /// what the other sources don't have, or whose files are gone.
     public var located = LocatedGames.Scan()
+    /// Whether games on a drive other than the startup disk are read there.
+    /// Off on the main thread, which mustn't wait for a drive that is slow,
+    /// asleep or being ejected: those games are as `otherDriveGames` has them.
+    public var readsOtherDrives = true
+    /// The games on other drives as last read (by a scan with
+    /// `readsOtherDrives`), by `factsKey`; nil for one whose folder wasn't
+    /// there. One not among them at all isn't listed until it is read.
+    public var otherDriveGames: [String: Game?] = [:]
+    /// Tells which paths are on another drive, by the volumes mounted when
+    /// it is made. Tests stand in for drives with it.
+    var otherDrives: @Sendable (FileManager) -> (String) -> Bool = { fm in
+        let mounted = InstallVolume.mountedPaths(fileManager: fm)
+        return { InstallVolume.isOnOtherDrive($0, mounted: mounted) }
+    }
+
+    /// What tells one game's files from another's: the install, and where it is.
+    public static func factsKey(_ install: ProductInstall) -> String {
+        install.key + "|" + URL(fileURLWithPath: install.installPath).standardizedFileURL.path
+    }
 
     /// Every supported game's default folder: Battle.net can forget a game
     /// (it lost HotS once), and Waypoint should still find it there rather
@@ -242,17 +265,122 @@ public struct GameLibrary: @unchecked Sendable {
     public func installs() -> [ProductInstall] { entries().map(\.install) }
 
     public func games() -> [Game] {
-        entries().map { entry in
-            var game = entry.offline ? GameCatalog.offlineGame(for: entry.install)
-                : GameCatalog.game(for: entry.install, fileManager: fileManager)
+        var skipped = OtherDrives()
+        return games(otherDrives: &skipped)
+    }
+
+    /// What `games` didn't read on other drives (see `readsOtherDrives`).
+    public struct OtherDrives: Sendable {
+        /// Whether any game is on another drive: what is known about it
+        /// may be out of date.
+        public var skipped = false
+        /// The uids of the games there that haven't been read at all, and
+        /// aren't listed until they are.
+        public var unread: Set<String> = []
+        /// With `readsOtherDrives`: what was read there, found or not, for
+        /// `otherDriveGames`.
+        public var read: [String: Game?] = [:]
+
+        public init() {}
+    }
+
+    /// `games`, and what of them wasn't read on other drives.
+    public func games(otherDrives: inout OtherDrives) -> [Game] {
+        let read = GameReader(self)
+        defer {
+            otherDrives = OtherDrives()
+            otherDrives.skipped = read.skipped
+            otherDrives.unread = read.unread
+            otherDrives.read = read.otherDrives
+        }
+        return entries(read).compactMap { entry in
+            guard var game = entry.offline ? GameCatalog.offlineGame(for: entry.install) : read.game(for: entry.install) else { return nil }
+            game.install = entry.install
             game.locationID = entry.location
+            return game
+        }
+    }
+
+    /// One game, read as `games` reads it. On another drive and not read
+    /// there yet (see `readsOtherDrives`): as if not installed.
+    public func game(for install: ProductInstall) -> Game {
+        var game = GameReader(self).game(for: install) ?? GameCatalog.offlineGame(for: install)
+        game.install = install
+        game.isOffline = false
+        return game
+    }
+
+    /// Battle.net's own records of its games: the Agent's database, then the
+    /// folders of the built-in locations. Reads only those.
+    public func battleNetInstalls() -> [ProductInstall] {
+        var installs = (try? ProductDB.loadAgentDatabase(at: agentDatabase)) ?? []
+        for root in searchRoots {
+            if let data = try? Data(contentsOf: root.appendingPathComponent(".product.db")),
+               let found = try? ProductDB.parseFolderInstalls(data) {
+                installs += found
+            }
+        }
+        return installs
+    }
+
+    /// Reads each game's files once (`GameCatalog.game`); on another drive,
+    /// only with `readsOtherDrives`.
+    private final class GameReader {
+        let library: GameLibrary
+        /// Whether what is at a path is on another drive, and not read.
+        let isOnOtherDrive: (String) -> Bool
+        var read: [String: Game?] = [:]
+        private(set) var skipped = false
+        private(set) var unread: Set<String> = []
+        /// What was read on other drives, found or not (`readsOtherDrives`).
+        private(set) var otherDrives: [String: Game?] = [:]
+
+        init(_ library: GameLibrary) {
+            self.library = library
+            isOnOtherDrive = library.otherDrives(library.fileManager)
+        }
+
+        /// Whether what is at a path is on another drive, and not read.
+        func isSkipped(_ path: String) -> Bool {
+            !library.readsOtherDrives && isOnOtherDrive(path)
+        }
+
+        /// Whether Waypoint's record of `install` is of a folder that is
+        /// there (on another drive, as last read).
+        func hasFolder(_ install: ProductInstall) -> Bool {
+            if isSkipped(install.installPath) { return game(for: install) != nil }
+            let exists = library.fileManager.fileExists(atPath: install.installPath)
+            if !exists, library.readsOtherDrives, isOnOtherDrive(install.installPath) {
+                let key = GameLibrary.factsKey(install)
+                if otherDrives[key] == nil { otherDrives[key] = .some(nil) }
+            }
+            return exists
+        }
+
+        /// Nil: on another drive, and not read there yet.
+        func game(for install: ProductInstall) -> Game? {
+            let key = GameLibrary.factsKey(install)
+            if let game = read[key] { return game }
+            let game: Game?
+            if isSkipped(install.installPath) {
+                skipped = true
+                if let known = library.otherDriveGames[key] { game = known } else {
+                    game = nil
+                    unread.insert(install.uid)
+                }
+            } else {
+                game = GameCatalog.game(for: install, fileManager: library.fileManager)
+                if library.readsOtherDrives, isOnOtherDrive(install.installPath) { otherDrives[key] = game }
+            }
+            read[key] = game
             return game
         }
     }
 
     /// Each install found, with the remembered location it is listed from
     /// (or, offline, the one whose drive it is on).
-    private func entries() -> [(install: ProductInstall, location: String?, offline: Bool)] {
+    private func entries(_ read: GameReader? = nil) -> [(install: ProductInstall, location: String?, offline: Bool)] {
+        let read = read ?? GameReader(self)
         var byUID: [String: ProductInstall] = [:]
         var order: [String] = []
         var locations: [String: String] = [:]
@@ -265,9 +393,17 @@ public struct GameLibrary: @unchecked Sendable {
         }
         // A game on a drive that isn't connected isn't looked for there.
         func isOnDisk(_ install: ProductInstall) -> Bool {
-            offlineLocation(install) == nil && GameCatalog.game(for: install, fileManager: fileManager).isInstalled
+            offlineLocation(install) == nil && read.game(for: install)?.isInstalled == true
+        }
+        // Removed from the library where it is: whatever else has a record
+        // of it there (Battle.net's, Waypoint's) doesn't list it again, nor
+        // does Battle.net installing it there again. Waypoint installing it
+        // there, or locating the folder, lists it again.
+        func isRemoved(_ install: ProductInstall) -> Bool {
+            located.locations.contains { $0.removedKeys.contains(install.key) && $0.contains(install.installPath) }
         }
         func add(_ install: ProductInstall, location: String? = nil) {
+            guard !isRemoved(install) else { return }
             guard let earlier = byUID[install.key] else {
                 order.append(install.key)
                 byUID[install.key] = install
@@ -283,20 +419,12 @@ public struct GameLibrary: @unchecked Sendable {
             }
         }
 
-        if let installs = try? ProductDB.loadAgentDatabase(at: agentDatabase) {
-            installs.forEach { add($0) }
-        }
-        for root in searchRoots {
-            let file = root.appendingPathComponent(".product.db")
-            if let data = try? Data(contentsOf: file),
-               let installs = try? ProductDB.parseFolderInstalls(data) {
-                installs.forEach { add($0) }
-            }
-        }
+        battleNetInstalls().forEach { add($0) }
         // Games Waypoint installed, as long as their folder is still there
-        // (or on a remembered drive that isn't connected).
+        // (or on a remembered drive that isn't connected; on another drive,
+        // as last read there).
         for install in stateStore.standaloneInstalls()
-        where offlineLocation(install) != nil || fileManager.fileExists(atPath: install.installPath) {
+        where offlineLocation(install) != nil || read.hasFolder(install) {
             add(install)
         }
         // Located folders come last: a backup copy found there never
@@ -318,10 +446,16 @@ public struct GameLibrary: @unchecked Sendable {
                 locations[install.key] = location.id
             }
         }
+        // A remembered folder's game found through another record of it
+        // (Battle.net's, or Waypoint's of installing it there) is listed
+        // from that folder too, so it can be removed from the library.
+        func connectedLocation(_ install: ProductInstall) -> String? {
+            located.connected.first { $0.contains(install.installPath) && $0.listedInstalls.contains { $0.key == install.key } }?.id
+        }
         return order.compactMap { key in
             guard let install = byUID[key] else { return nil }
             let offlineID = offlineLocation(install)
-            return (stateStore.apply(to: install), locations[key] ?? offlineID, offlineID != nil)
+            return (stateStore.apply(to: install), locations[key] ?? offlineID ?? connectedLocation(install), offlineID != nil)
         }
     }
 }

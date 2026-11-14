@@ -226,7 +226,7 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
         // while nothing is installed, so a new library starts with it.
         if !available.isEmpty {
             // A HotS download has a game row of its own before it's installed.
-            let expanded = showsAvailableGames ?? !model.games.contains(where: \.isInstalled)
+            let expanded = showsAvailableGames ?? (!model.games.contains(where: \.isInstalled) && model.unreadGames.isEmpty)
             rows.append(.availableHeader(count: available.count, expanded: expanded))
             if expanded { rows += available }
         }

@@ -152,18 +152,37 @@ public enum LocatedGames {
             return true
         }
 
+        /// Lists again a game installed at `path`, wherever it was removed
+        /// from the library there. Returns whether it had been.
+        @discardableResult
+        public func restore(key: String, at path: String) -> Bool {
+            let all = locations()
+            let restored = all.map { location in
+                guard location.contains(path) else { return location }
+                var location = location
+                location.removedKeys.removeAll { $0 == key }
+                return location
+            }
+            guard restored != all else { return false }
+            save(restored)
+            return true
+        }
+
         /// Forgets the whole location.
         public func remove(id: String) {
             save(locations().filter { $0.id != id })
         }
 
-        /// Forgets one game listed from a location, and the location once
-        /// nothing else is listed from it. Never touches the game's files.
+        /// Forgets one game listed from a location. The location stays, with
+        /// nothing listed from it, if that was the last: what it removed
+        /// keeps any other record of the game there (Battle.net's, or
+        /// Waypoint's of installing it) from listing it again, until the
+        /// folder is located again or the game installed there again. Never
+        /// touches the game's files.
         public func remove(key: String, from id: String) {
             var all = locations()
             guard let index = all.firstIndex(where: { $0.id == id }) else { return }
             if !all[index].removedKeys.contains(key) { all[index].removedKeys.append(key) }
-            if all[index].listedInstalls.isEmpty { all.remove(at: index) }
             save(all)
         }
 
