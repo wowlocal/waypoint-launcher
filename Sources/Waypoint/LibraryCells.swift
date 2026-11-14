@@ -411,7 +411,7 @@ final class GameCell: NSView {
         }
         if let region = game.install.region { parts.append(region.uppercased()) }
         if game.install.platform == .windows {
-            parts.append("Windows")
+            parts.append(WindowsTitle.forInstall(game.install)?.compatibilityLabel ?? "Windows")
             if WindowsTitle.forInstall(game.install)?.isQualified == false { parts.append("Preview") }
         }
         else if game.appURL != nil, !game.runsNatively { parts.append("Intel") }
@@ -456,7 +456,7 @@ final class InstallableCell: NSView {
         separator.isHidden = !showsSeparator || state.picture != nil
         icon.file = state.icon
         showPicture(state.picture, on: &banner, in: self, below: row)
-        name.stringValue = state.product.displayName
+        name.stringValue = state.product.installationDisplayName(platform: model.defaultPlatform(for: state.product))
         var detailTooltip: String?
         detail.textColor = .secondaryLabelColor
         // Before the first report: an empty bar.
@@ -599,11 +599,11 @@ final class AvailableGameCell: NSView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
-    func configure(_ product: InstallableProduct, picture: URL?, icon file: URL?) {
-        name.stringValue = product.displayName
+    func configure(_ product: InstallableProduct, platform: InstallPlatform, picture: URL?, icon file: URL?) {
+        name.stringValue = product.installationDisplayName(platform: platform)
         icon.letter = String(product.displayName.prefix(1)).uppercased()
         icon.file = file
-        button.setAccessibilityLabel("Install \(product.displayName)")
+        button.setAccessibilityLabel("Install \(name.stringValue)")
         showPicture(picture, on: &banner, in: self, below: row, strength: 0.75, inset: 2)
     }
 
