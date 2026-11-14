@@ -85,6 +85,15 @@ public final class WoWAccountDiscovery {
     private let isWoWRunning: @MainActor () -> Bool
     private let makeTransport: @MainActor (Endpoint) -> any WoWAccountTransport
     private var session: Session?
+    /// Whether this one takes turns with the others: one game-service
+    /// session at a time across Waypoint. Tests' made-up ones don't.
+    private let isShared: Bool
+    /// Shared sessions open now, from every instance.
+    private static var openSessions = 0
+
+    /// Whether Waypoint is signed in to the game service right now, say to
+    /// find WoW accounts. Another sign-in meanwhile fails with `busy`.
+    public static var hasOpenSession: Bool { openSessions > 0 }
 
     public convenience init() { self.init(timeout: .seconds(35)) }
 
@@ -92,14 +101,15 @@ public final class WoWAccountDiscovery {
     public convenience init(timeout: Duration) {
         self.init(timeout: timeout,
                   isWoWRunning: { Self.isWoWRunning(in: RunningProcesses.executables()) },
-                  transport: { TLSTransport($0) })
+                  isShared: true, transport: { TLSTransport($0) })
     }
 
     /// For tests: a made-up connection, deadline and process list.
     init(timeout: Duration = .seconds(35), isWoWRunning: @escaping @MainActor () -> Bool = { false },
-         transport: @escaping @MainActor (Endpoint) -> any WoWAccountTransport) {
+         isShared: Bool = false, transport: @escaping @MainActor (Endpoint) -> any WoWAccountTransport) {
         self.timeout = timeout
         self.isWoWRunning = isWoWRunning
+        self.isShared = isShared
         self.makeTransport = transport
     }
 
@@ -149,7 +159,7 @@ public final class WoWAccountDiscovery {
             guard issued.accountID == account else { return skip("other_account") }
             return issued
         } catch {
-            return skip(error is CancellationError ? "cancelled" : "failed", error)
+            return skip(error is CancellationError ? "cancelled" : error as? Failure == .busy ? "busy" : "failed", error)
         }
     }
 
@@ -159,12 +169,13 @@ public final class WoWAccountDiscovery {
         guard let endpoint = Self.endpoint(for: region) else { throw Failure.unsupported }
         guard let owner = UInt64(token.accountID), owner > 0 else { throw Failure.identityMismatch }
         guard build > 0 else { throw Failure.unavailable }
-        guard session == nil else { throw Failure.busy }
+        guard session == nil, !(isShared && Self.hasOpenSession) else { throw Failure.busy }
         try Task.checkCancellation()
         guard !isWoWRunning() else { throw Failure.gameRunning }
 
         let session = Session(transport: makeTransport(endpoint), owner: owner, regionID: endpoint.regionID)
         self.session = session
+        if isShared { Self.openSessions += 1 }
         let deadline = Task { [timeout] in
             guard (try? await Task.sleep(for: timeout)) != nil else { return }
             session.end(.timedOut)
@@ -173,6 +184,7 @@ public final class WoWAccountDiscovery {
             deadline.cancel()
             session.end(.finished)
             self.session = nil
+            if isShared { Self.openSessions -= 1 }
         }
         do {
             let result = try await withTaskCancellationHandler {

@@ -60,7 +60,7 @@ private func details(_ token: UInt64, owner: UInt64 = owner, _ name: String) -> 
 
 /// Connect and logon, up to the point the account list is asked for.
 private let signedIn = [reply(0), reply(1), logonComplete()]
-/// A whole conversation for an account with one WoW licence.
+/// A whole conversation for an account with one WoW license.
 private let oneAccount = signedIn + [accountList(2, [handle(456)]), details(3, "WoW1")]
 
 /// Plays the server: hands out `input` a few bytes at a time and keeps what
@@ -315,6 +315,31 @@ private final class Game {
     }
 }
 
+/// The app's sessions take turns across instances: a lookup and a
+/// browser-return check for one account never overlap. Only this test makes
+/// shared ones, so the others can run alongside it.
+@Test @MainActor func sharedSessionsTakeTurnsAcrossInstances() async throws {
+    let stalled = ScriptedServer(signedIn)
+    stalled.stalls = true
+    let first = WoWAccountDiscovery(isShared: true, transport: { _ in stalled })
+    let task = Task { try await first.discover(token: ticket, build: 70938, region: .us) }
+    while stalled.pending == nil { await Task.yield() }
+    #expect(WoWAccountDiscovery.hasOpenSession)
+
+    var connections = 0
+    let second = WoWAccountDiscovery(isShared: true, transport: { _ in connections += 1; return ScriptedServer(oneAccount) })
+    await #expect(throws: WoWAccountDiscovery.Failure.busy) {
+        _ = try await second.profile(token: ticket, build: 70938, region: .us)
+    }
+    #expect(connections == 0 && !stalled.cancelled)
+
+    first.cancel()
+    await #expect(throws: CancellationError.self) { try await task.value }
+    #expect(!WoWAccountDiscovery.hasOpenSession)
+    #expect(try await second.discover(token: ticket, build: 70938, region: .us).map(\.name) == ["WoW1"])
+    #expect(!WoWAccountDiscovery.hasOpenSession)
+}
+
 @Test @MainActor func aTaskCancelledBeforehandNeverConnects() async {
     var connections = 0
     let discovery = WoWAccountDiscovery(transport: { _ in connections += 1; return ScriptedServer(oneAccount) })
@@ -453,7 +478,7 @@ private final class Game {
     #expect(error == .malformed)
     #expect(server.sent.count == 3)
 
-    // The same licence twice.
+    // The same license twice.
     #expect(await failure(signedIn + [accountList(2, [handle(456), handle(456)])]).0 == .malformed)
 
     // Many large frames in all.
@@ -548,7 +573,7 @@ private func signedIn(tag: String? = "Example#1234", owner: UInt64 = owner) -> [
     let untagged = ScriptedServer(signedIn(tag: nil))
     #expect(try await discovery(untagged).profile(token: ticket, build: 70938, region: .us).battleTag == nil)
 
-    // However many accounts it has: the licences aren't looked at.
+    // However many accounts it has: the licenses aren't looked at.
     let many = ScriptedServer([reply(0), reply(1), logonComplete(record: (1...30).map { bytes(2, number(1, $0)) }.reduce(Data(), +))])
     #expect(try await discovery(many).profile(token: ticket, build: 70938, region: .us).accountID == "123")
 }
