@@ -10,10 +10,14 @@ public struct LaunchPlan: Equatable, Sendable {
     public var codename: String
     public var region: Region
     public var locale: String?
-    /// WoW licence name for `GAME_ACCOUNT`; nil lets the game pick. Fill it
+    /// WoW license name for `GAME_ACCOUNT`; nil lets the game pick. Fill it
     /// in from `WoWAccountStore.launchAccount(for:uid:region:)` with the token
     /// actually being launched, so it can't belong to another account.
     public var gameAccount: String? = nil
+    /// With no `gameAccount`: keep the `GAME_ACCOUNT` an earlier launch left
+    /// for the same account and region (Battle.net's choice) instead of
+    /// clearing it. For when Waypoint knows nothing of the licenses.
+    public var keepsStoredGameAccount = false
     var windows: WindowsLaunchTarget? = nil
     public var isWindows: Bool { windows != nil }
 }
@@ -89,9 +93,10 @@ public enum GameLauncher {
     public static func launch(_ plan: LaunchPlan, token: LoginToken, gameName: String) throws -> Int32 {
         guard !plan.isWindows else { throw LaunchError.unsupported("Launch Windows games from Waypoint") }
         let options = LaunchOptions(gameKey: plan.codename)
-        try options.write(token: token.value, region: plan.region, locale: plan.locale, gameAccount: plan.gameAccount)
+        let kept = try options.write(token: token.value, region: plan.region, locale: plan.locale, gameAccount: plan.gameAccount,
+                                     keepingStoredGameAccount: plan.keepsStoredGameAccount)
         var fields: [String: Any] = ["codename": plan.codename, "region": plan.region.rawValue, "locale": plan.locale ?? "-"]
-        if options.usesGameAccount { fields["game_account"] = plan.gameAccount == nil ? "automatic" : "selected" }
+        if options.usesGameAccount { fields["game_account"] = plan.gameAccount != nil ? "selected" : kept ? "kept" : "automatic" }
         Log.info(.launch, "launch_options_written", nil, fields)
 
         do {

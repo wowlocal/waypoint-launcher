@@ -171,7 +171,7 @@ private let us1 = WoWAccountScope(owner: "1", uid: "wow", region: .us)
 
     do { let r = store.select(wow2, in: us1, current: us1); #expect(r) }
     #expect(store.selected(owner: "1", uid: "wow", region: .us) == wow2)
-    // Only licences the last lookup listed.
+    // Only licenses the last lookup listed.
     do { let r = store.select(WoWGameAccount(id: "103", name: "WoW3"), in: us1, current: us1); #expect(!r) }
     #expect(store.selected(owner: "1", uid: "wow", region: .us) == wow2)
     do { let r = store.select(nil, in: us1, current: us1); #expect(r) }
@@ -183,7 +183,7 @@ private let us1 = WoWAccountScope(owner: "1", uid: "wow", region: .us)
     store.select(wow1, owner: "1", uid: "wow", region: .us)
     #expect(store.shownChoice(in: us1) == nil, "no lookup yet")
     store.cache([wow1], owner: "1", region: .us)
-    #expect(store.shownChoice(in: us1) == nil, "only one licence")
+    #expect(store.shownChoice(in: us1) == nil, "only one license")
     store.cache([wow1, wow2], owner: "1", region: .us)
     #expect(store.shownChoice(in: us1) == wow1)
     store.select(nil, owner: "1", uid: "wow", region: .us)
@@ -319,4 +319,20 @@ private let us1 = WoWAccountScope(owner: "1", uid: "wow", region: .us)
     #expect(store.launchAccount(for: a, uid: "wow", region: .us) == "WoW2")
     #expect(store.launchAccount(for: a, uid: "wow", region: .eu) == nil)
     #expect(store.launchAccount(for: b, uid: "wow", region: .us) == nil)
+}
+
+/// Upgraded users who chose a license in Battle.net keep it until Waypoint
+/// has looked their licenses up; after that, no choice means WoW asks.
+@Test func battleNetsChoiceStandsOnlyUntilALookup() throws {
+    var store = WoWAccountStore()
+    let a = try #require(LoginToken("US-0123456789abcdef0123456789abcdef-111"))
+    #expect(store.defersToBattleNet(for: a, uid: "wow", region: .us))
+    // A lookup, then Ask in WoW (no choice).
+    store.cache([wow1, wow2], owner: "111", region: .us)
+    #expect(!store.defersToBattleNet(for: a, uid: "wow", region: .us))
+    // Other regions are still unknown.
+    #expect(store.defersToBattleNet(for: a, uid: "wow", region: .eu))
+    // A choice of Waypoint's own is never deferred.
+    store.select(wow2, owner: "111", uid: "wow", region: .eu)
+    #expect(!store.defersToBattleNet(for: a, uid: "wow", region: .eu))
 }

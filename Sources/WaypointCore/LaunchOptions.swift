@@ -33,7 +33,7 @@ public struct LaunchOptions {
     public var webTokenKey: String { "Launch Options/\(gameKey)/WEB_TOKEN" }
     public var regionKey: String { "Launch Options/\(gameKey)/REGION" }
     public var localeKey: String { "Launch Options/\(gameKey)/LOCALE" }
-    /// Which WoW licence to log in with, by name (`WoW1`). Only WoW reads it.
+    /// Which WoW license to log in with, by name (`WoW1`). Only WoW reads it.
     public var gameAccountKey: String { "Launch Options/\(gameKey)/GAME_ACCOUNT" }
     /// Waypoint's note of whose license `GAME_ACCOUNT` is: the Battle.net
     /// account id of the token it was written with. Stored in `notesDomain`.
@@ -59,44 +59,51 @@ public struct LaunchOptions {
         value(gameAccountKey) as? String
     }
 
-    /// The CLI replays the existing handoff, including its license only in
-    /// the same region and only when Waypoint recorded `token`'s own account
-    /// as its owner. Without that note (another account's license, or one
-    /// only Battle.net or an older Waypoint wrote) it's dropped and WoW
-    /// chooses. App launches use their own per-edition preferences.
-    public func storedGameAccount(for region: Region, token: LoginToken) -> String? {
+    /// Whether the `GAME_ACCOUNT` there now may go out again with `token`:
+    /// it was left with a ticket of the same account, in the same region,
+    /// and Waypoint's owner note doesn't name another account. Battle.net
+    /// leaves that note alone, so another name in it means Battle.net
+    /// switched accounts and left Waypoint's license for the old one.
+    public func canKeepStoredGameAccount(for region: Region, token: LoginToken) -> Bool {
         guard usesGameAccount, storedRegion() == region.launchOptionValue,
-              note(gameAccountOwnerKey) == token.accountID,
-              let name = storedGameAccount(), WoWGameAccount.isValidName(name) else { return nil }
-        return name
+              let stored = try? storedToken(), LoginToken(stored)?.accountID == token.accountID,
+              let name = storedGameAccount(), WoWGameAccount.isValidName(name) else { return false }
+        let owner = note(gameAccountOwnerKey)
+        return owner == nil || owner == token.accountID
     }
 
     /// Writes the token and region the way Battle.net does. Locale is only
     /// written when given, so we don't clobber what the user picked in Battle.net.
-    /// For WoW the licence is always written with them: a nil `gameAccount`
-    /// removes `GAME_ACCOUNT`, so a licence left by another account, region
-    /// or Battle.net itself never goes out with this token. Other games
-    /// ignore `gameAccount`.
-    public func write(token: String, region: Region, locale: String?, gameAccount: String? = nil) throws {
+    /// For WoW the license is written with them: a nil `gameAccount` removes
+    /// `GAME_ACCOUNT`, so a license left by another account, region or
+    /// Battle.net itself never goes out with this token. Except with
+    /// `keepingStoredGameAccount`, where one that `canKeepStoredGameAccount`
+    /// allows stays as it is. Other games ignore both.
+    /// Returns whether a stored license was kept.
+    @discardableResult
+    public func write(token: String, region: Region, locale: String?, gameAccount: String? = nil,
+                      keepingStoredGameAccount: Bool = false) throws -> Bool {
         if usesGameAccount, let gameAccount, !WoWGameAccount.isValidName(gameAccount) {
             throw CocoaError(.keyValueValidation, userInfo: [NSLocalizedDescriptionKey: "Invalid WoW account name"])
         }
+        // Before the token is replaced: it's what tells whose license it is.
+        let keeps = gameAccount == nil && keepingStoredGameAccount
+            && LoginToken(token).map { canKeepStoredGameAccount(for: region, token: $0) } == true
         let encrypted = try TokenCipher(userName: userName).encrypt(token)
         set(webTokenKey, encrypted as CFData)
         set(regionKey, region.launchOptionValue as CFString)
         if let locale { set(localeKey, locale as CFString) }
-        if usesGameAccount {
+        if usesGameAccount, !keeps {
             set(gameAccountKey, gameAccount as CFString?)
-            // A token that doesn't parse leaves no owner, so the CLI won't
-            // replay this license: it fails safe.
             setNote(gameAccountOwnerKey, gameAccount == nil ? nil : LoginToken(token)?.accountID)
         }
         guard CFPreferencesAppSynchronize(preferencesDomain as CFString) else {
             throw CocoaError(.fileWriteUnknown, userInfo: [NSLocalizedDescriptionKey: "Could not save net.battle preferences"])
         }
+        return keeps
     }
 
-    /// Removes the token, and for WoW the licence chosen with it.
+    /// Removes the token, and for WoW the license chosen with it.
     public func clearToken() {
         set(webTokenKey, nil)
         if usesGameAccount {
@@ -118,8 +125,8 @@ public struct LaunchOptions {
         CFPreferencesCopyAppValue(key as CFString, notesDomain as CFString) as? String
     }
 
-    /// A failed save leaves no matching owner, so the CLI drops the license:
-    /// it fails safe.
+    /// The note only ever stops a license from being kept; the stored
+    /// token's own account is what allows it.
     private func setNote(_ key: String, _ value: String?) {
         CFPreferencesSetAppValue(key as CFString, value as CFString?, notesDomain as CFString)
         CFPreferencesAppSynchronize(notesDomain as CFString)

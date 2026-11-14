@@ -1,6 +1,6 @@
 import Foundation
 
-/// One World of Warcraft licence ("game account") under a Battle.net
+/// One World of Warcraft license ("game account") under a Battle.net
 /// account, e.g. `WoW1`. The name is what the game reads from
 /// `Launch Options/WoW/GAME_ACCOUNT`.
 public struct WoWGameAccount: Codable, Equatable, Sendable, Identifiable {
@@ -45,7 +45,7 @@ public struct WoWAccountScope: Equatable, Sendable {
     }
 }
 
-/// The WoW licences Waypoint knows about and the one the user picked, kept
+/// The WoW licenses Waypoint knows about and the one the user picked, kept
 /// apart from Battle.net sign-in. A choice belongs to one Battle.net account
 /// (owner), one installed edition (uid) and one play region; with none,
 /// Waypoint launches "automatic" and the game decides (WoW asks at login
@@ -80,12 +80,21 @@ public struct WoWAccountStore: Equatable, Sendable {
     }
 
     /// The `GAME_ACCOUNT` to hand over with `token`. The owner comes from the
-    /// token itself, so one account's licence can't ride along with another
+    /// token itself, so one account's license can't ride along with another
     /// account's login. A choice the last lookup no longer listed goes out as
     /// automatic: the game picks, rather than Play failing on a stale name.
     public func launchAccount(for token: LoginToken, uid: String, region: Region) -> String? {
         selected(owner: token.accountID, uid: uid, region: region)
             .flatMap { listed($0, owner: token.accountID, region: region) }?.name
+    }
+
+    /// Whether a launch with `token` should leave the license Battle.net
+    /// chose for that account alone: Waypoint has no choice of its own and
+    /// never looked the licenses up, so it can't do better. After a lookup,
+    /// no choice means WoW asks.
+    public func defersToBattleNet(for token: LoginToken, uid: String, region: Region) -> Bool {
+        selected(owner: token.accountID, uid: uid, region: region) == nil
+            && !hasCatalog(owner: token.accountID, region: region)
     }
 
     /// Whether a saved choice is still on the account. Before any lookup
@@ -103,8 +112,8 @@ public struct WoWAccountStore: Equatable, Sendable {
 
     /// After a lookup with exactly one license there is nothing to choose, so
     /// it becomes the edition's choice. With several, the choice stays as it
-    /// is (WoW asks at login until the user picks one). An explicit "Choose
-    /// When WoW Starts" isn't kept apart from no choice, so it gives way too;
+    /// is (WoW asks at login until the user picks one). An explicit "Ask in
+    /// WoW" isn't kept apart from no choice, so it gives way too;
     /// with one license WoW would pick that one anyway.
     @discardableResult
     public mutating func selectOnlyAccount(in scope: WoWAccountScope) -> WoWGameAccount? {
@@ -146,7 +155,7 @@ public struct WoWAccountStore: Equatable, Sendable {
         return true
     }
 
-    // MARK: Known licences
+    // MARK: Known licenses
 
     public func cachedAccounts(owner: String, region: Region) -> [WoWGameAccount] {
         catalogs.first { $0.owner == owner && $0.region == region }?.accounts ?? []

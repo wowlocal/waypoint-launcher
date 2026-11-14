@@ -1141,6 +1141,8 @@ final class AppModel {
             }
             if plan.codename == "WoW", !plan.isWindows {
                 plan.gameAccount = wowAccountStore.launchAccount(for: token, uid: game.id, region: plan.region)
+                plan.keepsStoredGameAccount = plan.gameAccount == nil
+                    && wowAccountStore.defersToBattleNet(for: token, uid: game.id, region: plan.region)
                 if plan.gameAccount == nil, wowAccountStore.selected(owner: token.accountID, uid: game.id, region: plan.region) != nil {
                     // Gone from the account at the last lookup: WoW chooses.
                     Log.notice(.launch, "wow_account_unavailable", nil, ["uid": game.id])
