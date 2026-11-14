@@ -70,6 +70,61 @@ private func withDefaults(_ body: (UserDefaults) throws -> Void) throws {
     #expect(store.selected(owner: "1", uid: "wow", region: .us) == wow2)
 }
 
+private let us1 = WoWAccountScope(owner: "1", uid: "wow", region: .us)
+
+@Test func aLookupWithOneLicenseChoosesIt() {
+    var store = WoWAccountStore()
+    do { let r = store.selectOnlyAccount(in: us1); #expect(r == nil, "no lookup yet") }
+    store.cache([], owner: "1", region: .us)
+    do { let r = store.selectOnlyAccount(in: us1); #expect(r == nil) }
+    #expect(store.selected(owner: "1", uid: "wow", region: .us) == nil)
+
+    store.cache([wow1], owner: "1", region: .us)
+    do { let r = store.selectOnlyAccount(in: us1); #expect(r == wow1) }
+    #expect(store.selected(owner: "1", uid: "wow", region: .us) == wow1)
+    // Only the edition the lookup ran for.
+    #expect(store.selected(owner: "1", uid: "wow_classic", region: .us) == nil)
+
+    // A license gone from the account is replaced by the only one left.
+    store.select(wow2, owner: "1", uid: "wow_classic", region: .us)
+    do { let r = store.selectOnlyAccount(in: WoWAccountScope(owner: "1", uid: "wow_classic", region: .us)); #expect(r == wow1) }
+    #expect(store.selected(owner: "1", uid: "wow_classic", region: .us) == wow1)
+}
+
+@Test func aLookupWithSeveralLicensesLeavesTheChoiceAlone() {
+    var store = WoWAccountStore()
+    store.cache([wow1, wow2], owner: "1", region: .us)
+    do { let r = store.selectOnlyAccount(in: us1); #expect(r == nil) }
+    #expect(store.selected(owner: "1", uid: "wow", region: .us) == nil)
+    store.select(wow2, owner: "1", uid: "wow", region: .us)
+    do { let r = store.selectOnlyAccount(in: us1); #expect(r == nil) }
+    #expect(store.selected(owner: "1", uid: "wow", region: .us) == wow2)
+}
+
+@Test func aMenuChoiceAppliesOnlyToTheScopeItWasBuiltFor() {
+    var store = WoWAccountStore()
+    store.cache([wow1, wow2], owner: "1", region: .us)
+    store.cache([wow1, wow2], owner: "2", region: .us)
+    store.cache([wow1, wow2], owner: "1", region: .eu)
+    // Another account became active, or the play region changed.
+    for current in [WoWAccountScope(owner: "2", uid: "wow", region: .us),
+                    WoWAccountScope(owner: "1", uid: "wow", region: .eu), nil] {
+        do { let r = store.select(wow2, in: us1, current: current); #expect(!r) }
+        do { let r = store.select(nil, in: us1, current: current); #expect(!r) }
+    }
+    #expect(store.selected(owner: "1", uid: "wow", region: .us) == nil)
+    #expect(store.selected(owner: "2", uid: "wow", region: .us) == nil)
+    #expect(store.selected(owner: "1", uid: "wow", region: .eu) == nil)
+
+    do { let r = store.select(wow2, in: us1, current: us1); #expect(r) }
+    #expect(store.selected(owner: "1", uid: "wow", region: .us) == wow2)
+    // Only licences the last lookup listed.
+    do { let r = store.select(WoWGameAccount(id: "103", name: "WoW3"), in: us1, current: us1); #expect(!r) }
+    #expect(store.selected(owner: "1", uid: "wow", region: .us) == wow2)
+    do { let r = store.select(nil, in: us1, current: us1); #expect(r) }
+    #expect(store.selected(owner: "1", uid: "wow", region: .us) == nil)
+}
+
 @Test func knownAccountsArePerOwnerAndRegion() {
     var store = WoWAccountStore()
     store.cache([wow1, wow1, wow2], owner: "1", region: .us)

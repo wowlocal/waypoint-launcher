@@ -952,50 +952,69 @@ final class AppModel {
         activeAccount != nil && isNativeWoW(game) && (canRefreshWoWAccounts(game) || !knownWoWAccounts(for: game).isEmpty)
     }
 
-    func selectedWoWAccount(for game: Game) -> WoWGameAccount? {
-        guard let owner = activeAccount?.id,
+    /// Captured when a menu is built, so its actions apply to the account
+    /// and region it showed.
+    func wowAccountScope(for game: Game) -> WoWAccountScope? {
+        guard isNativeWoW(game), let owner = activeAccount?.id,
               let plan = try? GameLauncher.plan(for: game, region: regionOverride) else { return nil }
-        return wowAccountStore.selected(owner: owner, uid: game.id, region: plan.region)
+        return WoWAccountScope(owner: owner, uid: game.id, region: plan.region)
     }
 
+    func selectedWoWAccount(for game: Game) -> WoWGameAccount? {
+        guard let scope = wowAccountScope(for: game) else { return nil }
+        return wowAccountStore.selected(owner: scope.owner, uid: scope.uid, region: scope.region)
+    }
+
+    /// The last lookup's licenses, plus the saved choice if that lookup no
+    /// longer listed it.
     func knownWoWAccounts(for game: Game) -> [WoWGameAccount] {
-        guard let owner = activeAccount?.id,
-              let plan = try? GameLauncher.plan(for: game, region: regionOverride) else { return [] }
-        var accounts = wowAccountStore.cachedAccounts(owner: owner, region: plan.region)
+        guard let scope = wowAccountScope(for: game) else { return [] }
+        var accounts = wowAccountStore.cachedAccounts(owner: scope.owner, region: scope.region)
         if let selected = selectedWoWAccount(for: game), !accounts.contains(where: { $0.id == selected.id }) { accounts.append(selected) }
         return accounts
     }
 
-    func useWoWAccount(_ account: WoWGameAccount?, for game: Game) {
-        guard canPlay(game), isNativeWoW(game), let owner = activeAccount?.id,
-              let plan = try? GameLauncher.plan(for: game, region: regionOverride) else { return }
-        wowAccountStore.select(account, owner: owner, uid: game.id, region: plan.region)
+    /// `nil` lets WoW choose at login. Refused while the game is busy, and
+    /// when the account or region changed since `scope` was captured.
+    func useWoWAccount(_ account: WoWGameAccount?, for game: Game, in scope: WoWAccountScope) throws {
+        guard canPlay(game) else { throw Self.wowGameBusy }
+        guard wowAccountStore.select(account, in: scope, current: wowAccountScope(for: game)) else { throw Self.wowScopeChanged }
     }
 
-    func findWoWAccounts(for game: Game) async throws -> [WoWGameAccount] {
+    /// Looks up the licenses for `scope`. With exactly one, it becomes the
+    /// choice; with several, the choice is left to the user.
+    func findWoWAccounts(for game: Game, in scope: WoWAccountScope) async throws -> [WoWGameAccount] {
         guard !isRunning(game) else { throw WoWAccountDiscovery.Failure.gameRunning }
-        guard canPlay(game) else {
-            throw NSError(domain: "Waypoint", code: 4, userInfo: [NSLocalizedDescriptionKey: "Finish the current game action, then try again."])
-        }
-        guard canRefreshWoWAccounts(game), let account = activeAccount,
-              let token = tokenVault.token(account: account.id, codename: "WoW"), token.accountID == account.id else {
+        guard canPlay(game) else { throw Self.wowGameBusy }
+        guard wowAccountScope(for: game) == scope else { throw Self.wowScopeChanged }
+        guard canRefreshWoWAccounts(game), let token = tokenVault.token(account: scope.owner, codename: "WoW"),
+              token.accountID == scope.owner else {
             throw NSError(domain: "Waypoint", code: 1, userInfo: [NSLocalizedDescriptionKey: "Play WoW once to sign in, then try again."])
         }
         isFindingWoWAccounts = true
         defer { isFindingWoWAccounts = false }
-        let plan = try GameLauncher.plan(for: game, region: regionOverride)
         guard let app = game.appURL, let version = Bundle(url: app)?.object(forInfoDictionaryKey: "CFBundleVersion") as? String,
               let build = version.split(separator: ".").last.flatMap({ UInt64($0) }), build > 0 else {
             throw NSError(domain: "Waypoint", code: 2, userInfo: [NSLocalizedDescriptionKey: "Couldn’t read this WoW installation’s version."])
         }
-        let accounts = try await WoWAccountDiscovery().discover(token: token, build: build, region: plan.region)
+        let accounts = try await WoWAccountDiscovery().discover(token: token, build: build, region: scope.region)
         try Task.checkCancellation()
-        guard accountList[account.id] != nil else { throw CancellationError() }
-        guard wowAccountStore.cache(accounts, owner: account.id, region: plan.region) else {
+        guard accountList[scope.owner] != nil else { throw CancellationError() }
+        guard wowAccountStore.cache(accounts, owner: scope.owner, region: scope.region) else {
             throw NSError(domain: "Waypoint", code: 3, userInfo: [NSLocalizedDescriptionKey: "Couldn’t read Blizzard’s account list."])
         }
-        return accounts
+        wowAccountStore.selectOnlyAccount(in: scope)
+        return wowAccountStore.cachedAccounts(owner: scope.owner, region: scope.region)
     }
+
+    static let wowGameBusy = NSError(domain: "Waypoint", code: 4, userInfo: [
+        NSLocalizedDescriptionKey: "Finish the current game action, then try again.",
+    ])
+    /// Retrying can't help: the sheet or menu shows another account's or
+    /// region's choices.
+    static let wowScopeChanged = NSError(domain: "Waypoint", code: 5, userInfo: [
+        NSLocalizedDescriptionKey: "Your account or region changed. Open the menu again to choose.",
+    ])
 
     // MARK: Accounts
 

@@ -1,16 +1,17 @@
 # WoW accounts
 
-A Battle.net identity may own several WoW licences, such as WoW1 and WoW2.
-The game's **WoW Account** menu remembers which licence to use for that
+A Battle.net identity may own several WoW licenses, such as WoW1 and WoW2.
+The game's **WoW Account** menu remembers which license to use for that
 Battle.net identity, WoW edition and play region. Other editions and identities
-keep their own choices. **Default** removes the explicit choice.
+keep their own choices. **Choose When WoW Starts** removes the saved choice,
+so WoW shows its own account picker at login when there are several licenses.
 
-Play uses the saved choice without opening a picker, checking a catalogue, or
-making an additional authentication connection. New and upgraded installations
-use Default until a licence is explicitly saved. This feature does not change
-downloads, installed game content, subscriptions or entitlement checks.
+Play uses the saved choice without opening a picker, a network lookup, or an
+additional authentication connection. New and upgraded installations
+use Choose When WoW Starts until a license is saved. This feature does not
+change downloads, installed game content, subscriptions or entitlement checks.
 
-## Looking up licences
+## Looking up licenses
 
 After signing in to WoW once, choose **Find WoW Accounts…** from its game
 menu. A small sheet asks you to close WoW on other devices before finding
@@ -18,57 +19,72 @@ accounts. It uses the saved WoW authorization, without a second website
 sign-in. Local WoW processes are checked even when their installations are
 outside the library; clients on other devices cannot be detected.
 
-After a successful lookup the sheet closes. **WoW Account** then lists the
-cached licences with a checkmark on the current choice. Click one to use it;
-there is no Save dialog. **Default** clears the choice. **Refresh Accounts…**
-opens the same lookup sheet when needed. Unsupported regions and accounts
-without a saved WoW sign-in do not show an unusable lookup action.
+With exactly one license, that license becomes the edition's choice and the
+sheet closes. With several, the sheet lists them in a pop-up, already on the
+current choice if there is one: **Use Account** saves it, and **Cancel** leaves
+the choice as it was (WoW asks at login). Afterward **WoW Account** lists the
+cached licenses with a checkmark on the current choice; click one to change
+it. **Choose When WoW Starts** clears the choice. **Refresh Accounts…** opens
+the same lookup sheet when needed. Unsupported regions and accounts without a
+saved WoW sign-in do not show an unusable lookup action.
 
 Lookup is currently limited to Americas, the region verified by the original
-contributor. Other regions keep the existing Default launch behavior. Discovery
-does not establish subscription status or access to any particular WoW edition.
-WoW's servers make those decisions. A stale selection can be changed or reset
-to Default; refreshed catalogues never silently replace an explicit choice.
+contributor. Other regions keep the existing behavior: WoW chooses at login.
+Discovery does not establish subscription status or access to any particular
+WoW edition. WoW's servers make those decisions.
 
-Cancelling a pending lookup, timeout and lookup failure preserve the existing
+A refreshed catalog never silently replaces a choice it still lists; a chosen
+license the latest lookup no longer lists stays chosen until another choice is
+made. The single-license rule above is the only automatic choice.
+
+Canceling a pending lookup, timeout and lookup failure preserve the existing
 choice and cached accounts. Refresh changes the cache only after the complete
-owner-verified lookup succeeds, without choosing a licence automatically.
-Only choosing an account in the menu changes the launch choice. Sign Out removes that
-identity's selections and cached licence names; other identities remain.
+owner-verified lookup succeeds. A menu or sheet choice applies to the
+identity and region it was shown for; if either changed in the meantime, the
+choice is refused. Sign Out removes that identity's selections and cached
+license names; other identities remain.
 
 ## Launch handoff and compatibility
 
-Native WoW receives the licence name through
+Native WoW receives the license name through
 `Launch Options/WoW/GAME_ACCOUNT` in `net.battle`, alongside the actual launch
 token and region. Every WoW launch explicitly writes or clears that key. This
-prevents a previous identity or region's licence from leaking into a Default
-launch. Sign Out clears it when removing the matching handoff token. Other
-games retain their existing launch behavior.
+prevents a previous identity or region's license from leaking into a launch
+that lets WoW choose. Next to it Waypoint records the Battle.net account id the
+license was written for (`Launch Options/WoW/WAYPOINT_GAME_ACCOUNT_OWNER`,
+which the game ignores), and writes or clears it with the license. Sign Out
+clears both when removing the matching handoff token. Other games retain their
+existing launch behavior.
 
 `waypoint-cli launch` replays the last native handoff's token and validated
-licence only when the play region matches. It does not read the GUI app's
-per-edition preferences; a different region uses Default.
+license only when the play region matches and Waypoint's owner note names that
+token's own account. Without a matching note (another account's license, or
+one only Battle.net or an earlier Waypoint build wrote) the license is dropped
+and WoW chooses; after upgrading, the note appears once the app launches WoW
+with a chosen license. The CLI does not read the GUI app's per-edition
+preferences.
 
-Account preferences contain licence IDs and names only. Login tickets remain
+Account preferences contain license IDs and names only. Login tickets remain
 in the existing Keychain vault. Discovery verifies the Battle.net owner at
-authentication and for each resolved licence, uses ordinary system TLS trust,
-and bounds time, frame size and catalogue size. Discovery is optional and its
+authentication and for each resolved license, uses ordinary system TLS trust,
+and bounds time, frame size and catalog size. Discovery is optional and its
 protocol may need updating when Blizzard changes its services.
 
 The protocol reference and original working launch proof came from
 [wubsylol's contribution](https://github.com/wowlocal/waypoint-launcher/issues/7)
 and its `contrib/wow-licence-selection` branch. This implementation keeps
 discovery off the Play path and isolates the remembered choices from the
-catalogue cache.
+catalog cache.
 
 ## Validation
 
 Synthetic tests cover preference persistence and isolation, stale launch keys,
 protocol framing, owner mismatches, disconnects, cancellation and timeouts.
 These do not establish live server compatibility for every build or region.
-Real-client acceptance requires switching between two known licences, relaunching
-after restarting Waypoint, checking independent edition/identity choices,
-and confirming Default still launches when discovery is unavailable.
+Real-client acceptance requires switching between two known licenses,
+relaunching after restarting Waypoint, checking independent edition/identity
+choices, and confirming that Choose When WoW Starts brings up WoW's own
+account picker, including when discovery is unavailable.
 
 ## External-browser sign-in
 

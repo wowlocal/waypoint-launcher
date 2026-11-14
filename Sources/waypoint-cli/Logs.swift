@@ -122,7 +122,7 @@ func launch(_ args: [String]) {
         guard let stored = try options.storedToken(), let token = LoginToken(stored) else {
             fail("no saved sign-in for \(plan.codename); sign in once in Waypoint (or Battle.net)")
         }
-        plan.gameAccount = options.storedGameAccount(for: plan.region)
+        plan.gameAccount = options.storedGameAccount(for: plan.region, token: token)
         Log.info(.auth, "token", nil, ["source": "stored", "codename": plan.codename, "via": "cli"])
         let pid = try GameLauncher.launch(plan, token: token, gameName: game.displayName)
         print("started, pid \(pid)")

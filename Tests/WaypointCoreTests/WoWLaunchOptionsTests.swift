@@ -70,11 +70,34 @@ private func withOptions(_ gameKey: String = "WoW", _ body: (LaunchOptions, User
 
 @Test func cliReplayKeepsOnlyTheSameRegionsValidatedLicence() throws {
     try withOptions { options, defaults in
+        let a = try #require(LoginToken(tokenA))
         try options.write(token: tokenA, region: .us, locale: nil, gameAccount: "WoW2")
-        #expect(options.storedGameAccount(for: .us) == "WoW2")
-        #expect(options.storedGameAccount(for: .eu) == nil)
+        #expect(options.storedGameAccount(for: .us, token: a) == "WoW2")
+        #expect(options.storedGameAccount(for: .eu, token: a) == nil)
         defaults.set("WoW2\n", forKey: options.gameAccountKey)
-        #expect(options.storedGameAccount(for: .us) == nil)
+        #expect(options.storedGameAccount(for: .us, token: a) == nil)
+    }
+}
+
+@Test func cliReplayKeepsOnlyTheTokenOwnersLicence() throws {
+    try withOptions { options, defaults in
+        let a = try #require(LoginToken(tokenA)), b = try #require(LoginToken(tokenB))
+        try options.write(token: tokenA, region: .us, locale: nil, gameAccount: "WoW2")
+        #expect(defaults.string(forKey: options.gameAccountOwnerKey) == "111")
+        #expect(options.storedGameAccount(for: .us, token: a) == "WoW2")
+        // Battle.net signed another account in and left Waypoint's licence.
+        #expect(options.storedGameAccount(for: .us, token: b) == nil)
+        // A licence without Waypoint's owner note (Battle.net's, or an
+        // older Waypoint's) isn't replayed either.
+        defaults.removeObject(forKey: options.gameAccountOwnerKey)
+        #expect(options.storedGameAccount(for: .us, token: a) == nil)
+        // An automatic launch and Sign Out clear the note with the licence.
+        try options.write(token: tokenA, region: .us, locale: nil, gameAccount: "WoW2")
+        try options.write(token: tokenA, region: .us, locale: nil, gameAccount: nil)
+        #expect(defaults.string(forKey: options.gameAccountOwnerKey) == nil)
+        try options.write(token: tokenA, region: .us, locale: nil, gameAccount: "WoW2")
+        options.clearToken()
+        #expect(defaults.string(forKey: options.gameAccountOwnerKey) == nil)
     }
 }
 
@@ -111,6 +134,7 @@ private func withOptions(_ gameKey: String = "WoW", _ body: (LaunchOptions, User
         options.clearToken()
         #expect(!options.usesGameAccount)
         #expect(options.storedGameAccount() == "kept")
+        #expect(defaults.object(forKey: options.gameAccountOwnerKey) == nil)
     }
 }
 

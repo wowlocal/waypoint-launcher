@@ -359,11 +359,12 @@ final class GameCell: NSView {
             if model.availableUpdate(for: game) != nil {
                 menu.addItem(ActionItem("Play Without Updating") { Task { await model.play(game) } })
             }
-            if model.offersWoWAccounts(game) {
+            if model.offersWoWAccounts(game), let scope = model.wowAccountScope(for: game) {
                 let choose = ActionItem("Find WoW Accounts…", enabled: model.canPlay(game)) { [weak self] in
-                    self?.window?.contentViewController?.presentAsSheet(WoWAccountSheet {
-                        try await model.findWoWAccounts(for: game)
-                    })
+                    self?.window?.contentViewController?.presentAsSheet(WoWAccountSheet(
+                        load: { try await model.findWoWAccounts(for: game, in: scope) },
+                        selected: { model.selectedWoWAccount(for: game) },
+                        use: { try model.useWoWAccount($0, for: game, in: scope) }))
                 }
                 let accounts = model.knownWoWAccounts(for: game)
                 if accounts.isEmpty {
@@ -373,14 +374,19 @@ final class GameCell: NSView {
                     let item = NSMenuItem(title: "WoW Account", action: nil, keyEquivalent: "")
                     let choices = NSMenu()
                     choices.autoenablesItems = false
-                    let automatic = ActionItem("Default", enabled: model.canPlay(game)) { model.useWoWAccount(nil, for: game) }
-                    automatic.toolTip = "Let WoW choose an account."
+                    // No GAME_ACCOUNT: WoW shows its own picker at login
+                    // when there are several licenses.
+                    let automatic = ActionItem("Choose When WoW Starts", enabled: model.canPlay(game)) {
+                        try? model.useWoWAccount(nil, for: game, in: scope)
+                    }
                     automatic.state = selected == nil ? .on : .off
                     choices.addItem(automatic)
-                    let repeated = Dictionary(grouping: accounts, by: \.name)
+                    choices.addItem(.separator())
                     for account in accounts {
-                        let title = repeated[account.name]!.count > 1 ? "\(account.name) (\(account.id))" : account.name
-                        let choice = ActionItem(title, enabled: model.canPlay(game)) { model.useWoWAccount(account, for: game) }
+                        let title = WoWAccountSheet.title(for: account, among: accounts)
+                        let choice = ActionItem(title, enabled: model.canPlay(game)) {
+                            try? model.useWoWAccount(account, for: game, in: scope)
+                        }
                         choice.state = selected?.id == account.id ? .on : .off
                         choices.addItem(choice)
                     }

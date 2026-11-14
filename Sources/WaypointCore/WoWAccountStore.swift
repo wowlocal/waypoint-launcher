@@ -32,11 +32,25 @@ public struct WoWGameAccount: Codable, Equatable, Sendable, Identifiable {
     }
 }
 
+/// Whose WoW choice, for which installed edition and play region.
+public struct WoWAccountScope: Equatable, Sendable {
+    public var owner: String
+    public var uid: String
+    public var region: Region
+
+    public init(owner: String, uid: String, region: Region) {
+        self.owner = owner
+        self.uid = uid
+        self.region = region
+    }
+}
+
 /// The WoW licences Waypoint knows about and the one the user picked, kept
 /// apart from Battle.net sign-in. A choice belongs to one Battle.net account
 /// (owner), one installed edition (uid) and one play region; with none,
-/// Waypoint launches "automatic" and the game decides. Known licences are
-/// cached per owner and region. Nothing here is a credential.
+/// Waypoint launches "automatic" and the game decides (WoW asks at login
+/// when there are several). Known licenses are cached per owner and region.
+/// Nothing here is a credential.
 public struct WoWAccountStore: Equatable, Sendable {
     struct Selection: Codable, Equatable, Sendable {
         var owner: String
@@ -72,6 +86,30 @@ public struct WoWAccountStore: Equatable, Sendable {
         selected(owner: token.accountID, uid: uid, region: region)?.name
     }
 
+    /// After a lookup with exactly one license there is nothing to choose, so
+    /// it becomes the edition's choice. With several, the choice stays as it
+    /// is (WoW asks at login until the user picks one). An explicit "Choose
+    /// When WoW Starts" isn't kept apart from no choice, so it gives way too;
+    /// with one license WoW would pick that one anyway.
+    @discardableResult
+    public mutating func selectOnlyAccount(in scope: WoWAccountScope) -> WoWGameAccount? {
+        let accounts = cachedAccounts(owner: scope.owner, region: scope.region)
+        guard accounts.count == 1, let only = accounts.first,
+              select(only, owner: scope.owner, uid: scope.uid, region: scope.region) else { return nil }
+        return only
+    }
+
+    /// A choice made in a menu or sheet. It applies only while `current` is
+    /// still the scope the menu was built for, so a late click can't land on
+    /// another account or region, and only to a license the last lookup
+    /// listed. `nil` (let WoW choose) is always allowed.
+    @discardableResult
+    public mutating func select(_ account: WoWGameAccount?, in scope: WoWAccountScope, current: WoWAccountScope?) -> Bool {
+        guard scope == current else { return false }
+        if let account, !cachedAccounts(owner: scope.owner, region: scope.region).contains(account) { return false }
+        return select(account, owner: scope.owner, uid: scope.uid, region: scope.region)
+    }
+
     /// `nil` goes back to automatic. Malformed input leaves the saved
     /// choice alone and returns false.
     @discardableResult
@@ -93,8 +131,8 @@ public struct WoWAccountStore: Equatable, Sendable {
 
     /// Replaces the known licences after a refresh. Never touches the saved
     /// choice: a licence missing from one refresh stays selected until the
-    /// user changes it. A list with anything malformed in it, or too many
-    /// entries, is rejected whole and the previous cache kept.
+    /// user changes it. A list with anything malformed in it, or
+    /// too many entries, is rejected whole and the previous cache kept.
     @discardableResult
     public mutating func cache(_ accounts: [WoWGameAccount], owner: String, region: Region) -> Bool {
         guard Self.isValidScope(owner), accounts.allSatisfy(\.isValid) else { return false }
