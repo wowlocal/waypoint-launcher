@@ -9,17 +9,25 @@ import Foundation
 /// can't tell who launched it.
 public struct LaunchOptions {
     public static var domain: CFString { "net.battle" as CFString }
+    /// Waypoint's own notes about the handoff. Kept out of `net.battle`, which
+    /// belongs to Battle.net, and fixed rather than the bundle identifier so
+    /// the app and `waypoint-cli` share it.
+    public static let noteDomain = "dev.waypoint.launch-options"
 
     /// The key prefix the game looks under. Not the same as the product code.
     public var gameKey: String
     public var userName: String
     /// `net.battle` except in tests.
     public var preferencesDomain: String
+    /// `noteDomain` except in tests.
+    public var notesDomain: String
 
-    public init(gameKey: String, userName: String = NSUserName(), preferencesDomain: String = LaunchOptions.domain as String) {
+    public init(gameKey: String, userName: String = NSUserName(), preferencesDomain: String = LaunchOptions.domain as String,
+                notesDomain: String = LaunchOptions.noteDomain) {
         self.gameKey = gameKey
         self.userName = userName
         self.preferencesDomain = preferencesDomain
+        self.notesDomain = notesDomain
     }
 
     public var webTokenKey: String { "Launch Options/\(gameKey)/WEB_TOKEN" }
@@ -27,9 +35,9 @@ public struct LaunchOptions {
     public var localeKey: String { "Launch Options/\(gameKey)/LOCALE" }
     /// Which WoW licence to log in with, by name (`WoW1`). Only WoW reads it.
     public var gameAccountKey: String { "Launch Options/\(gameKey)/GAME_ACCOUNT" }
-    /// Waypoint's own note of whose licence `GAME_ACCOUNT` is: the Battle.net
-    /// account id of the token it was written with. The game ignores it.
-    public var gameAccountOwnerKey: String { "Launch Options/\(gameKey)/WAYPOINT_GAME_ACCOUNT_OWNER" }
+    /// Waypoint's note of whose license `GAME_ACCOUNT` is: the Battle.net
+    /// account id of the token it was written with. Stored in `notesDomain`.
+    public var gameAccountOwnerKey: String { "\(gameKey)/GAME_ACCOUNT_OWNER" }
     public var usesGameAccount: Bool { gameKey == "WoW" }
 
     // MARK: Reading and writing
@@ -58,7 +66,7 @@ public struct LaunchOptions {
     /// chooses. App launches use their own per-edition preferences.
     public func storedGameAccount(for region: Region, token: LoginToken) -> String? {
         guard usesGameAccount, storedRegion() == region.launchOptionValue,
-              value(gameAccountOwnerKey) as? String == token.accountID,
+              note(gameAccountOwnerKey) == token.accountID,
               let name = storedGameAccount(), WoWGameAccount.isValidName(name) else { return nil }
         return name
     }
@@ -81,7 +89,7 @@ public struct LaunchOptions {
             set(gameAccountKey, gameAccount as CFString?)
             // A token that doesn't parse leaves no owner, so the CLI won't
             // replay this license: it fails safe.
-            set(gameAccountOwnerKey, gameAccount == nil ? nil : LoginToken(token)?.accountID as CFString?)
+            setNote(gameAccountOwnerKey, gameAccount == nil ? nil : LoginToken(token)?.accountID)
         }
         guard CFPreferencesAppSynchronize(preferencesDomain as CFString) else {
             throw CocoaError(.fileWriteUnknown, userInfo: [NSLocalizedDescriptionKey: "Could not save net.battle preferences"])
@@ -93,7 +101,7 @@ public struct LaunchOptions {
         set(webTokenKey, nil)
         if usesGameAccount {
             set(gameAccountKey, nil)
-            set(gameAccountOwnerKey, nil)
+            setNote(gameAccountOwnerKey, nil)
         }
         CFPreferencesAppSynchronize(preferencesDomain as CFString)
     }
@@ -104,6 +112,17 @@ public struct LaunchOptions {
 
     private func set(_ key: String, _ value: CFPropertyList?) {
         CFPreferencesSetAppValue(key as CFString, value, preferencesDomain as CFString)
+    }
+
+    private func note(_ key: String) -> String? {
+        CFPreferencesCopyAppValue(key as CFString, notesDomain as CFString) as? String
+    }
+
+    /// A failed save leaves no matching owner, so the CLI drops the license:
+    /// it fails safe.
+    private func setNote(_ key: String, _ value: String?) {
+        CFPreferencesSetAppValue(key as CFString, value as CFString?, notesDomain as CFString)
+        CFPreferencesAppSynchronize(notesDomain as CFString)
     }
 }
 

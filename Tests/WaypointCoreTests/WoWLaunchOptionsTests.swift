@@ -10,11 +10,14 @@ private func withOptions(_ gameKey: String = "WoW", _ body: (LaunchOptions, User
     let suite = "WaypointCoreTests.launchOptions.\(UUID().uuidString)"
     let defaults = try #require(UserDefaults(suiteName: suite))
     defer { defaults.removePersistentDomain(forName: suite) }
-    try body(LaunchOptions(gameKey: gameKey, userName: "testuser", preferencesDomain: suite), defaults)
+    try body(LaunchOptions(gameKey: gameKey, userName: "testuser", preferencesDomain: suite, notesDomain: suite), defaults)
 }
 
 @Test func launchOptionsDefaultToNetBattle() {
     #expect(LaunchOptions(gameKey: "WoW").preferencesDomain == "net.battle")
+    // Waypoint's own notes never go into Battle.net's domain.
+    #expect(LaunchOptions(gameKey: "WoW").notesDomain == "dev.waypoint.launch-options")
+    #expect(!LaunchOptions(gameKey: "WoW").gameAccountOwnerKey.hasPrefix("Launch Options/"))
 }
 
 @Test func selectedLicenceIsWrittenWithItsToken() throws {

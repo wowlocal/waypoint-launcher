@@ -60,8 +60,9 @@ Native WoW receives the license name through
 token and region. Every WoW launch explicitly writes or clears that key. This
 prevents a previous identity or region's license from leaking into a launch
 that lets WoW choose. Next to it Waypoint records the Battle.net account id the
-license was written for (`Launch Options/WoW/WAYPOINT_GAME_ACCOUNT_OWNER`,
-which the game ignores), and writes or clears it with the license. Sign Out
+license was written for, in its own `dev.waypoint.launch-options` preferences
+(`WoW/GAME_ACCOUNT_OWNER`) rather than Battle.net's, and writes or clears it
+with the license. Sign Out
 clears both when removing the matching handoff token. Other games retain their
 existing launch behavior.
 
