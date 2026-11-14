@@ -78,6 +78,13 @@ public enum UpdateError: Error, CustomStringConvertible {
     case battleNetRunning(agentOnly: Bool)
     case unsupported(String)
     case notEnoughSpace(needed: UInt64, available: UInt64)
+    /// The drive the game is on (by its name) isn't connected.
+    case driveNotConnected(String)
+    /// Another drive is mounted under the name of the one (by its name)
+    /// the download started on.
+    case otherDrive(String)
+    /// The free space where the game goes couldn't be read.
+    case spaceUnknown(String)
     case unsafePath(String)
     /// Another install or update is writing to this local storage.
     case storageBusy(String)
@@ -98,6 +105,9 @@ public enum UpdateError: Error, CustomStringConvertible {
         case .unsupported(let name): "Updating \(name) is not supported yet"
         case .notEnoughSpace(let needed, let available):
             "Not enough disk space: need \(ByteCountFormatter.string(fromByteCount: Int64(needed), countStyle: .file)), have \(ByteCountFormatter.string(fromByteCount: Int64(available), countStyle: .file))"
+        case .driveNotConnected(let name): "Connect “\(name)” to continue."
+        case .otherDrive(let name): "“\(name)” isn’t the drive this download started on."
+        case .spaceUnknown(let path): "Couldn’t check the free space at \(path)"
         case .unsafePath(let path): "Refusing to write outside the game folder: \(path)"
         case .storageBusy(let path): "Another install or update is writing to \(path). Try again once it has finished"
         case .storageChanged: "Another update changed the game data while it was being checked"
@@ -120,7 +130,7 @@ public struct GameUpdater: Sendable {
     public var versions: VersionService
     public var store: InstallStateStore
     public var concurrency: Int
-    var availableCapacity: @Sendable (URL) -> UInt64 = GameUpdater.volumeCapacity
+    var availableCapacity: @Sendable (URL) throws -> UInt64 = InstallVolume.availableCapacity
 
     public init(install: ProductInstall, versions: VersionService = VersionService(),
                 store: InstallStateStore = InstallStateStore(), concurrency: Int = 4) {
@@ -261,7 +271,7 @@ public struct GameUpdater: Sendable {
         let total = unique.values.reduce(UInt64(0)) { $0 + $1.size }
         let unstaged = try filesToStage(Array(unique.values))
         let needed = unstaged.reduce(UInt64(0)) { $0 + $1.size }
-        let available = availableCapacity(root)
+        let available = try availableCapacity(root)
         guard available > needed + 512 * 1024 * 1024 else {
             Log.error(.gameUpdate, "not_enough_space", nil, ["uid": install.uid, "needed": needed, "available": available])
             throw UpdateError.notEnoughSpace(needed: needed, available: available)
@@ -381,11 +391,6 @@ public struct GameUpdater: Sendable {
             try Task.checkCancellation()
             return false
         }
-    }
-
-    static func volumeCapacity(_ url: URL) -> UInt64 {
-        (try? url.resourceValues(forKeys: [.volumeAvailableCapacityForImportantUsageKey])
-            .volumeAvailableCapacityForImportantUsage).flatMap { $0 }.flatMap { UInt64(exactly: $0) } ?? .max
     }
 
     private func stage(_ file: UpdatePlan.File, cdn: CDNClient) async throws {

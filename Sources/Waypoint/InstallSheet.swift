@@ -7,11 +7,21 @@ final class InstallSheet: NSViewController {
     private let product: InstallableProduct
     private let model: AppModel
     private var platform: InstallPlatform
-    private var parentFolder = URL(fileURLWithPath: "/Applications", isDirectory: true)
+    private let locations = InstallLocations()
+    private var parentFolder: URL
     private var hasCustomParent = false
     private var sizeTask: Task<Void, Never>?
+    private var volumeTask: Task<Void, Never>?
+    /// What the download takes, once known.
+    private var downloadSize: UInt64?
+    /// The location's volume, once read: nil while it's being read, or
+    /// (inside) when it can't be.
+    private var volume: Result<InstallVolume?, Error>?
 
     private let location = NSTextField.label(.body, color: .secondaryLabelColor)
+    /// The space free there, or why a game can't go there.
+    private let volumeText = NSTextField(wrappingLabelWithString: "")
+    private var volumeRow: NSGridRow?
     private let languagePicker: LanguagePicker
     private let regionPopup = NSPopUpButton()
     private let platformPopup = NSPopUpButton()
@@ -28,13 +38,15 @@ final class InstallSheet: NSViewController {
         self.product = product
         self.model = model
         self.platform = platform ?? model.defaultPlatform(for: product)
-        if self.platform == .windows {
-            parentFolder = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Games", isDirectory: true)
-        }
+        parentFolder = URL(fileURLWithPath: "/Applications", isDirectory: true)
         languagePicker = LanguagePicker(codes: product.languages, selected: GameLanguages(text: product.defaultLanguage()),
                                         hasSpokenLanguage: product.hasSpokenLanguage)
         super.init(nibName: nil, bundle: nil)
-        languagePicker.onChange = { [weak self] in self?.refreshSize() }
+        parentFolder = offeredParent()
+        languagePicker.onChange = { [weak self] in
+            self?.refreshSize()
+            self?.showVolume()
+        }
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
@@ -47,6 +59,9 @@ final class InstallSheet: NSViewController {
         location.lineBreakMode = .byTruncatingMiddle
         let change = NSButton(title: "Change…", target: self, action: #selector(chooseParent))
         let locationRow = NSStackView(views: [location, change])
+        volumeText.font = .preferredFont(forTextStyle: .subheadline)
+        volumeText.textColor = .secondaryLabelColor
+        volumeText.preferredMaxLayoutWidth = 360
         regionPopup.addItems(withTitles: Region.allCases.map(\.displayName))
         regionPopup.selectItem(at: Region.allCases.firstIndex(of: model.regionOverride ?? Region.preferred(games: model.games)) ?? 0)
         regionPopup.target = self
@@ -59,7 +74,7 @@ final class InstallSheet: NSViewController {
         platformPopup.action = #selector(changePlatform)
         let platformRows: [[NSView]] = product.productCode == "hero" && WindowsHeroes.isAvailable
             ? [[Self.formLabel("Version:"), platformPopup]] : []
-        let grid = NSGridView(views: platformRows + [[Self.formLabel("Location:"), locationRow]] + languagePicker.rows + [
+        let grid = NSGridView(views: platformRows + [[Self.formLabel("Location:"), locationRow], [NSGridCell.emptyContentView, volumeText]] + languagePicker.rows + [
             [Self.formLabel("Region:"), regionPopup],
             [Self.formLabel("Download:"), NSStackView(views: [sizeSpinner, sizeText])],
         ])
@@ -67,13 +82,16 @@ final class InstallSheet: NSViewController {
         grid.rowAlignment = .firstBaseline
         grid.rowSpacing = 10
         grid.columnSpacing = 8
+        volumeRow = grid.cell(for: volumeText)?.row
+        volumeRow?.topPadding = -4
+        volumeRow?.isHidden = true
 
         let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancel))
         cancel.keyEquivalent = "\u{1b}"
         installButton.target = self
         installButton.action = #selector(install)
         installButton.keyEquivalent = "\r"
-        installButton.isEnabled = languages != nil
+        installButton.isEnabled = false
         let buttons = NSStackView()
         buttons.setViews([cancel, installButton], in: .trailing)
 
@@ -87,16 +105,78 @@ final class InstallSheet: NSViewController {
         view = stack
         showLocation()
         refreshSize()
+        readVolume(resolvingRemembered: true)
     }
 
     override func viewWillDisappear() {
         super.viewWillDisappear()
         sizeTask?.cancel()
+        volumeTask?.cancel()
+    }
+
+    /// Where another edition sharing the game's folder is (WoW's), so the
+    /// two share their data; else the folder chosen last, or the built-in one.
+    private func offeredParent() -> URL {
+        model.sharedFolderParent(named: folderName, platform: platform) ?? locations.offered(for: platform)
     }
 
     private func showLocation() {
         location.stringValue = folder.path
         location.toolTip = folder.path
+    }
+
+    /// Reads the location's volume off the main thread. With
+    /// `resolvingRemembered`, first checks the folder remembered from last
+    /// time is still there, and goes back to the built-in one if not.
+    private func readVolume(resolvingRemembered: Bool = false) {
+        volumeTask?.cancel()
+        volume = nil
+        showVolume()
+        let (locations, platform, parent, folderName) = (locations, platform, parentFolder, folderName)
+        let resolves = resolvingRemembered && !hasCustomParent &&
+            model.sharedFolderParent(named: folderName, platform: platform) == nil
+        volumeTask = Task { [weak self] in
+            let (resolved, volume) = await Task.detached(priority: .userInitiated) {
+                let resolved = resolves ? locations.resolved(for: platform) : parent
+                let folder = resolved.appendingPathComponent(folderName, isDirectory: true)
+                return (resolved, Result { try InstallVolume.read(at: folder) })
+            }.value
+            guard !Task.isCancelled, let self else { return }
+            if resolved != self.parentFolder {
+                self.parentFolder = resolved
+                self.showLocation()
+                self.refreshSize()
+            }
+            self.volume = volume
+            self.showVolume()
+        }
+    }
+
+    /// The space free at the location, a caution about its format, or what
+    /// keeps a game from going there; and whether Install can be clicked.
+    private func showVolume() {
+        var text: String?
+        var problem = false
+        switch volume {
+        case nil:
+            break
+        case .failure(let error):
+            text = errorMessage(error)
+            problem = true
+        case .success(let volume?):
+            if let reason = volume.problem(download: downloadSize, platform: platform) {
+                text = reason
+                problem = true
+            } else {
+                text = [volume.summary, volume.caution].compactMap { $0 }.joined(separator: "\n")
+            }
+        case .success(nil):
+            break
+        }
+        volumeText.stringValue = text ?? ""
+        volumeRow?.isHidden = text?.isEmpty ?? true
+        volumeText.textColor = problem ? .systemRed : .secondaryLabelColor
+        installButton.isEnabled = languages != nil && volume != nil && !problem
     }
 
     /// The download size depends on languages and region; asks again when
@@ -106,6 +186,8 @@ final class InstallSheet: NSViewController {
         let (product, model, folder, region, platform) = (product, model, folder, region, platform)
         guard let languages else { return }
         show(size: nil)
+        downloadSize = nil
+        showVolume()
         sizeTask = Task { [weak self] in
             // A WoW plan is big: quick changes wait for the last one.
             try? await Task.sleep(for: .milliseconds(300))
@@ -116,8 +198,10 @@ final class InstallSheet: NSViewController {
             } catch {
                 size = .failure(error)
             }
-            guard !Task.isCancelled else { return }
-            self?.show(size: size)
+            guard !Task.isCancelled, let self else { return }
+            self.show(size: size)
+            self.downloadSize = try? size.get().download
+            self.showVolume()
         }
     }
 
@@ -153,6 +237,7 @@ final class InstallSheet: NSViewController {
             hasCustomParent = true
             showLocation()
             refreshSize() // another folder may hold a partial install, or not
+            readVolume()
         }
     }
 
@@ -167,19 +252,19 @@ final class InstallSheet: NSViewController {
             dismiss(nil)
             return
         }
-        if !hasCustomParent {
-            parentFolder = platform == .windows
-                ? FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent("Games", isDirectory: true)
-                : URL(fileURLWithPath: "/Applications", isDirectory: true)
-        }
+        if !hasCustomParent { parentFolder = offeredParent() }
         showLocation()
         refreshSize()
+        readVolume(resolvingRemembered: true)
     }
 
     @objc private func install() {
         let (product, model, folder, region, platform) = (product, model, folder, region, platform)
-        guard let languages else { return }
-        Task { await model.install(product, folder: folder, region: region, languages: languages, platform: platform) }
+        guard let languages, installButton.isEnabled else { return }
+        // Chosen with Change…: offered first from now on.
+        let remembers = hasCustomParent
+        Task { await model.install(product, folder: folder, region: region, languages: languages, platform: platform,
+                                   remembersFolder: remembers) }
         dismiss(nil)
     }
 

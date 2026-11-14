@@ -136,7 +136,7 @@ Updates are signed with an EdDSA key kept in the keychain under the account `way
 ## Usage
 
 1. Open Waypoint. Games already on disk appear in the library. To install one, click **Install** next to it under **Available Games** (expand the list if it's closed).
-2. Choose the folder, language and region. The install sheet shows the download size and any data already available to reuse.
+2. Choose the folder, language and region. The install sheet shows the download size and any data already available to reuse. Use **Change…** to install anywhere, an external drive included; to move a game later, move its folder in Finder and choose **File → Locate Installed Games…**.
 3. Press **Play**. Sign in through Battle.net's web page when asked. Each game asks once per account; later launches reuse its saved sign-in.
 
 The window subtitle shows the active account. Use the person button to switch accounts, **Add Account…**, **Sign In Again…** or **Sign Out**. **Play As** in a game's **…** menu launches it once as another account. If a game rejects its sign-in, close it and use **Sign In Again and Play**.

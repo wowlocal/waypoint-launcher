@@ -76,6 +76,7 @@ public enum InstallPlatform: String, Codable, Sendable, CaseIterable {
     /// Claim a new folder before the first resumable write. O_EXCL prevents
     /// two installers from claiming an empty root for different platforms.
     func claim(install: ProductInstall) throws {
+        try InstallVolume.ensureConnected(install.installPath)
         try validate(install: install)
         let root = URL(fileURLWithPath: install.installPath)
         try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)

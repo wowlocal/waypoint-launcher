@@ -12,6 +12,9 @@ public struct DownloadRequest: Codable, Sendable, Equatable {
     public var target: ProductVersion?
     public var languages: GameLanguages?
     public var verify: Bool
+    /// The drive the game goes to, when it's not the startup disk: never
+    /// another one mounted under its name. Nil in requests saved before.
+    public var volumeUUID: String?
     public var key: String { install.key }
     public var category: Diagnostics.Category { kind == .install ? .install : .gameUpdate }
 
@@ -25,7 +28,24 @@ public struct DownloadRequest: Codable, Sendable, Equatable {
         self.verify = verify
     }
 
+    /// Fails with “Connect “T7” to continue.” while the game's drive isn't
+    /// connected, and when it goes away during the download: Resume
+    /// continues once it's back.
     public func perform(progress: @escaping DownloadJob.Progress) async throws {
+        try InstallVolume.ensureConnected(install.installPath, volumeUUID: volumeUUID)
+        do {
+            try await performOnConnectedDrive(progress: progress)
+        } catch {
+            // Ejected or unplugged: say so, rather than the error the write
+            // ran into. A pause stays a pause.
+            if !Task.isCancelled, let drive = InstallVolume.missingDrive(for: install.installPath) {
+                throw UpdateError.driveNotConnected(drive)
+            }
+            throw error
+        }
+    }
+
+    private func performOnConnectedDrive(progress: @escaping DownloadJob.Progress) async throws {
         try BattleNet.ensureNotRunning()
         switch kind {
         case .install:

@@ -257,9 +257,11 @@ public struct GameLibrary: @unchecked Sendable {
         var order: [String] = []
         var locations: [String: String] = [:]
         let offline = located.offline
-        // What was removed from the library there isn't kept as offline.
+        // Only what was found there when its drive was last connected is
+        // kept as offline: not a game deleted meanwhile, nor one removed
+        // from the library there.
         func offlineLocation(_ install: ProductInstall) -> String? {
-            offline.first { $0.contains(install.installPath) && !$0.removedKeys.contains(install.key) }?.id
+            offline.first { $0.contains(install.installPath) && $0.listedInstalls.contains { $0.key == install.key } }?.id
         }
         // A game on a drive that isn't connected isn't looked for there.
         func isOnDisk(_ install: ProductInstall) -> Bool {

@@ -243,10 +243,11 @@ final class AppModel {
 
     /// The remembered locations changed here: the library takes them as
     /// they are now. Those already scanned keep what the scan found.
-    private func locationsChanged() {
+    /// Without `rescanning`, the caller reloads next.
+    private func locationsChanged(rescanning: Bool = true) {
         locationsRevision += 1
         library.located = LocatedGames.Scan(locations: locatedStore.locations(), disconnected: library.located.disconnected)
-        rescan()
+        if rescanning { rescan() }
     }
 
     private func showAlert(_ message: String, _ information: String?, in window: NSWindow) {
@@ -305,6 +306,7 @@ final class AppModel {
         // are there, from the list of mounted volumes alone.
         library.located = .unscanned(locatedStore.locations())
         reload()
+        rememberEarlierInstallLocations()
         let center = NSWorkspace.shared.notificationCenter
         for name in [NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didTerminateApplicationNotification] {
             observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
@@ -315,7 +317,10 @@ final class AppModel {
         // go offline.
         for name in [NSWorkspace.didMountNotification, NSWorkspace.didUnmountNotification, NSWorkspace.didRenameVolumeNotification] {
             observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.scanOffMainThreadOnce() }
+                MainActor.assumeIsolated {
+                    self?.scanOffMainThreadOnce()
+                    if name == NSWorkspace.didMountNotification { self?.rememberEarlierInstallLocations() }
+                }
             })
         }
         // Coming back to Waypoint picks up games installed or removed
@@ -561,11 +566,13 @@ final class AppModel {
     /// Downloads and installs the latest build; with `verify`, re-checks
     /// every file and repairs what's broken.
     func update(_ game: Game, verify: Bool = false) async {
+        let volume = await Self.volumeUUID(game.install.installPath)
         guard canUpdate(game) else { return }
         defer { ProcessMemory.releaseFreed() }
         Log.info(.gameUpdate, "requested", nil, ["uid": game.id, "verify": verify])
         await startDownload(DownloadRequest(kind: .update, install: game.install,
-            product: InstallableProduct.forProduct(game.install.productCode), target: updates[game.id]?.latest, verify: verify))
+            product: InstallableProduct.forProduct(game.install.productCode), target: updates[game.id]?.latest, verify: verify),
+            volumeUUID: volume)
     }
 
     // MARK: Languages
@@ -588,13 +595,15 @@ final class AppModel {
     /// down like an update's (with the update, when one is waiting), and the
     /// game is told (`.build.info`, WoW's Config.wtf, the launch locale).
     func changeLanguages(_ game: Game, to languages: GameLanguages) async {
+        let volume = await Self.volumeUUID(game.install.installPath)
         guard canUpdate(game), languages != game.install.languages else { return }
         defer { ProcessMemory.releaseFreed() }
         Log.notice(.gameUpdate, "languages_requested", nil, ["uid": game.id, "text": languages.text, "speech": languages.speech,
                                                             "from_text": game.install.languages.text,
                                                             "from_speech": game.install.languages.speech])
         await startDownload(DownloadRequest(kind: .languages, install: game.install,
-            product: InstallableProduct.forProduct(game.install.productCode), target: updates[game.id]?.latest, languages: languages))
+            product: InstallableProduct.forProduct(game.install.productCode), target: updates[game.id]?.latest, languages: languages),
+            volumeUUID: volume)
     }
 
     // MARK: Installs
@@ -718,8 +727,22 @@ final class AppModel {
         }
     }
 
+    /// The parent of the folder named `folderName` that a game already
+    /// installed or downloading uses: another WoW edition's, which a new
+    /// edition shares rather than downloading the data again elsewhere.
+    func sharedFolderParent(named folderName: String, platform: InstallPlatform) -> URL? {
+        // Offline ones too: the sheet then asks for their drive, rather
+        // than making a second folder elsewhere.
+        let installs = games.map(\.install) + downloads.values.compactMap(\.request).map(\.install)
+        return installs.first { $0.platform == platform && URL(fileURLWithPath: $0.installPath).lastPathComponent == folderName }
+            .map { URL(fileURLWithPath: $0.installPath, isDirectory: true).deletingLastPathComponent() }
+    }
+
+    /// `remembersFolder`: the folder was chosen in the install sheet, and is
+    /// offered there first from now on, once the download starts.
     func install(_ product: InstallableProduct, folder: URL, region: Region, languages: GameLanguages,
-                 platform requestedPlatform: InstallPlatform? = nil) async {
+                 platform requestedPlatform: InstallPlatform? = nil, remembersFolder: Bool = false) async {
+        let volume = await Self.volumeUUID(folder.path)
         let platform = requestedPlatform ?? defaultPlatform(for: product)
         defer { ProcessMemory.releaseFreed() }
         let uid = platform.installKey(uid: product.uid)
@@ -731,12 +754,23 @@ final class AppModel {
         }
         Log.notice(.install, "requested", nil, ["uid": product.uid, "path": folder.path, "region": region.rawValue,
                                                 "language": languages.text, "speech_language": languages.speech])
+        if remembersFolder { rememberInstallFolder(folder.deletingLastPathComponent(), for: platform) }
         let install = product.install(at: folder, region: region, languages: languages,
             tagString: "\(platform.manifestTag) \(region.launchOptionValue) \(languages.text) text \(languages.speech) speech", platform: platform)
-        await startDownload(DownloadRequest(kind: .install, install: install, product: product))
+        await startDownload(DownloadRequest(kind: .install, install: install, product: product), volumeUUID: volume)
     }
 
-    private func startDownload(_ request: DownloadRequest) async {
+    /// The drive a download goes to, read off the main thread. Callers
+    /// read it before their checks, so nothing changes between those and
+    /// the download being queued.
+    private static func volumeUUID(_ path: String) async -> String? {
+        let folder = URL(fileURLWithPath: path)
+        return await Task.detached(priority: .userInitiated) { InstallVolume.volumeUUID(at: folder) }.value
+    }
+
+    private func startDownload(_ request: DownloadRequest, volumeUUID: String?) async {
+        var request = request
+        request.volumeUUID = volumeUUID
         do {
             try downloadQueue.enqueue(request)
             phases.removeValue(forKey: request.key)
@@ -748,8 +782,64 @@ final class AppModel {
         }
     }
 
+    /// The folder chosen in the install sheet with Change…, offered there
+    /// first from now on for `platform`'s games.
+    private func rememberInstallFolder(_ folder: URL, for platform: InstallPlatform) {
+        Task {
+            let remembered = await Task.detached(priority: .utility) { InstallLocations.Remembered(at: folder) }.value
+            InstallLocations().remember(remembered, for: platform)
+            Log.info(.install, "folder_remembered", nil, ["platform": platform.rawValue, "path": remembered.path])
+        }
+    }
+
+    /// A game installed outside the built-in folders (on another drive,
+    /// say) is remembered like a located one: while its drive is away it
+    /// stays in the library as disconnected, rather than offered again.
+    private func rememberInstallLocation(_ install: ProductInstall) async {
+        guard InstallLocations().isChosen(installPath: install.installPath) else { return }
+        let url = URL(fileURLWithPath: install.installPath, isDirectory: true)
+        let location = await Task.detached(priority: .utility) { LocatedGames.Location(installedAt: url, install: install) }.value
+        locatedStore.record(location, installed: install.key)
+        Log.info(.library, "install_location_remembered", nil, ["uid": install.key, "path": location.path])
+        locationsChanged(rescanning: false)
+    }
+
+    /// Games an earlier version installed outside the built-in folders are
+    /// remembered as if installed now, each once, when its drive is
+    /// connected: afterwards, Remove from Library and uninstalling forget
+    /// them for good.
+    private func rememberEarlierInstallLocations() {
+        let adoptedKey = "adoptedInstallLocations"
+        let adopted = UserDefaults.standard.stringArray(forKey: adoptedKey) ?? []
+        let store = library.stateStore, known = locatedStore.locations(), chosen = InstallLocations()
+        Task {
+            let (found, considered) = await Task.detached(priority: .utility) {
+                let installs = store.standaloneInstalls().filter {
+                    chosen.isChosen(installPath: $0.installPath) && !adopted.contains("\($0.key)|\($0.installPath)")
+                }
+                let found = LocatedGames.unremembered(installs, known: known, chosen: chosen)
+                let paths = Set(found.map(\.path))
+                // Each looked at once: what's remembered now, or was
+                // already. One whose drive isn't connected, or that isn't on
+                // disk, is looked at again next time.
+                let considered = installs.filter { install in
+                    let path = URL(fileURLWithPath: install.installPath).standardizedFileURL.path
+                    return paths.contains(path) || known.contains { $0.contains(path) }
+                }
+                return (found, considered.map { "\($0.key)|\($0.installPath)" })
+            }.value
+            if !considered.isEmpty { UserDefaults.standard.set(adopted + considered, forKey: adoptedKey) }
+            guard !found.isEmpty else { return }
+            for location in found { locatedStore.record(location, installed: nil) }
+            Log.notice(.library, "earlier_install_locations_remembered", nil, ["paths": found.map(\.path).joined(separator: ",")])
+            locationsChanged()
+        }
+    }
+
     private func runDownload(uid: String) async {
+        let request = downloads[uid]?.request
         if await downloadQueue.run(key: uid) == .completed {
+            if let request, request.kind == .install { await rememberInstallLocation(request.install) }
             reload()
             await checkForUpdates(force: true)
         }
@@ -953,9 +1043,12 @@ final class AppModel {
         }
         phases.removeValue(forKey: game.id)
         updates.removeValue(forKey: game.id)
+        // Forgotten where it was remembered (installed on another drive, or
+        // located there), before its drive can be ejected and the game
+        // kept as offline.
+        if locatedStore.forget(key: game.install.key, at: game.install.installPath) { locationsChanged(rescanning: false) }
         reload()
-        // A remembered location's record of it goes too, before its drive
-        // can be ejected and the game kept as offline.
+        // What else a remembered location there holds is read again.
         if library.located.locations.contains(where: { $0.contains(game.install.installPath) }) { scanOffMainThreadOnce() }
         if let cleanupError {
             let alert = NSAlert()

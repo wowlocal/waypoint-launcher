@@ -1,3 +1,4 @@
+import Darwin
 import Foundation
 import Testing
 @testable import WaypointCore
@@ -291,4 +292,48 @@ private struct MetadataFixture {
     #expect(try mode(restricted) == 0o700)
     #expect(try mode(restrictedChild) == 0o755)
     #expect(try !BattleNetInstallMetadata.prepareDataDirectory(data))
+}
+
+// MARK: Battle.net's folder record on drives that can't rename exclusively
+
+@Test func theFolderRecordIsCreatedExclusivelyWhereRenamingCantBe() throws {
+    let root = FileManager.default.temporaryDirectory.appendingPathComponent("waypoint-metadata-fallback-\(UUID().uuidString)")
+    try FileManager.default.createDirectory(at: root, withIntermediateDirectories: true)
+    defer { try? FileManager.default.removeItem(at: root) }
+    let destination = root.appendingPathComponent(".product.db")
+    let record = Data("record".utf8)
+    func leftovers() throws -> [String] {
+        try FileManager.default.contentsOfDirectory(atPath: root.path).filter { $0.hasPrefix(".waypoint-metadata-") }
+    }
+
+    for code in [ENOTSUP, EINVAL] {
+        try? FileManager.default.removeItem(at: destination)
+        #expect(try BattleNetInstallMetadata.create(record, at: destination, renameExclusive: { _, _ in code }))
+        #expect(try Data(contentsOf: destination) == record)
+        #expect(try leftovers().isEmpty)
+    }
+    // Already there: kept as it is.
+    #expect(try !BattleNetInstallMetadata.create(Data("other".utf8), at: destination, renameExclusive: { _, _ in ENOTSUP }))
+    #expect(try Data(contentsOf: destination) == record)
+
+    // Another writer creates it between the check and the fallback: theirs stays.
+    try FileManager.default.removeItem(at: destination)
+    #expect(try !BattleNetInstallMetadata.create(Data("mine".utf8), at: destination, renameExclusive: { _, to in
+        FileManager.default.createFile(atPath: to, contents: Data("theirs".utf8))
+        return ENOTSUP
+    }))
+    #expect(try Data(contentsOf: destination) == Data("theirs".utf8))
+    #expect(try leftovers().isEmpty)
+
+    // Any other failure is reported, and leaves nothing behind.
+    try FileManager.default.removeItem(at: destination)
+    #expect(throws: POSIXError.self) {
+        try BattleNetInstallMetadata.create(record, at: destination, renameExclusive: { _, _ in EACCES })
+    }
+    #expect(!FileManager.default.fileExists(atPath: destination.path))
+    #expect(try leftovers().isEmpty)
+
+    // The real rename, on this disk.
+    #expect(try BattleNetInstallMetadata.create(record, at: destination))
+    #expect(try Data(contentsOf: destination) == record)
 }
