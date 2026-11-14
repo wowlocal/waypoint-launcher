@@ -1,5 +1,12 @@
 import AppKit
 import ImageIO
+import IOSurface
+
+/// A band of a picture, in memory Core Animation shows as it is: a layer
+/// with it as its contents needs no copy of its own.
+struct Strip: @unchecked Sendable {
+    let surface: IOSurface
+}
 
 /// Prepares the catalog's pictures and icons for the library's rows.
 ///
@@ -12,14 +19,24 @@ import ImageIO
 final class GameBanners {
     static let shared = GameBanners()
 
-    private var strips: [Strip: CGImage] = [:]
-    private var waiting: [Strip: [(CGImage?) -> Void]] = [:]
+    private var strips: [StripKey: Strip] = [:]
+    private var waiting: [StripKey: [(Strip?) -> Void]] = [:]
     private var icons: [Icon: CGImage] = [:]
     /// Files that couldn't be drawn: not tried again.
     private var unusable: Set<URL> = []
     private var waitingIcons: [Icon: [(CGImage?) -> Void]] = [:]
+    /// Pictures and icons are made one at a time: decoded, a picture is a
+    /// few megabytes, and a list of them all at once took tens.
+    private nonisolated static let maker = DispatchQueue(label: "Waypoint artwork", qos: .utility)
 
-    private struct Strip: Hashable {
+    /// `make` on `maker`, its leftovers let go of when it returns.
+    private nonisolated static func oneAtATime<T: Sendable>(_ make: @escaping @Sendable () -> T) async -> T {
+        await withCheckedContinuation { done in
+            maker.async { done.resume(returning: autoreleasepool(invoking: make)) }
+        }
+    }
+
+    private struct StripKey: Hashable {
         var file: URL
         var width: Int
         var height: Int
@@ -40,20 +57,20 @@ final class GameBanners {
     /// The picture at `file` cut to fill `pixels`, to `then` on the main
     /// actor: at once if it has been made, else when it has. Sizes are
     /// rounded up to a few steps, so resizing the window makes few strips.
-    func strip(of file: URL, pixels: CGSize, then: @escaping (CGImage?) -> Void) {
-        let key = Strip(file: file, width: max(1, Int((pixels.width / 128).rounded(.up))) * 128,
+    func strip(of file: URL, pixels: CGSize, then: @escaping (Strip?) -> Void) {
+        let key = StripKey(file: file, width: max(1, Int((pixels.width / 128).rounded(.up))) * 128,
                         height: max(1, Int((pixels.height / 32).rounded(.up))) * 32)
         if let strip = strips[key] { return then(strip) }
         guard !unusable.contains(file) else { return then(nil) }
         waiting[key, default: []].append(then)
         guard waiting[key]?.count == 1 else { return }
-        Task.detached(priority: .utility) { [weak self] in
-            let strip = Self.makeStrip(of: file, width: key.width, height: key.height)
-            await self?.made(strip, for: key)
+        Task { [weak self] in
+            let strip = await Self.oneAtATime { Self.makeStrip(of: file, width: key.width, height: key.height) }
+            self?.made(strip, for: key)
         }
     }
 
-    private func made(_ strip: CGImage?, for key: Strip) {
+    private func made(_ strip: Strip?, for key: StripKey) {
         // Only the newest size of a picture is kept.
         strips = strips.filter { $0.key.file != key.file }
         if let strip { strips[key] = strip } else { unusable.insert(key.file) }
@@ -64,7 +81,7 @@ final class GameBanners {
     /// bitmap of its own: a cropped CGImage would keep the whole decoded
     /// picture alive. A picture smaller than the band is not blown up here;
     /// the view stretches it when drawing, which costs no memory.
-    private nonisolated static func makeStrip(of file: URL, width: Int, height: Int) -> CGImage? {
+    private nonisolated static func makeStrip(of file: URL, width: Int, height: Int) -> Strip? {
         guard let source = CGImageSourceCreateWithURL(file as CFURL, [kCGImageSourceShouldCache: false] as CFDictionary),
               let properties = CGImageSourceCopyPropertiesAtIndex(source, 0, nil) as? [CFString: Any],
               let sourceWidth = properties[kCGImagePropertyPixelWidth] as? Double,
@@ -80,10 +97,17 @@ final class GameBanners {
             kCGImageSourceCreateThumbnailWithTransform: true,
             kCGImageSourceThumbnailMaxPixelSize: (max(sourceWidth, sourceHeight) * shrink).rounded(.up),
         ]
+        let space = CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB()
         guard let small = CGImageSourceCreateThumbnailAtIndex(source, 0, options as CFDictionary),
-              let context = CGContext(data: nil, width: bandWidth, height: bandHeight, bitsPerComponent: 8, bytesPerRow: 0,
-                                      space: CGColorSpace(name: CGColorSpace.sRGB) ?? CGColorSpaceCreateDeviceRGB(),
-                                      bitmapInfo: CGImageAlphaInfo.noneSkipLast.rawValue) else { return nil }
+              let surface = IOSurface(properties: [.width: bandWidth, .height: bandHeight, .bytesPerElement: 4,
+                                                   .pixelFormat: 0x4247_5241 /* BGRA */]) else { return nil }
+        surface.lock(options: [], seed: nil)
+        defer { surface.unlock(options: [], seed: nil) }
+        if let colors = space.copyPropertyList() { IOSurfaceSetValue(surface, kIOSurfaceColorSpace, colors) }
+        guard let context = CGContext(data: surface.baseAddress, width: bandWidth, height: bandHeight, bitsPerComponent: 8,
+                                      bytesPerRow: surface.bytesPerRow, space: space,
+                                      bitmapInfo: CGImageAlphaInfo.noneSkipFirst.rawValue | CGBitmapInfo.byteOrder32Little.rawValue)
+        else { return nil }
         let fill = max(Double(bandWidth) / Double(small.width), Double(bandHeight) / Double(small.height))
         let size = CGSize(width: Double(small.width) * fill, height: Double(small.height) * fill)
         // Which band of a tall picture: box art has its faces in the upper
@@ -97,7 +121,8 @@ final class GameBanners {
         context.interpolationQuality = .high
         context.draw(small, in: CGRect(x: (Double(bandWidth) - size.width) / 2, y: Double(bandHeight) - size.height + above,
                                        width: size.width, height: size.height))
-        return context.makeImage()
+        context.flush()
+        return Strip(surface: surface)
     }
 
     /// The icon at `file` drawn `pixels` wide and high, to `then` on the main
@@ -108,9 +133,9 @@ final class GameBanners {
         guard !unusable.contains(file) else { return then(nil) }
         waitingIcons[key, default: []].append(then)
         guard waitingIcons[key]?.count == 1 else { return }
-        Task.detached(priority: .utility) { [weak self] in
-            let icon = Self.makeIcon(of: file, pixels: pixels)
-            await self?.made(icon, for: key)
+        Task { [weak self] in
+            let icon = await Self.oneAtATime { Self.makeIcon(of: file, pixels: pixels) }
+            self?.made(icon, for: key)
         }
     }
 
@@ -181,7 +206,8 @@ final class GameBanners {
 
 /// A faint band of a game's picture behind the trailing part of its row,
 /// fading out toward the text, so the name and status stay as readable as on
-/// a row without one, in light and dark.
+/// a row without one, in light and dark. The band is the layer's contents
+/// and the fade its mask: nothing is drawn into a buffer of the view's own.
 @MainActor
 final class BannerView: NSView {
     /// How much of the row's width the picture takes. Box art is 600 pixels
@@ -193,15 +219,40 @@ final class BannerView: NSView {
     var strength: CGFloat = 1 { didSet { if strength != oldValue { needsDisplay = true } } }
 
     private var picture: URL?
-    private var strip: CGImage?
+    private var strip: Strip?
     private var requested: CGSize = .zero
+    private let fade = CAGradientLayer()
 
     init() {
         super.init(frame: .zero)
         setAccessibilityElement(false)
+        wantsLayer = true
+        layerContentsRedrawPolicy = .onSetNeedsDisplay
+        // Fill the view, keeping the picture's shape. (AppKit sets the
+        // layer's gravity from this, and resets what's set on the layer
+        // before it is the view's.)
+        layerContentsPlacement = .scaleProportionallyToFill
+        layer?.cornerRadius = 12
+        layer?.masksToBounds = true
+        layer?.mask = fade
+        // Keep of the picture only what the gradient covers: nothing at the
+        // leading edge, and never all of it, since the buttons and the
+        // status sit on it.
+        fade.startPoint = CGPoint(x: 0, y: 0.5)
+        fade.endPoint = CGPoint(x: 1, y: 0.5)
+        fade.locations = Self.showing.map { $0.at as NSNumber }
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    private static let showing: [(alpha: CGFloat, at: CGFloat)] = [(0, 0), (0.03, 0.15), (0.11, 0.32), (0.24, 0.55), (0.42, 1)]
+
+    override var wantsUpdateLayer: Bool { true }
+
+    override func updateLayer() {
+        layer?.contents = strip?.surface
+        fade.colors = Self.showing.map { NSColor.black.withAlphaComponent($0.alpha * strength).cgColor }
+    }
 
     /// Hides the view and lets go of its picture.
     func clear() {
@@ -209,6 +260,8 @@ final class BannerView: NSView {
         picture = nil
         strip = nil
         requested = .zero
+        stopWatchingScrolling()
+        needsDisplay = true
     }
 
     func show(picture file: URL) {
@@ -223,7 +276,19 @@ final class BannerView: NSView {
 
     override func layout() {
         super.layout()
+        CATransaction.begin()
+        CATransaction.setDisableActions(true)
+        fade.frame = layer?.bounds ?? bounds
+        CATransaction.commit()
+        requestStrip()
+    }
+
+    /// Asks for the band at the size the view is, once it shows: a row the
+    /// list has made but that is scrolled away has none made for it yet.
+    private func requestStrip() {
         guard let picture, bounds.width > 0, bounds.height > 0 else { return }
+        guard !visibleRect.isEmpty else { return watchScrolling() }
+        stopWatchingScrolling()
         let pixels = convertToBacking(bounds).size
         guard pixels != requested else { return }
         requested = pixels
@@ -235,9 +300,37 @@ final class BannerView: NSView {
         }
     }
 
-    override func viewDidChangeEffectiveAppearance() {
-        super.viewDidChangeEffectiveAppearance()
-        needsDisplay = true
+    private var scrolling: [NSObjectProtocol] = []
+
+    /// Asks again as the list scrolls, or its visible part or the list
+    /// itself changes size (the window grows, rows above go), until the
+    /// view shows.
+    private func watchScrolling() {
+        guard scrolling.isEmpty, let clip = enclosingScrollView?.contentView else { return }
+        clip.postsBoundsChangedNotifications = true
+        clip.postsFrameChangedNotifications = true
+        clip.documentView?.postsFrameChangedNotifications = true
+        let watched: [(NSNotification.Name, NSView?)] = [(NSView.boundsDidChangeNotification, clip),
+                                                         (NSView.frameDidChangeNotification, clip),
+                                                         (NSView.frameDidChangeNotification, clip.documentView)]
+        scrolling = watched.compactMap { name, view in
+            guard let view else { return nil }
+            return NotificationCenter.default.addObserver(forName: name, object: view, queue: .main) { [weak self] _ in
+                // Looked at again once the rows are in their new places.
+                MainActor.assumeIsolated { self?.needsLayout = true }
+            }
+        }
+    }
+
+    private func stopWatchingScrolling() {
+        scrolling.forEach(NotificationCenter.default.removeObserver)
+        scrolling = []
+    }
+
+    override func viewWillMove(toWindow newWindow: NSWindow?) {
+        super.viewWillMove(toWindow: newWindow)
+        stopWatchingScrolling()
+        if newWindow != nil { needsLayout = true }
     }
 
     /// Moved to a display with another pixel density: cut the picture again
@@ -245,27 +338,5 @@ final class BannerView: NSView {
     override func viewDidChangeBackingProperties() {
         super.viewDidChangeBackingProperties()
         needsLayout = true
-    }
-
-    override func draw(_ dirtyRect: NSRect) {
-        guard let strip, let context = NSGraphicsContext.current?.cgContext else { return }
-        NSBezierPath(roundedRect: bounds, xRadius: 12, yRadius: 12).addClip()
-        // Fill the view, keeping the picture's shape.
-        let fill = max(bounds.width / CGFloat(strip.width), bounds.height / CGFloat(strip.height))
-        let size = CGSize(width: CGFloat(strip.width) * fill, height: CGFloat(strip.height) * fill)
-        context.beginTransparencyLayer(auxiliaryInfo: nil)
-        context.interpolationQuality = .high
-        context.draw(strip, in: CGRect(x: bounds.midX - size.width / 2, y: bounds.midY - size.height / 2,
-                                       width: size.width, height: size.height))
-        // Keep of the picture only what the gradient covers: nothing at the
-        // leading edge, and never all of it, since the buttons and the
-        // status sit on it.
-        let showing: [(alpha: CGFloat, at: CGFloat)] = [(0, 0), (0.03, 0.15), (0.11, 0.32), (0.24, 0.55), (0.42, 1)]
-        context.setBlendMode(.destinationIn)
-        if let mask = CGGradient(colorsSpace: nil, colors: showing.map { NSColor.black.withAlphaComponent($0.alpha * strength).cgColor } as CFArray,
-                                 locations: showing.map(\.at)) {
-            context.drawLinearGradient(mask, start: CGPoint(x: bounds.minX, y: 0), end: CGPoint(x: bounds.maxX, y: 0), options: [])
-        }
-        context.endTransparencyLayer()
     }
 }
