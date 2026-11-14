@@ -12,6 +12,8 @@ struct GameRowState {
     var canPlay: Bool
     var canUpdate: Bool
     var showsEdition: Bool
+    /// The chosen WoW license, when the account has several to choose from.
+    var wowAccount: String?
     var download: DownloadControls
     /// The game's picture, once it has been downloaded.
     var banner: URL?
@@ -23,6 +25,7 @@ extension GameRowState {
                   update: model.availableUpdate(for: game), canPlay: model.canPlay(game),
                   canUpdate: model.canUpdate(game), showsEdition: game.install.productCode == "hero" &&
                     (WindowsHeroes.isAvailable || model.heroesEdition(.windows) != nil),
+                  wowAccount: model.shownWoWAccount(for: game)?.name,
                   download: DownloadControls(uid: game.id, model: model),
                   banner: model.artwork(productCode: game.install.productCode).picture)
     }
@@ -196,7 +199,7 @@ final class GameCell: NSView {
                 detail.stringValue = GameUpdate.canUpdate(game.install) ? "Update available" : "Update available in Battle.net"
                 detail.textColor = .systemOrange
             } else {
-                detail.stringValue = Self.summary(of: game)
+                detail.stringValue = Self.summary(of: game, wowAccount: state.wowAccount)
                 detailTooltip = WindowsTitle.forInstall(game.install)?.backendDescription
             }
         }
@@ -360,6 +363,50 @@ final class GameCell: NSView {
             if model.availableUpdate(for: game) != nil {
                 menu.addItem(ActionItem("Play Without Updating") { Task { await model.play(game) } })
             }
+            if model.offersWoWAccounts(game), let scope = model.wowAccountScope(for: game) {
+                let choose = ActionItem("Find WoW Accounts…", enabled: model.canPlay(game)) { [weak self] in
+                    self?.window?.contentViewController?.presentAsSheet(WoWAccountSheet(
+                        load: { try await model.findWoWAccounts(for: game, in: scope) },
+                        selected: { model.selectedWoWAccount(for: game) },
+                        use: { try model.useWoWAccount($0, for: game, in: scope) }))
+                }
+                let accounts = model.knownWoWAccounts(for: game)
+                if accounts.isEmpty {
+                    menu.addItem(choose)
+                } else {
+                    let selected = model.selectedWoWAccount(for: game)
+                    let item = NSMenuItem(title: "WoW Account", action: nil, keyEquivalent: "")
+                    let choices = NSMenu()
+                    choices.autoenablesItems = false
+                    // No GAME_ACCOUNT: WoW shows its own picker at login
+                    // when there are several licenses.
+                    let automatic = ActionItem("Choose When WoW Starts", enabled: model.canPlay(game)) {
+                        try? model.useWoWAccount(nil, for: game, in: scope)
+                    }
+                    automatic.state = selected == nil ? .on : .off
+                    choices.addItem(automatic)
+                    choices.addItem(.separator())
+                    for account in accounts {
+                        let title = WoWAccountSheet.title(for: account, among: accounts)
+                        // A license the last lookup no longer listed stays
+                        // visible; Play then lets WoW choose.
+                        let available = model.isAvailableWoWAccount(account, for: game)
+                        let choice = ActionItem(available ? title : "\(title) (No Longer on Account)",
+                                                enabled: available && model.canPlay(game)) {
+                            try? model.useWoWAccount(account, for: game, in: scope)
+                        }
+                        choice.state = selected?.id == account.id ? .on : .off
+                        choices.addItem(choice)
+                    }
+                    if model.canRefreshWoWAccounts(game) {
+                        choices.addItem(.separator())
+                        choose.title = "Refresh Accounts…"
+                        choices.addItem(choose)
+                    }
+                    item.submenu = choices
+                    menu.addItem(item)
+                }
+            }
             let others = model.accounts.filter { $0.id != model.activeAccount?.id }
             if !others.isEmpty {
                 let playAs = NSMenuItem(title: "Play As", action: nil, keyEquivalent: "")
@@ -403,15 +450,17 @@ final class GameCell: NSView {
         return menu.items.isEmpty ? nil : menu
     }
 
-    /// "36.6.3 · EU", plus "Intel" for games that need Rosetta, or "Windows"
-    /// (and "Preview") for Windows games, whose backend is in the line's
-    /// tooltip. The full version is in the name's tooltip.
-    private static func summary(of game: Game) -> String {
+    /// "36.6.3 · EU", plus the chosen WoW license, "Intel" for games that
+    /// need Rosetta, or "Windows" (and "Preview") for Windows games, whose
+    /// backend is in the line's tooltip. The full version is in the name's
+    /// tooltip.
+    private static func summary(of game: Game, wowAccount: String?) -> String {
         var parts: [String] = []
         if let version = game.install.version {
             parts.append(version.split(separator: ".").prefix(3).joined(separator: "."))
         }
         if let region = game.install.region { parts.append(region.uppercased()) }
+        if let wowAccount { parts.append(wowAccount) }
         if game.install.platform == .windows {
             parts.append("Windows")
             if WindowsTitle.forInstall(game.install)?.isQualified == false { parts.append("Preview") }

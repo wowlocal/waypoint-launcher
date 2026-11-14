@@ -10,6 +10,10 @@ public struct LaunchPlan: Equatable, Sendable {
     public var codename: String
     public var region: Region
     public var locale: String?
+    /// WoW licence name for `GAME_ACCOUNT`; nil lets the game pick. Fill it
+    /// in from `WoWAccountStore.launchAccount(for:uid:region:)` with the token
+    /// actually being launched, so it can't belong to another account.
+    public var gameAccount: String? = nil
     var windows: WindowsLaunchTarget? = nil
     public var isWindows: Bool { windows != nil }
 }
@@ -84,8 +88,11 @@ public enum GameLauncher {
     @discardableResult
     public static func launch(_ plan: LaunchPlan, token: LoginToken, gameName: String) throws -> Int32 {
         guard !plan.isWindows else { throw LaunchError.unsupported("Launch Windows games from Waypoint") }
-        try LaunchOptions(gameKey: plan.codename).write(token: token.value, region: plan.region, locale: plan.locale)
-        Log.info(.launch, "launch_options_written", nil, ["codename": plan.codename, "region": plan.region.rawValue, "locale": plan.locale ?? "-"])
+        let options = LaunchOptions(gameKey: plan.codename)
+        try options.write(token: token.value, region: plan.region, locale: plan.locale, gameAccount: plan.gameAccount)
+        var fields: [String: Any] = ["codename": plan.codename, "region": plan.region.rawValue, "locale": plan.locale ?? "-"]
+        if options.usesGameAccount { fields["game_account"] = plan.gameAccount == nil ? "automatic" : "selected" }
+        Log.info(.launch, "launch_options_written", nil, fields)
 
         do {
             let pid = try Spawn.detached(executable: plan.executable, arguments: plan.arguments,
