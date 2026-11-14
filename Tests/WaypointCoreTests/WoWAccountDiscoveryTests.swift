@@ -381,7 +381,7 @@ private final class Game {
         notice(0x1234_5678, method: 1, bytes(2, number(1, owner))), // a service that was never asked
         framed(number(1, 0) + number(2, 1) + number(3, 9) + number(5, 0)), // no service at all
         notice(authenticationListenerNameHash, method: 3, number(1, 1)),
-        notice(authenticationListener, method: 2, bytes(1, text(1, "not a number"))),
+        notice(authenticationListener, method: 2, Data([0x0a, 0x05, 0x01])), // session state cut short
         reply(7), // a reply to a request that wasn't made
     ]
     for frame in unexpected {
@@ -392,6 +392,20 @@ private final class Game {
             #expect(error == .malformed)
             #expect(server.sent.count <= 3)
         }
+    }
+}
+
+@Test @MainActor func sessionStateIsSkippedWhateverItHolds() async throws {
+    // Fields this code doesn't know, of any type, mustn't break sign-in.
+    let states = [
+        bytes(1, number(1, 5) + text(2, "a later text field") + fixed32(3, 7) + bytes(4, number(1, 1))),
+        bytes(1, Data()) + text(2, "outside the state") + number(3, 1),
+        Data(),
+    ]
+    for state in states {
+        let frames = [reply(0), reply(1), notice(authenticationListener, method: 2, state), logonComplete(),
+                      notice(authenticationListenerNameHash, method: 2, state), accountList(2, [handle(456)]), details(3, "WoW1")]
+        #expect(try await discover(frames).map(\.name) == ["WoW1"])
     }
 }
 
@@ -509,4 +523,237 @@ private final class Game {
     }
     let header = try WoWAccountWire.Header(number(1, 0) + number(2, 1) + number(3, 4) + fixed32(11, accountService) + text(40, "later addition"))
     #expect(header.serviceHash == accountService && header.token == 4 && header.size == 0 && !header.isResponse)
+}
+
+// MARK: Whose ticket it is
+
+/// The logon's outcome with the account record the profile is read from.
+private func logonComplete(owner: UInt64 = owner, record extra: Data) -> Data {
+    notice(authenticationListener, method: 1, bytes(2, number(1, owner) + extra))
+}
+/// Connect and logon, with a BattleTag and, as a real record has, game accounts.
+private func signedIn(tag: String? = "Example#1234", owner: UInt64 = owner) -> [Data] {
+    let record = (tag.map { text(3, $0) } ?? Data()) + bytes(2, number(1, 456)) + bytes(2, number(1, 457))
+    return [reply(0), reply(1), logonComplete(owner: owner, record: record)]
+}
+
+@Test @MainActor func aProfileIsTheLogonsOwnAccountAndNothingMoreIsAsked() async throws {
+    let server = ScriptedServer(signedIn())
+    let profile = try await discovery(server).profile(token: ticket, build: 70938, region: .us)
+    #expect(profile == NativeAccountProfile(accountID: "123", battleTag: "Example#1234"))
+    #expect(server.sent.count == 2)
+    #expect(server.cancelled)
+
+    // Without a BattleTag the ticket still works; the account just isn't named.
+    let untagged = ScriptedServer(signedIn(tag: nil))
+    #expect(try await discovery(untagged).profile(token: ticket, build: 70938, region: .us).battleTag == nil)
+
+    // However many accounts it has: the licences aren't looked at.
+    let many = ScriptedServer([reply(0), reply(1), logonComplete(record: (1...30).map { bytes(2, number(1, $0)) }.reduce(Data(), +))])
+    #expect(try await discovery(many).profile(token: ticket, build: 70938, region: .us).accountID == "123")
+}
+
+@Test @MainActor func aProfileOfAnotherAccountIsRefused() async {
+    let server = ScriptedServer(signedIn(owner: 999))
+    await #expect(throws: WoWAccountDiscovery.Failure.identityMismatch) {
+        try await discovery(server).profile(token: ticket, build: 70938, region: .us)
+    }
+    #expect(server.cancelled)
+}
+
+@Test @MainActor func aProfileIsNotFetchedWhileWoWRuns() async {
+    var connections = 0
+    let discovery = WoWAccountDiscovery(isWoWRunning: { true }, transport: { _ in connections += 1; return ScriptedServer(signedIn()) })
+    await #expect(throws: WoWAccountDiscovery.Failure.gameRunning) {
+        try await discovery.profile(token: ticket, build: 70938, region: .us)
+    }
+    #expect(connections == 0)
+}
+
+@Test func onlyAPlainBattleTagNamesAnAccount() throws {
+    for tag in ["", "Example", "#1234", "Example#", "Example#abcd", "Example#12#34", "Example\n#1234",
+                "Exam\u{2028}ple#1234", "Example#1234\u{0}", String(repeating: "x", count: 257)] {
+        let record = try WoWAccountWire.Message(text(3, tag))
+        #expect(NativeAccountProfile(accountID: "123", record: record).battleTag == nil)
+    }
+    #expect(NativeAccountProfile(accountID: "123", record: try WoWAccountWire.Message(number(3, 123))).battleTag == nil)
+    #expect(NativeAccountProfile(accountID: "123", record: try WoWAccountWire.Message(bytes(3, Data([0xff])))).battleTag == nil)
+    #expect(NativeAccountProfile(accountID: "123", record: try WoWAccountWire.Message(text(3, "A#1") + text(3, "B#2"))).battleTag == nil)
+    #expect(NativeAccountProfile(accountID: "123", record: try WoWAccountWire.Message(text(3, "Ünicode#1234"))).battleTag == "Ünicode#1234")
+}
+
+@Test func aProfileOnlyNamesItsOwnSavedAccount() {
+    var list = AccountList()
+    list.signedIn("123", session: .shared)
+    list.signedIn("456", session: .fresh())
+    list.setProfile("123", battleTag: nil, email: "private@example.invalid")
+    let profile = NativeAccountProfile(accountID: "123", battleTag: "Example#1234")
+    let other = list.setNativeProfile(profile, for: "456")
+    #expect(!other)
+    #expect(list["456"]?.battleTag == nil)
+    let own = list.setNativeProfile(profile, for: "123")
+    #expect(own)
+    #expect(list["123"]?.displayName == "Example#1234")
+    #expect(list["123"]?.email == "private@example.invalid")
+    // A missing tag keeps the name there is.
+    let untagged = list.setNativeProfile(NativeAccountProfile(accountID: "123", battleTag: nil), for: "123")
+    #expect(!untagged)
+    #expect(list["123"]?.battleTag == "Example#1234")
+    // Nobody is added.
+    list.remove("123")
+    let removed = list.setNativeProfile(profile, for: "123")
+    #expect(!removed)
+    #expect(list["123"] == nil)
+}
+
+// MARK: Shared sign-in
+
+private func authTokenRequest(_ token: UInt64, program: UInt64) -> Data {
+    let body = number(1, program)
+    return framed(number(1, 0) + number(2, 3) + number(3, token) + number(5, UInt64(body.count)) + fixed32(11, authentication), body)
+}
+
+@Test @MainActor func aSharedTicketIsAskedForTheGameAndMustBeTheSameAccounts() async throws {
+    let issued = "US-fedcba9876543210fedcba9876543210-123"
+    for (game, program) in [(SharedSignIn.hearthstone, UInt64(0x5754_4347)), (.diabloIV, 0x46_656e)] {
+        let server = ScriptedServer(signedIn() + [reply(2, text(1, issued))])
+        let token = try await discovery(server).ticket(for: game, token: ticket, build: 70938, region: .us)
+        #expect(token.value == issued)
+        // Signed in as WoW on a Mac, then the one request.
+        let logon = number(1, wow) + text(2, "Mc64") + text(3, "enUS") + number(4, 70938) + bytes(10, text(1, ticket.value))
+        #expect(server.sent[1].suffix(logon.count) == logon)
+        #expect(server.sent.count == 3)
+        #expect(server.sent[2] == authTokenRequest(2, program: program))
+        #expect(server.cancelled)
+    }
+}
+
+@Test @MainActor func aSharedTicketForAnotherAccountOrInAnotherFormIsRefused() async {
+    let cases: [([Data], WoWAccountDiscovery.Failure)] = [
+        (signedIn() + [reply(2, text(1, "US-fedcba9876543210fedcba9876543210-999"))], .identityMismatch),
+        (signedIn(owner: 999) + [reply(2, text(1, "US-fedcba9876543210fedcba9876543210-999"))], .identityMismatch),
+        (signedIn() + [reply(2, text(1, "not a ticket"))], .malformed),
+        (signedIn() + [reply(2, Data())], .malformed),
+        (signedIn() + [reply(2, number(1, 5))], .malformed),
+        (signedIn() + [reply(2, text(1, "US-fedcba9876543210fedcba9876543210-123" + String(repeating: "0", count: 300)))], .malformed),
+        (signedIn() + [reply(2, status: 3)], .rejected(.authToken, status: 3)),
+    ]
+    for (frames, expected) in cases {
+        let server = ScriptedServer(frames)
+        await #expect(throws: expected) {
+            try await discovery(server).ticket(for: .hearthstone, token: ticket, build: 70938, region: .us)
+        }
+        #expect(server.cancelled)
+    }
+    // Nothing is asked of another account's session.
+    let other = ScriptedServer(signedIn(owner: 999) + [reply(2, text(1, "US-fedcba9876543210fedcba9876543210-999"))])
+    await #expect(throws: WoWAccountDiscovery.Failure.identityMismatch) {
+        try await discovery(other).ticket(for: .diabloIV, token: ticket, build: 70938, region: .us)
+    }
+    #expect(other.sent.count == 2)
+}
+
+@Test func onlyTriedGamesShareTheWoWSignIn() {
+    #expect(SharedSignIn(codename: "WTCG") == .hearthstone)
+    #expect(SharedSignIn(codename: "Fen") == .diabloIV)
+    for codename in ["WoW", "Pro", "Hero", "wtcg", ""] { #expect(SharedSignIn(codename: codename) == nil) }
+    for game in SharedSignIn.allCases { #expect(SharedSignIn(codename: game.codename) == game) }
+}
+
+@Test func aLogonNamesItsGameAndPlatform() throws {
+    let request = try WoWAccountWire.Message(WoWAccountWire.logonRequest(token: ticket, build: 1234, program: 0x46_656e, platform: "Wn64"))
+    #expect(try request.uint(1) == 0x46_656e)
+    #expect(try request.bytes(2) == Data("Wn64".utf8))
+    #expect(try request.uint(4) == 1234)
+    let wowRequest = try WoWAccountWire.Message(WoWAccountWire.logonRequest(token: ticket, build: 1234))
+    #expect(try wowRequest.uint(1) == wow)
+    #expect(try wowRequest.bytes(2) == Data("Mc64".utf8))
+}
+
+// MARK: Shared sign-in on Play
+
+/// What one Play of a shared-sign-in game asked of the network.
+@MainActor
+private final class SharedPlay {
+    var connections = 0
+    var buildLookups = 0
+    var servers: [ScriptedServer]
+    var wowRunning = false
+    var buildFails = false
+
+    init(_ servers: [ScriptedServer] = []) { self.servers = servers }
+
+    func sharedTicket(from wowToken: LoginToken? = ticket, account: String = "123", region: Region = .us,
+                timeout: Duration = .seconds(30)) async -> LoginToken? {
+        let discovery = WoWAccountDiscovery(timeout: timeout, isWoWRunning: { self.wowRunning }, transport: { _ in
+            self.connections += 1
+            return self.servers.isEmpty ? ScriptedServer() : self.servers.removeFirst()
+        })
+        return await discovery.sharedTicket(for: .hearthstone, from: wowToken, account: account, region: region) { _ in
+            self.buildLookups += 1
+            if self.buildFails { throw URLError(.notConnectedToInternet) }
+            return 70938
+        }
+    }
+}
+
+private let issued = "US-fedcba9876543210fedcba9876543210-123"
+
+@Test @MainActor func aSharedTicketComesFromTheSavedWoWLogin() async throws {
+    let server = ScriptedServer(signedIn() + [reply(2, text(1, issued))])
+    let play = SharedPlay([server])
+    #expect(await play.sharedTicket()?.value == issued)
+    #expect(play.connections == 1 && server.cancelled)
+}
+
+@Test @MainActor func withoutAWoWLoginOfItsOwnTheUsualSignInFollowsAtOnce() async {
+    for wowToken in [nil, LoginToken("US-0123456789abcdef0123456789abcdef-999")!] {
+        let play = SharedPlay()
+        #expect(await play.sharedTicket(from: wowToken) == nil)
+        #expect(play.connections == 0 && play.buildLookups == 0)
+    }
+    // Regions it hasn't been tried in.
+    for region in Region.allCases where !WoWAccountDiscovery.supports(region) {
+        let play = SharedPlay()
+        #expect(await play.sharedTicket(region: region) == nil)
+        #expect(play.connections == 0 && play.buildLookups == 0)
+    }
+}
+
+@Test @MainActor func whileWoWRunsTheExchangeIsSkipped() async {
+    let play = SharedPlay([ScriptedServer(signedIn() + [reply(2, text(1, issued))])])
+    play.wowRunning = true
+    #expect(await play.sharedTicket() == nil)
+    #expect(play.connections == 0 && play.buildLookups == 0)
+}
+
+@Test @MainActor func anyFailedExchangeEndsInNilForTheUsualSignIn() async {
+    let failures: [[Data]] = [
+        signedIn() + [reply(2, status: 3)], // rejected
+        signedIn() + [reply(2, text(1, "US-fedcba9876543210fedcba9876543210-999"))], // someone else's ticket
+        signedIn(owner: 999) + [reply(2, text(1, issued))], // someone else's session
+        [reply(0), reply(1, status: 5)], // the WoW ticket itself refused
+        signedIn() + [reply(2, text(1, issued)).dropLast(4)], // hung up
+        signedIn() + [reply(2, text(1, "garbage"))],
+    ]
+    for frames in failures {
+        let server = ScriptedServer(frames)
+        let play = SharedPlay([server])
+        #expect(await play.sharedTicket() == nil)
+        #expect(server.cancelled)
+    }
+
+    let stalled = ScriptedServer(signedIn())
+    stalled.stalls = true
+    #expect(await SharedPlay([stalled]).sharedTicket(timeout: .milliseconds(30)) == nil)
+    #expect(stalled.cancelled && stalled.pending == nil)
+
+    let refused = ScriptedServer()
+    refused.failsConnect = true
+    #expect(await SharedPlay([refused]).sharedTicket() == nil)
+
+    let offline = SharedPlay()
+    offline.buildFails = true
+    #expect(await offline.sharedTicket() == nil)
+    #expect(offline.connections == 0)
 }

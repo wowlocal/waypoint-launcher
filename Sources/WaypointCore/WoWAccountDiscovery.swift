@@ -3,9 +3,12 @@ import Network
 
 /// Asks the game service which WoW accounts (licences) a Battle.net account
 /// has, by signing in the way the game does with the web login's ticket.
+/// The same sign-in also tells whose ticket it is (`profile`) and can issue
+/// a ticket for another game (`ticket(for:…)`).
 ///
-/// Only for the explicit "refresh accounts" action. Playing never needs it:
-/// a launch without a chosen account lets the game pick as it always has.
+/// Listing accounts is only for the explicit "refresh accounts" action.
+/// Playing never needs it: a launch without a chosen account lets the game
+/// pick as it always has.
 ///
 /// The sign-in is a game session of its own, so it isn't made while a WoW
 /// client runs. Each call is one bounded attempt on a fresh connection, and
@@ -16,7 +19,7 @@ import Network
 public final class WoWAccountDiscovery {
     public enum Failure: Error, LocalizedError, Equatable {
         /// Where the service turned a request down.
-        public enum Stage: Sendable { case connect, logon, accountList, accountDetails }
+        public enum Stage: Sendable { case connect, logon, accountList, accountDetails, authToken }
 
         /// The region has no verified endpoint; see `supports`.
         case unsupported
@@ -83,8 +86,11 @@ public final class WoWAccountDiscovery {
     private let makeTransport: @MainActor (Endpoint) -> any WoWAccountTransport
     private var session: Session?
 
-    public convenience init() {
-        self.init(timeout: .seconds(35),
+    public convenience init() { self.init(timeout: .seconds(35)) }
+
+    /// `timeout`: how long one call may take in all, connecting included.
+    public convenience init(timeout: Duration) {
+        self.init(timeout: timeout,
                   isWoWRunning: { Self.isWoWRunning(in: RunningProcesses.executables()) },
                   transport: { TLSTransport($0) })
     }
@@ -101,6 +107,55 @@ public final class WoWAccountDiscovery {
     /// game's build number. Throws `CancellationError` when cancelled, by
     /// `cancel()` or by the task.
     public func discover(token: LoginToken, build: UInt64, region: Region) async throws -> [WoWGameAccount] {
+        try await withSession(token: token, build: build, region: region) { try await $0.accounts() }
+    }
+
+    /// Whose ticket `token` is, as the game service says once it signed in
+    /// with it: proof that the ticket works, without asking for anything else.
+    public func profile(token: LoginToken, build: UInt64, region: Region) async throws -> NativeAccountProfile {
+        try await withSession(token: token, build: build, region: region) { session in
+            guard let profile = session.profile else { throw Failure.malformed }
+            return profile
+        }
+    }
+
+    /// A ticket for `game`, issued for the WoW ticket's own account, so the
+    /// game needs no sign-in of its own. `token` is a WoW ticket.
+    public func ticket(for game: SharedSignIn, token: LoginToken, build: UInt64, region: Region) async throws -> LoginToken {
+        try await withSession(token: token, build: build, region: region) { try await $0.authToken(for: game.program) }
+    }
+
+    /// A ticket for `game` from the account's saved WoW ticket, or nil
+    /// whenever that can't be had: no WoW ticket of that account's, a region
+    /// not tried, WoW running, or any failure on the way. Nothing is asked of
+    /// the network in the first three cases. The caller then signs in the
+    /// usual way, so nil needs no explaining to anyone.
+    /// `build`: the WoW build to sign in with; by default the live one, asked
+    /// for within 5 s, as Play waits for all this before the usual sign-in.
+    public func sharedTicket(for game: SharedSignIn, from wowToken: LoginToken?, account: String, region: Region,
+                             build: @MainActor (Region) async throws -> UInt64 = { try await liveBuild(region: $0, timeout: 5) })
+        async -> LoginToken? {
+        func skip(_ reason: String, _ error: (any Error)? = nil) -> LoginToken? {
+            var fields: [String: Any] = ["codename": game.codename, "reason": reason]
+            if let error { fields["error"] = error }
+            Log.info(.auth, "shared_sign_in_skipped", nil, fields)
+            return nil
+        }
+        guard let wowToken, wowToken.accountID == account else { return skip("no_wow_login") }
+        guard Self.supports(region) else { return skip("region") }
+        guard !isWoWRunning() else { return skip("wow_running") }
+        do {
+            let issued = try await ticket(for: game, token: wowToken, build: build(region), region: region)
+            guard issued.accountID == account else { return skip("other_account") }
+            return issued
+        } catch {
+            return skip(error is CancellationError ? "cancelled" : "failed", error)
+        }
+    }
+
+    /// Signs in on a fresh connection, runs `operation` on it, and closes it.
+    private func withSession<T>(token: LoginToken, build: UInt64, region: Region,
+                                _ operation: @MainActor (Session) async throws -> T) async throws -> T {
         guard let endpoint = Self.endpoint(for: region) else { throw Failure.unsupported }
         guard let owner = UInt64(token.accountID), owner > 0 else { throw Failure.identityMismatch }
         guard build > 0 else { throw Failure.unavailable }
@@ -120,15 +175,16 @@ public final class WoWAccountDiscovery {
             self.session = nil
         }
         do {
-            let accounts = try await withTaskCancellationHandler {
-                try await session.run(token: token, build: build, isWoWRunning: isWoWRunning)
+            let result = try await withTaskCancellationHandler {
+                try await session.signIn(token: token, build: build, isWoWRunning: isWoWRunning)
+                return try await operation(session)
             } onCancel: {
                 Task { @MainActor in session.end(.cancelled) }
             }
             // Cancelled or timed out just as the last reply came in.
             try Task.checkCancellation()
             if session.ending != nil { throw CancellationError() }
-            return accounts
+            return result
         } catch {
             throw session.failure(for: error)
         }
@@ -151,7 +207,7 @@ protocol WoWAccountTransport: AnyObject {
 
 // MARK: - One attempt
 
-/// One connection's conversation, from connect to the account list.
+/// One connection's conversation: connect and sign in, then one request.
 @MainActor
 private final class Session {
     typealias Failure = WoWAccountDiscovery.Failure
@@ -168,6 +224,8 @@ private final class Session {
     private var frames = 0
     private var bytes = 0
     private var loggedOn = false
+    /// Whose session this is, from the logon's outcome.
+    private(set) var profile: NativeAccountProfile?
     /// Why the connection was closed, once it was. The first reason stays.
     private(set) var ending: Ending?
 
@@ -197,7 +255,7 @@ private final class Session {
         return Failure.unavailable
     }
 
-    func run(token: LoginToken, build: UInt64, isWoWRunning: @MainActor () -> Bool) async throws -> [WoWGameAccount] {
+    func signIn(token: LoginToken, build: UInt64, isWoWRunning: @MainActor () -> Bool) async throws {
         try await transport.connect()
         // Connecting takes a while; the game may have been started meanwhile.
         guard !isWoWRunning() else { throw Failure.gameRunning }
@@ -215,7 +273,10 @@ private final class Session {
             let (header, body) = try await receive()
             try notification(header, body)
         }
+    }
 
+    /// The signed-in account's WoW accounts in the session's region.
+    func accounts() async throws -> [WoWGameAccount] {
         let list = try await call(.accountList, Wire.Service.account, method: 108)
         var seen = Set<[UInt64]>()
         var handles: [Wire.Handle] = []
@@ -240,6 +301,15 @@ private final class Session {
                 return order == .orderedSame ? $0.id < $1.id : order == .orderedAscending
             }
             .map { WoWGameAccount(id: String($0.id), name: $0.name) }
+    }
+
+    /// A ticket to `program` for the signed-in account, and no one else's.
+    func authToken(for program: UInt64) async throws -> LoginToken {
+        let reply = try await call(.authToken, Wire.Service.authentication, method: 3,
+                                   body: Wire.authTokenRequest(program: program))
+        let issued = try Wire.authToken(reply)
+        guard issued.accountID == String(owner) else { throw Failure.identityMismatch }
+        return issued
     }
 
     /// An account's name as text fit to show and to hand to the game: one
@@ -315,11 +385,13 @@ private final class Session {
             let result = try Wire.Message(body)
             let status = try result.uint(1, default: 0)
             guard status == 0 else { throw Failure.rejected(.logon, status: status) }
-            guard try result.message(2).uint(1) == owner else { throw Failure.identityMismatch }
+            let record = try result.message(2)
+            guard try record.uint(1) == owner else { throw Failure.identityMismatch }
+            profile = NativeAccountProfile(accountID: String(owner), record: record)
             loggedOn = true
-        case 2: // Session state: numbers only.
-            let state = try Wire.Message(body).message(1)
-            for field in state.fieldNumbers { _ = try state.uint(field) }
+        case 2: // Session state. Nothing in it is used, so whatever it holds
+            // is skipped, as long as it is well-formed and within bounds.
+            _ = try Wire.Message(body)
         case 3:
             guard body.isEmpty else { throw Failure.malformed }
         default:
