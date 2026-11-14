@@ -13,50 +13,82 @@ public struct LaunchOptions {
     /// The key prefix the game looks under. Not the same as the product code.
     public var gameKey: String
     public var userName: String
+    /// `net.battle` except in tests.
+    public var preferencesDomain: String
 
-    public init(gameKey: String, userName: String = NSUserName()) {
+    public init(gameKey: String, userName: String = NSUserName(), preferencesDomain: String = LaunchOptions.domain as String) {
         self.gameKey = gameKey
         self.userName = userName
+        self.preferencesDomain = preferencesDomain
     }
 
     public var webTokenKey: String { "Launch Options/\(gameKey)/WEB_TOKEN" }
     public var regionKey: String { "Launch Options/\(gameKey)/REGION" }
     public var localeKey: String { "Launch Options/\(gameKey)/LOCALE" }
+    /// Which WoW licence to log in with, by name (`WoW1`). Only WoW reads it.
+    public var gameAccountKey: String { "Launch Options/\(gameKey)/GAME_ACCOUNT" }
+    public var usesGameAccount: Bool { gameKey == "WoW" }
 
     // MARK: Reading and writing
 
     public func storedToken() throws -> String? {
-        guard let data = CFPreferencesCopyAppValue(webTokenKey as CFString, Self.domain) as? Data else { return nil }
+        guard let data = value(webTokenKey) as? Data else { return nil }
         return try TokenCipher(userName: userName).decrypt(data)
     }
 
     public func storedRegion() -> String? {
-        CFPreferencesCopyAppValue(regionKey as CFString, Self.domain) as? String
+        value(regionKey) as? String
     }
 
     public func storedLocale() -> String? {
-        CFPreferencesCopyAppValue(localeKey as CFString, Self.domain) as? String
+        value(localeKey) as? String
+    }
+
+    public func storedGameAccount() -> String? {
+        value(gameAccountKey) as? String
+    }
+
+    /// The CLI replays the existing handoff, including its licence only in
+    /// the same region. App launches use their own per-edition preferences.
+    public func storedGameAccount(for region: Region) -> String? {
+        guard usesGameAccount, storedRegion() == region.launchOptionValue,
+              let name = storedGameAccount(), WoWGameAccount.isValidName(name) else { return nil }
+        return name
     }
 
     /// Writes the token and region the way Battle.net does. Locale is only
     /// written when given, so we don't clobber what the user picked in Battle.net.
-    public func write(token: String, region: Region, locale: String?) throws {
+    /// For WoW the licence is always written with them: a nil `gameAccount`
+    /// removes `GAME_ACCOUNT`, so a licence left by another account, region
+    /// or Battle.net itself never goes out with this token. Other games
+    /// ignore `gameAccount`.
+    public func write(token: String, region: Region, locale: String?, gameAccount: String? = nil) throws {
+        if usesGameAccount, let gameAccount, !WoWGameAccount.isValidName(gameAccount) {
+            throw CocoaError(.keyValueValidation, userInfo: [NSLocalizedDescriptionKey: "Invalid WoW account name"])
+        }
         let encrypted = try TokenCipher(userName: userName).encrypt(token)
         set(webTokenKey, encrypted as CFData)
         set(regionKey, region.launchOptionValue as CFString)
         if let locale { set(localeKey, locale as CFString) }
-        guard CFPreferencesAppSynchronize(Self.domain) else {
+        if usesGameAccount { set(gameAccountKey, gameAccount as CFString?) }
+        guard CFPreferencesAppSynchronize(preferencesDomain as CFString) else {
             throw CocoaError(.fileWriteUnknown, userInfo: [NSLocalizedDescriptionKey: "Could not save net.battle preferences"])
         }
     }
 
+    /// Removes the token, and for WoW the licence chosen with it.
     public func clearToken() {
-        CFPreferencesSetAppValue(webTokenKey as CFString, nil, Self.domain)
-        CFPreferencesAppSynchronize(Self.domain)
+        set(webTokenKey, nil)
+        if usesGameAccount { set(gameAccountKey, nil) }
+        CFPreferencesAppSynchronize(preferencesDomain as CFString)
     }
 
-    private func set(_ key: String, _ value: CFPropertyList) {
-        CFPreferencesSetAppValue(key as CFString, value, Self.domain)
+    private func value(_ key: String) -> CFPropertyList? {
+        CFPreferencesCopyAppValue(key as CFString, preferencesDomain as CFString)
+    }
+
+    private func set(_ key: String, _ value: CFPropertyList?) {
+        CFPreferencesSetAppValue(key as CFString, value, preferencesDomain as CFString)
     }
 }
 
