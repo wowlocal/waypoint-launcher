@@ -1,6 +1,40 @@
 # Waypoint: notes for agents
 
+## Principles
+
+Waypoint does one job: get people into their games. Every change must keep it
+clean, simple, fast, minimal and intuitive. When a change works but makes the
+app heavier or the common path longer, it isn't done.
+
+- **The golden path stays short.** Sign in once, install, Play. Nothing may add
+  a step, prompt or choice to it. Optional features live off to the side (the
+  game's ••• menu, Settings) and fall back silently to the golden path when
+  they fail or don't apply.
+- **Defaults over settings.** Ship the default that is right for most people.
+  Add a setting only when no default can work for a real group of users. When
+  there is only one option, choose it; when the user has chosen before,
+  remember it instead of asking again.
+- **Don't interrupt.** No prompts on launch, onboarding or Play. When something
+  needs the user, use a sheet on the window it came from with one clear
+  action, not an app-modal alert or a free-floating window.
+- **Show less.** Show information only when it helps a decision, for example a
+  WoW account name only when there is more than one. No jargon in the UI: say
+  "Windows", not "D3DMetal/Wine"; put details in a tooltip if anywhere.
+- **No surprises with people's games.** Never re-download what is already on
+  disk, never touch files the user didn't ask to change, and keep a game on a
+  disconnected drive visible as disconnected rather than offering it again.
+- **Fast and light.** AppKit only (see below). No disk or network I/O on the
+  main thread. Check memory with `footprint` before adding views or
+  dependencies.
+- **One of each thing.** Reuse the existing implementation (protocol code,
+  stores, sheets) instead of adding a parallel one.
+- **Native and consistent.** Follow the macOS Human Interface Guidelines: Title
+  Case for menu items and buttons, an ellipsis when a command asks for more
+  input, standard controls, American spelling.
+
 ## Review changes
+
+Reviews check each change against the principles above, as well as for bugs.
 
 Before committing code changes, run an independent sub-agent review and address
 its findings. Include installation/update migrations and real client behavior
