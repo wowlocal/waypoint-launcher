@@ -4,8 +4,8 @@ import Network
 /// Asks the game service which WoW accounts (licences) a Battle.net account
 /// has, by signing in the way the game does with the web login's ticket.
 ///
-/// Only for the explicit "refresh accounts" action. Playing never needs it:
-/// a launch without a chosen account lets the game pick as it always has.
+/// Called for explicit refresh and the first-choice prompt when no valid
+/// licence is saved. Ordinary launches with a valid choice need no lookup.
 ///
 /// The sign-in is a game session of its own, so it isn't made while a WoW
 /// client runs. Each call is one bounded attempt on a fresh connection, and

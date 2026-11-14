@@ -12,6 +12,8 @@ struct GameRowState {
     var canPlay: Bool
     var canUpdate: Bool
     var showsEdition: Bool
+    var selectedWoWAccountName: String?
+    var effectiveRegion: Region?
     var download: DownloadControls
     /// The game's picture, once it has been downloaded.
     var banner: URL?
@@ -23,6 +25,8 @@ extension GameRowState {
                   update: model.availableUpdate(for: game), canPlay: model.canPlay(game),
                   canUpdate: model.canUpdate(game), showsEdition: game.install.productCode == "hero" &&
                     (WindowsHeroes.isAvailable || model.heroesEdition(.windows) != nil),
+                  selectedWoWAccountName: model.selectedWoWAccount(for: game)?.name,
+                  effectiveRegion: model.effectiveRegion(for: game),
                   download: DownloadControls(uid: game.id, model: model),
                   banner: model.artwork(productCode: game.install.productCode).picture)
     }
@@ -196,7 +200,7 @@ final class GameCell: NSView {
                 detail.stringValue = GameUpdate.canUpdate(game.install) ? "Update available" : "Update available in Battle.net"
                 detail.textColor = .systemOrange
             } else {
-                detail.stringValue = Self.summary(of: game)
+                detail.stringValue = Self.summary(of: game, region: state.effectiveRegion, account: state.selectedWoWAccountName)
             }
         }
 
@@ -359,39 +363,30 @@ final class GameCell: NSView {
             if model.availableUpdate(for: game) != nil {
                 menu.addItem(ActionItem("Play Without Updating") { Task { await model.play(game) } })
             }
-            if model.offersWoWAccounts(game) {
-                let choose = ActionItem("Find WoW Accounts…", enabled: model.canPlay(game)) { [weak self] in
-                    self?.window?.contentViewController?.presentAsSheet(WoWAccountSheet {
-                        try await model.findWoWAccounts(for: game)
-                    })
-                }
+            if model.offersWoWAccounts(game), let owner = model.activeAccount?.id, let region = model.effectiveRegion(for: game) {
+                let item = NSMenuItem(title: "WoW account", action: nil, keyEquivalent: "")
+                let choices = NSMenu(); choices.autoenablesItems = false
                 let accounts = model.knownWoWAccounts(for: game)
                 if accounts.isEmpty {
-                    menu.addItem(choose)
-                } else {
-                    let selected = model.selectedWoWAccount(for: game)
-                    let item = NSMenuItem(title: "WoW Account", action: nil, keyEquivalent: "")
-                    let choices = NSMenu()
-                    choices.autoenablesItems = false
-                    let automatic = ActionItem("Default", enabled: model.canPlay(game)) { model.useWoWAccount(nil, for: game) }
-                    automatic.toolTip = "Let WoW choose an account."
-                    automatic.state = selected == nil ? .on : .off
-                    choices.addItem(automatic)
-                    let repeated = Dictionary(grouping: accounts, by: \.name)
-                    for account in accounts {
-                        let title = repeated[account.name]!.count > 1 ? "\(account.name) (\(account.id))" : account.name
-                        let choice = ActionItem(title, enabled: model.canPlay(game)) { model.useWoWAccount(account, for: game) }
-                        choice.state = selected?.id == account.id ? .on : .off
-                        choices.addItem(choice)
-                    }
-                    if model.canRefreshWoWAccounts(game) {
-                        choices.addItem(.separator())
-                        choose.title = "Refresh Accounts…"
-                        choices.addItem(choose)
-                    }
-                    item.submenu = choices
-                    menu.addItem(item)
+                    let empty = NSMenuItem(title: "No detected accounts", action: nil, keyEquivalent: "")
+                    empty.isEnabled = false; choices.addItem(empty)
                 }
+                let selected = model.selectedWoWAccount(for: game)
+                let repeated = Dictionary(grouping: accounts, by: \.name)
+                for account in accounts {
+                    let label = repeated[account.name, default: []].count > 1 ? "\(account.name) (\(account.id))" : account.name
+                    let available = model.isAvailableWoWAccount(account, for: game)
+                    let choice = ActionItem(available ? label : "\(label) (unavailable)", enabled: model.canPlay(game) && available) {
+                        model.useWoWAccount(account, for: game, expectedOwner: owner, expectedRegion: region)
+                    }
+                    choice.state = selected?.id == account.id ? .on : .off
+                    choices.addItem(choice)
+                }
+                choices.addItem(.separator())
+                choices.addItem(ActionItem("Refresh list", enabled: model.canPlay(game) && model.canRefreshWoWAccounts(game)) {
+                    Task { await model.refreshWoWAccounts(for: game, expectedOwner: owner, expectedRegion: region) }
+                })
+                item.submenu = choices; menu.addItem(item)
             }
             let others = model.accounts.filter { $0.id != model.activeAccount?.id }
             if !others.isEmpty {
@@ -438,12 +433,14 @@ final class GameCell: NSView {
 
     /// "36.6.3 · EU", plus "Intel" for games that need Rosetta. The full
     /// version is in the name's tooltip.
-    private static func summary(of game: Game) -> String {
+    private static func summary(of game: Game, region: Region?, account: String?) -> String {
         var parts: [String] = []
         if let version = game.install.version {
             parts.append(version.split(separator: ".").prefix(3).joined(separator: "."))
         }
-        if let region = game.install.region { parts.append(region.uppercased()) }
+        if let region { parts.append(region.rawValue.uppercased()) }
+        else if let region = game.install.region { parts.append(region.uppercased()) }
+        if let account { parts.append(account) }
         if game.install.platform == .windows {
             parts.append("Windows")
             if WindowsTitle.forInstall(game.install)?.isQualified == false { parts.append("Preview") }

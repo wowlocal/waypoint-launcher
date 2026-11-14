@@ -34,9 +34,9 @@ public struct WoWGameAccount: Codable, Equatable, Sendable, Identifiable {
 
 /// The WoW licences Waypoint knows about and the one the user picked, kept
 /// apart from Battle.net sign-in. A choice belongs to one Battle.net account
-/// (owner), one installed edition (uid) and one play region; with none,
-/// Waypoint launches "automatic" and the game decides. Known licences are
-/// cached per owner and region. Nothing here is a credential.
+/// (owner), one installed edition (uid) and one play region. A saved default
+/// covers editions without an override; without either, the caller can ask
+/// for a choice or launch automatically. Nothing here is a credential.
 public struct WoWAccountStore: Equatable, Sendable {
     struct Selection: Codable, Equatable, Sendable {
         var owner: String
@@ -63,6 +63,16 @@ public struct WoWAccountStore: Equatable, Sendable {
 
     public func selected(owner: String, uid: String, region: Region) -> WoWGameAccount? {
         selections.first { $0.owner == owner && $0.uid == uid && $0.region == region }?.account
+            ?? defaultAccount(owner: owner, region: region)
+    }
+
+    /// Default for editions without an explicit override; old records remain valid.
+    public func defaultAccount(owner: String, region: Region) -> WoWGameAccount? {
+        selections.first { $0.owner == owner && $0.uid == "*" && $0.region == region }?.account
+    }
+    @discardableResult
+    public mutating func selectDefault(_ account: WoWGameAccount, owner: String, region: Region) -> Bool {
+        select(account, owner: owner, uid: "*", region: region)
     }
 
     /// The `GAME_ACCOUNT` to hand over with `token`. The owner comes from the
@@ -72,8 +82,8 @@ public struct WoWAccountStore: Equatable, Sendable {
         selected(owner: token.accountID, uid: uid, region: region)?.name
     }
 
-    /// `nil` goes back to automatic. Malformed input leaves the saved
-    /// choice alone and returns false.
+    /// `nil` removes the edition override, revealing a saved default if any.
+    /// Without a default it is automatic. Malformed input returns false.
     @discardableResult
     public mutating func select(_ account: WoWGameAccount?, owner: String, uid: String, region: Region) -> Bool {
         guard Self.isValidScope(owner), Self.isValidScope(uid), account?.isValid ?? true else { return false }
@@ -91,6 +101,11 @@ public struct WoWAccountStore: Equatable, Sendable {
         catalogs.first { $0.owner == owner && $0.region == region }?.accounts ?? []
     }
 
+    /// Distinguishes no lookup from a successful empty response.
+    public func hasCatalog(owner: String, region: Region) -> Bool {
+        catalogs.contains { $0.owner == owner && $0.region == region }
+    }
+
     /// Replaces the known licences after a refresh. Never touches the saved
     /// choice: a licence missing from one refresh stays selected until the
     /// user changes it. A list with anything malformed in it, or too many
@@ -102,10 +117,8 @@ public struct WoWAccountStore: Equatable, Sendable {
         let unique = accounts.filter { seen.insert($0.id).inserted }
         guard unique.count <= Self.maxAccounts else { return false }
         catalogs.removeAll { $0.owner == owner && $0.region == region }
-        if !unique.isEmpty {
-            catalogs.append(Catalog(owner: owner, region: region, accounts: unique))
-            if catalogs.count > Self.maxEntries { catalogs.removeFirst(catalogs.count - Self.maxEntries) }
-        }
+        catalogs.append(Catalog(owner: owner, region: region, accounts: unique))
+        if catalogs.count > Self.maxEntries { catalogs.removeFirst(catalogs.count - Self.maxEntries) }
         return true
     }
 

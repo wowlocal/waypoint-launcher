@@ -197,3 +197,49 @@ private func withDefaults(_ body: (UserDefaults) throws -> Void) throws {
     #expect(store.launchAccount(for: a, uid: "wow", region: .eu) == nil)
     #expect(store.launchAccount(for: b, uid: "wow", region: .us) == nil)
 }
+
+@Test func wowDefaultAppliesToUnconfiguredEditionsAndOverridesSurvive() throws {
+    var store = WoWAccountStore()
+    store.select(wow2, owner: "1", uid: "wow", region: .us)
+    let accepted = store.selectDefault(wow1, owner: "1", region: .us)
+    #expect(accepted)
+    #expect(store.selected(owner: "1", uid: "wow_classic", region: .us) == wow1)
+    #expect(store.selected(owner: "1", uid: "wow", region: .us) == wow2)
+    #expect(store.selected(owner: "2", uid: "wow_classic", region: .us) == nil)
+    #expect(store.selected(owner: "1", uid: "wow_classic", region: .eu) == nil)
+    try withDefaults { defaults in
+        store.save(to: defaults)
+        let loaded = WoWAccountStore.load(from: defaults)
+        #expect(loaded.defaultAccount(owner: "1", region: .us) == wow1)
+        #expect(loaded.selected(owner: "1", uid: "wow", region: .us) == wow2)
+    }
+}
+
+@Test func wowSuccessfulEmptyCatalogSurvivesRestartWithoutChangingSelection() throws {
+    var store = WoWAccountStore()
+    #expect(!store.hasCatalog(owner: "1", region: .us))
+    store.select(wow1, owner: "1", uid: "wow", region: .us)
+    store.cache([], owner: "1", region: .us)
+    #expect(store.hasCatalog(owner: "1", region: .us))
+    #expect(store.cachedAccounts(owner: "1", region: .us).isEmpty)
+    #expect(store.selected(owner: "1", uid: "wow", region: .us) == wow1)
+    try withDefaults { defaults in
+        store.save(to: defaults)
+        let loaded = WoWAccountStore.load(from: defaults)
+        #expect(loaded.hasCatalog(owner: "1", region: .us))
+        #expect(loaded.cachedAccounts(owner: "1", region: .us).isEmpty)
+    }
+}
+
+@Test func wowExplicitReselectionReplacesAnOldEditionOverrideAlongsideDefault() {
+    var store = WoWAccountStore()
+    store.select(wow1, owner: "1", uid: "wow", region: .us)
+    store.selectDefault(wow2, owner: "1", region: .us)
+    store.select(wow2, owner: "1", uid: "wow", region: .us)
+    #expect(store.selected(owner: "1", uid: "wow", region: .us) == wow2)
+    #expect(store.selected(owner: "1", uid: "wow_classic", region: .us) == wow2)
+    store.select(nil, owner: "1", uid: "wow", region: .us)
+    #expect(store.selected(owner: "1", uid: "wow", region: .us) == wow2)
+    store.remove(owner: "1")
+    #expect(store.defaultAccount(owner: "1", region: .us) == nil)
+}

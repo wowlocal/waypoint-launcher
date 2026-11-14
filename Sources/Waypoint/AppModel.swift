@@ -145,6 +145,7 @@ final class AppModel {
         didSet { wowAccountStore.save() }
     }
     private var isFindingWoWAccounts = false
+    private var isChoosingWoWAccount = false
     private var profileFetches: Set<String> = []
 
     private let library = GameLibrary()
@@ -847,7 +848,7 @@ final class AppModel {
     /// Only one sign-in at a time: the login window and the hidden web view
     /// each serve a single request.
     var isSigningIn: Bool {
-        isAddingAccount || isManagingSavedLogin || phases.values.contains {
+        isAddingAccount || isManagingSavedLogin || isChoosingWoWAccount || phases.values.contains {
             switch $0 { case .signingIn, .preparingWindows: true; default: false }
         }
     }
@@ -898,6 +899,17 @@ final class AppModel {
                 return
             }
             if plan.codename == "WoW", !plan.isWindows {
+                let selected = wowAccountStore.selected(owner: token.accountID, uid: game.id, region: plan.region)
+                let missing = selected.map { selection in
+                    wowAccountStore.hasCatalog(owner: token.accountID, region: plan.region) &&
+                    !wowAccountStore.cachedAccounts(owner: token.accountID, region: plan.region).contains { $0.id == selection.id }
+                } ?? false
+                if WoWAccountDiscovery.supports(plan.region), selected == nil || missing {
+                    guard let account = accountList[token.accountID],
+                          await chooseWoWAccount(account: account, region: plan.region, token: token, game: game) else {
+                        phases[game.id] = .idle; return
+                    }
+                }
                 plan.gameAccount = wowAccountStore.launchAccount(for: token, uid: game.id, region: plan.region)
             }
             phases[game.id] = .launching
@@ -953,23 +965,46 @@ final class AppModel {
     }
 
     func selectedWoWAccount(for game: Game) -> WoWGameAccount? {
-        guard let owner = activeAccount?.id,
+        guard isNativeWoW(game), let owner = activeAccount?.id,
               let plan = try? GameLauncher.plan(for: game, region: regionOverride) else { return nil }
         return wowAccountStore.selected(owner: owner, uid: game.id, region: plan.region)
     }
 
     func knownWoWAccounts(for game: Game) -> [WoWGameAccount] {
-        guard let owner = activeAccount?.id,
+        guard isNativeWoW(game), let owner = activeAccount?.id,
               let plan = try? GameLauncher.plan(for: game, region: regionOverride) else { return [] }
         var accounts = wowAccountStore.cachedAccounts(owner: owner, region: plan.region)
         if let selected = selectedWoWAccount(for: game), !accounts.contains(where: { $0.id == selected.id }) { accounts.append(selected) }
         return accounts
     }
 
-    func useWoWAccount(_ account: WoWGameAccount?, for game: Game) {
-        guard canPlay(game), isNativeWoW(game), let owner = activeAccount?.id,
+    func useWoWAccount(_ account: WoWGameAccount?, for game: Game, expectedOwner: String, expectedRegion: Region) {
+        guard canPlay(game), isNativeWoW(game), let owner = activeAccount?.id, owner == expectedOwner,
               let plan = try? GameLauncher.plan(for: game, region: regionOverride) else { return }
+        guard plan.region == expectedRegion else { return }
+        if let account, !wowAccountStore.cachedAccounts(owner: owner, region: plan.region).contains(account) { return }
         wowAccountStore.select(account, owner: owner, uid: game.id, region: plan.region)
+    }
+
+    func effectiveRegion(for game: Game) -> Region? {
+        (try? GameLauncher.plan(for: game, region: regionOverride))?.region
+    }
+
+    func isAvailableWoWAccount(_ account: WoWGameAccount, for game: Game) -> Bool {
+        guard let owner = activeAccount?.id, let region = effectiveRegion(for: game) else { return false }
+        return !wowAccountStore.hasCatalog(owner: owner, region: region) ||
+            wowAccountStore.cachedAccounts(owner: owner, region: region).contains { $0.id == account.id }
+    }
+
+    func refreshWoWAccounts(for game: Game, expectedOwner: String, expectedRegion: Region) async {
+        guard activeAccount?.id == expectedOwner, effectiveRegion(for: game) == expectedRegion else { return }
+        do { _ = try await findWoWAccounts(for: game) }
+        catch {
+            guard !Task.isCancelled else { return }
+            let alert = NSAlert(); alert.messageText = "Couldn’t refresh WoW accounts"
+            alert.informativeText = "\(error.localizedDescription) Your previous list and choices were kept."
+            alert.runModal()
+        }
     }
 
     func findWoWAccounts(for game: Game) async throws -> [WoWGameAccount] {
@@ -988,13 +1023,49 @@ final class AppModel {
               let build = version.split(separator: ".").last.flatMap({ UInt64($0) }), build > 0 else {
             throw NSError(domain: "Waypoint", code: 2, userInfo: [NSLocalizedDescriptionKey: "Couldn’t read this WoW installation’s version."])
         }
-        let accounts = try await WoWAccountDiscovery().discover(token: token, build: build, region: plan.region)
+        return try await discoverWoWAccounts(account: account, region: plan.region, token: token, build: build)
+    }
+
+    private func discoverWoWAccounts(account: Account, region: Region, token: LoginToken, build: UInt64) async throws -> [WoWGameAccount] {
+        guard token.accountID == account.id else { throw WoWAccountDiscovery.Failure.identityMismatch }
+        let accounts = try await WoWAccountDiscovery().discover(token: token, build: build, region: region)
         try Task.checkCancellation()
         guard accountList[account.id] != nil else { throw CancellationError() }
-        guard wowAccountStore.cache(accounts, owner: account.id, region: plan.region) else {
+        guard wowAccountStore.cache(accounts, owner: account.id, region: region) else {
             throw NSError(domain: "Waypoint", code: 3, userInfo: [NSLocalizedDescriptionKey: "Couldn’t read Blizzard’s account list."])
         }
         return accounts
+    }
+
+    private func chooseWoWAccount(account: Account, region: Region, token: LoginToken, game: Game? = nil) async -> Bool {
+        guard WoWAccountDiscovery.supports(region), token.accountID == account.id else { return false }
+        isChoosingWoWAccount = true
+        defer { isChoosingWoWAccount = false }
+        let makesDefault = wowAccountStore.defaultAccount(owner: account.id, region: region) == nil
+        var firstLoad = true
+        guard let choice = await WoWAccountChooser().run(account: account,
+            gameName: makesDefault ? "Default World of Warcraft account" : (game?.displayName ?? "World of Warcraft"),
+            region: region, selected: game.flatMap { wowAccountStore.selected(owner: account.id, uid: $0.id, region: region) },
+            explanation: makesDefault ? "This is your default for WoW editions. Each title can override it from its account menu." : nil,
+            load: {
+                if firstLoad {
+                    firstLoad = false
+                    if self.wowAccountStore.hasCatalog(owner: account.id, region: region) {
+                        return self.wowAccountStore.cachedAccounts(owner: account.id, region: region)
+                    }
+                }
+                let config = URLSessionConfiguration.ephemeral
+                config.waitsForConnectivity = false; config.timeoutIntervalForRequest = 10; config.timeoutIntervalForResource = 20
+                let session = URLSession(configuration: config); defer { session.invalidateAndCancel() }
+                let version = try await VersionService(session: session).latest(product: "wowf", region: region)
+                guard version.buildID > 0, !Task.isCancelled else { throw WoWAccountDiscovery.Failure.unavailable }
+                return try await self.discoverWoWAccounts(account: account, region: region, token: token, build: UInt64(version.buildID))
+            }) else { return false }
+        guard accountList[account.id] != nil else { return false }
+        if makesDefault { guard wowAccountStore.selectDefault(choice, owner: account.id, region: region) else { return false } }
+        // Explicitly replace an old edition override too, including a removed licence.
+        if let game { return wowAccountStore.select(choice, owner: account.id, uid: game.id, region: region) }
+        return true
     }
 
     // MARK: Accounts
@@ -1081,6 +1152,7 @@ final class AppModel {
             return
         }
         Log.info(.auth, "token", nil, ["source": "login_window", "codename": target.codename])
+        let isNewIdentity = accountList[token.accountID] == nil
         let saved = await adopt(token, codename: target.codename, session: session, typedName: loginWindow.typedAccountName)
         if let replacing, token.accountID == replacing {
             if saved {
@@ -1095,6 +1167,9 @@ final class AppModel {
                 tokenVault.removeAll(account: replacing)
                 Log.notice(.auth, "all_tokens_removed")
             }
+        }
+        if isNewIdentity, target.codename == "WoW", WoWAccountDiscovery.supports(target.region), let account = accountList[token.accountID] {
+            _ = await chooseWoWAccount(account: account, region: target.region, token: token)
         }
     }
 
