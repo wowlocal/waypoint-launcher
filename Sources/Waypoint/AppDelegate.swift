@@ -13,6 +13,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     static func main() {
         let app = NSApplication.shared
+        AppAppearance.apply()
         let delegate = AppDelegate()
         app.delegate = delegate
         // Also makes `swift run` builds, which have no bundle, a regular app.
