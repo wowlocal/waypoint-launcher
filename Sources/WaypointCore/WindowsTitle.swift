@@ -31,6 +31,13 @@ public enum WindowsTitle: String, CaseIterable, Sendable {
     }
     public var folderName: String { self == .diabloII ? "Diablo II Resurrected" : displayName }
     public var backend: Backend { self == .heroes ? .dxmt : .d3dMetal }
+    /// What the library says after the name: "Windows", or "Windows · Preview"
+    /// until gameplay checks have passed.
+    public var platformLabel: String { isQualified ? "Windows" : "Windows · Preview" }
+    /// How it runs, for a tooltip: the backend is detail, not part of the name.
+    public var backendDescription: String {
+        backend == .dxmt ? "Runs with Wine and DXMT." : "Runs with Wine and D3DMetal."
+    }
     public var executablePath: String {
         switch self {
         case .heroes: "Support64/HeroesSwitcher_x64.exe"

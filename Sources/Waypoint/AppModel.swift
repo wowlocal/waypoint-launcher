@@ -376,6 +376,14 @@ final class AppModel {
         return .macOS
     }
 
+    /// The platform a not-yet-installed game's row names: its download's, or
+    /// the only one it has. nil for HotS without a download: the install sheet
+    /// picks its edition, so the row doesn't promise one.
+    func shownPlatform(for product: InstallableProduct) -> InstallPlatform? {
+        downloads.values.compactMap(\.request).first { $0.install.uid == product.uid }?.install.platform
+            ?? product.onlyPlatform
+    }
+
     func isRunning(_ game: Game) -> Bool {
         game.install.uid == "heroes" ? (running.contains("heroes") || running.contains("heroes@windows")) : running.contains(game.id)
     }

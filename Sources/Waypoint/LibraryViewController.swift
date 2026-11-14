@@ -3,7 +3,7 @@ import WaypointCore
 
 /// The library window: installed games with Play and Update, games being
 /// installed, the Battle.net account games launch as (in the subtitle; a
-/// toolbar menu switches it), a + toolbar menu to install more, and
+/// toolbar menu switches it), Available Games to install more, and
 /// Waypoint's own update status in a banner when it has something to say.
 /// The list runs under the toolbar, as the system's own lists do.
 @MainActor
@@ -82,20 +82,19 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
     private let table = NSTableView()
     private let scrollView = NSScrollView()
     private let emptyState = NSStackView()
-    private let emptyInstallButton = NSPopUpButton(frame: .zero, pullsDown: true)
     private let updateBanner = NSView()
     private let updateIcon = NSImageView()
     private let updateSpinner = NSProgressIndicator.spinner()
     private let updateText = NSTextField.label(.callout, color: .secondaryLabelColor)
     private let restartButton = NSButton(title: "Restart to Update", target: nil,
                                          action: #selector(AppDelegate.restartToUpdate(_:)))
-    private let installMenu = NSMenu()
-    private var installItem: NSMenuToolbarItem?
     private let accountMenu = NSMenu()
     private var accountItem: NSMenuToolbarItem?
     private var subtitle = ""
-    /// Whether the games that can be installed show under their heading.
-    private var showsAvailableGames = UserDefaults.standard.bool(forKey: "showsAvailableGames") {
+    /// Whether the games that can be installed show under their heading, once
+    /// the person has opened or closed it. Until then they show while no game
+    /// is installed: Available Games is where installing starts.
+    private var showsAvailableGames = UserDefaults.standard.object(forKey: "showsAvailableGames") as? Bool {
         didSet { UserDefaults.standard.set(showsAvailableGames, forKey: "showsAvailableGames") }
     }
 
@@ -138,14 +137,10 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
         emptyTitle.stringValue = "No Games"
         let emptyDetail = NSTextField.label(.body, color: .secondaryLabelColor)
         emptyDetail.stringValue = "Blizzard games on this Mac appear here."
-        emptyInstallButton.controlSize = .large
-        if #available(macOS 26.0, *) { emptyInstallButton.borderShape = .capsule }
-        emptyInstallButton.autoenablesItems = false
-        emptyState.setViews([emptyIcon, emptyTitle, emptyDetail, emptyInstallButton], in: .center)
+        emptyState.setViews([emptyIcon, emptyTitle, emptyDetail], in: .center)
         emptyState.orientation = .vertical
         emptyState.spacing = 6
         emptyState.setCustomSpacing(12, after: emptyIcon)
-        emptyState.setCustomSpacing(18, after: emptyDetail)
 
         let content = NSView()
         for view in [scrollView, emptyState] as [NSView] {
@@ -216,7 +211,6 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
     /// calls this again whenever any of it changes.
     private func render() {
         var rows = model.games.map { Row.game(GameRowState($0, model: model)) }
-        var installChoices: [InstallableProduct] = []
         // The ones with no row above.
         var available: [Row] = []
         for product in model.installable {
@@ -227,37 +221,21 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
                 let artwork = model.artwork(productCode: product.productCode)
                 available.append(.available(product, key: model.installKey(for: product), picture: artwork.picture, icon: artwork.icon))
             }
-            switch phase {
-            case .updating, .pausing, .paused, .uninstalling: continue
-            default: break
-            }
-            installChoices.append(product)
         }
-        // Under the installed ones. With none installed, the empty state
-        // offers the same list.
-        if !rows.isEmpty, !available.isEmpty {
-            rows.append(.availableHeader(count: available.count, expanded: showsAvailableGames))
-            if showsAvailableGames { rows += available }
+        // Under the installed ones: the one place to install from. Open
+        // while nothing is installed, so a new library starts with it.
+        if !available.isEmpty {
+            // A HotS download has a game row of its own before it's installed.
+            let expanded = showsAvailableGames ?? !model.games.contains(where: \.isInstalled)
+            rows.append(.availableHeader(count: available.count, expanded: expanded))
+            if expanded { rows += available }
         }
         show(rows)
-        // Menu items belong to one menu, so each menu gets its own.
-        let installMenuItems = { [weak self] in
-            installChoices.map { product in ActionItem(product.displayName) { self?.install(product) } }
-        }
 
         // NSMenuToolbarItem shows its menu as a pull-down button does: the
         // first item is the button's own and never appears. Without a
         // placeholder, a signed-out account menu's lone "Sign In…" did
         // nothing, and the account list lost its first row.
-        installMenu.items = installChoices.isEmpty ? [] : [.pullDownPlaceholder(), .sectionHeader(title: "Install a Game")] + installMenuItems()
-        installItem?.isEnabled = !installChoices.isEmpty
-        // The same list under the empty state's button, whose title is the
-        // pull-down's own first item.
-        if rows.isEmpty {
-            emptyInstallButton.menu?.items = [NSMenuItem(title: "Install a Game", action: nil, keyEquivalent: "")] + installMenuItems()
-            emptyInstallButton.isEnabled = !installChoices.isEmpty
-        }
-
         accountMenu.items = [.pullDownPlaceholder()] + AccountMenu.items(model: model)
         subtitle = model.activeAccount?.displayName ?? "Not signed in"
         view.window?.subtitle = subtitle
@@ -382,12 +360,12 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
             header?.configure(count: count, expanded: expanded)
             header?.toggle = { [weak self] in
                 guard let self else { return }
-                self.showsAvailableGames.toggle()
+                self.showsAvailableGames = !expanded
                 self.render()
             }
         case .available(let product, _, let picture, let icon):
             let cell = view as? AvailableGameCell
-            cell?.configure(product, picture: picture, icon: icon)
+            cell?.configure(product, platform: model.shownPlatform(for: product), picture: picture, icon: icon)
             cell?.install = { [weak self] in self?.install(product) }
         }
     }
@@ -411,25 +389,15 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
             accountItem = item
             return item
         }
-        guard identifier == .install else { return nil }
-        let item = NSMenuToolbarItem(itemIdentifier: identifier)
-        item.image = .symbol("plus")
-        item.label = "Install"
-        item.toolTip = "Install a game"
-        item.showsIndicator = false
-        item.autovalidates = false
-        item.menu = installMenu
-        item.isEnabled = !installMenu.items.isEmpty
-        installItem = item
-        return item
+        return nil
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.flexibleSpace, .account, .install]
+        [.flexibleSpace, .account]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.flexibleSpace, .account, .install]
+        [.flexibleSpace, .account]
     }
 
     // MARK: NSTableViewDataSource, NSTableViewDelegate
@@ -451,7 +419,6 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
 }
 
 private extension NSToolbarItem.Identifier {
-    static let install = Self("install")
     static let account = Self("account")
 }
 
