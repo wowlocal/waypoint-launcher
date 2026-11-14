@@ -110,6 +110,8 @@ import Testing
     try vault.save(other, codename: "WTCG")
     try vault.save(newer, codename: "WTCG")
     try vault.save(first, codename: "WoW")
+    #expect(vault.hasToken(account: "111", codename: "WoW"))
+    #expect(!vault.hasToken(account: "222", codename: "WoW"))
     #expect(vault.token(account: "111", codename: "WTCG") == newer)
     #expect(vault.token(account: "111", codename: "WoW") == first)
     #expect(vault.token(account: "222", codename: "WTCG") == other)
@@ -118,6 +120,7 @@ import Testing
     #expect(vault.token(account: "111", codename: "WTCG") == nil)
     #expect(vault.token(account: "111", codename: "WoW") == first)
     vault.removeAll(account: "111")
+    #expect(!vault.hasToken(account: "111", codename: "WoW"))
     #expect(vault.token(account: "111", codename: "WoW") == nil)
     #expect(vault.token(account: "222", codename: "WTCG") == other)
 }
