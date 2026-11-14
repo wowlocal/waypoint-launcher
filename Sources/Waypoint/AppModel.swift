@@ -147,7 +147,115 @@ final class AppModel {
     private var isFindingWoWAccounts = false
     private var profileFetches: Set<String> = []
 
-    private let library = GameLibrary()
+    /// Where games are found. Its remembered locations (File ▸ Locate
+    /// Installed Games) are `locatedStore`'s, as last scanned off the main
+    /// thread: the main thread doesn't read their records or mount drives.
+    /// Like any other game's, a located game's app is looked up by a scan
+    /// on the main thread (`rescan`).
+    @ObservationIgnored private var library = GameLibrary()
+    @ObservationIgnored private let locatedStore = LocatedGames.Store()
+    /// Goes up when a location is remembered or forgotten: a scan of the
+    /// locations begun before then is out of date.
+    @ObservationIgnored private var locationsRevision = 0
+    private(set) var isLocatingGames = false
+
+    /// File ▸ Locate Installed Games: lists games already on disk (on
+    /// another drive, say) without moving or downloading anything, and
+    /// remembers where they are. Asks in sheets on `window`.
+    func locateInstalledGames(in window: NSWindow) async {
+        guard !isLocatingGames else { return }
+        isLocatingGames = true
+        defer { isLocatingGames = false }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true
+        panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false
+        panel.canCreateDirectories = false
+        panel.prompt = "Locate"
+        panel.message = "Choose a game’s folder, or a folder of games. Nothing is moved or downloaded."
+        guard await panel.beginSheetModal(for: window) == .OK, let selection = panel.url else { return }
+        var found = await Task.detached(priority: .userInitiated) { LocatedGames.locate(at: selection) }.value
+        guard !found.isEmpty else {
+            showAlert("No installed games found", "Choose the game’s folder (for World of Warcraft, the one with the Data folder), or a folder of games.", in: window)
+            return
+        }
+        let imports = found.flatMap(\.installs)
+        let keys = Set(imports.map(\.key))
+        let folders = Set(imports.map { Self.folderKey($0.installPath) })
+        guard !downloads.values.contains(where: { job in
+                  guard job.state != .completed, let install = job.request?.install else { return false }
+                  return keys.contains(install.key) || folders.contains(Self.folderKey(install.installPath))
+              }),
+              !keys.contains(where: { isBusy(uid: $0) || running.contains($0) }),
+              !games.contains(where: { folders.contains(Self.folderKey($0.install.installPath)) && (isBusy($0) || running.contains($0.id)) }) else {
+            showAlert("This game is in use", "Quit the game, and finish or cancel its download, then try again.", in: window)
+            return
+        }
+        // Another copy already in the library stays the one listed.
+        var kept: [Game] = []
+        for index in found.indices {
+            for install in found[index].installs {
+                // A copy on disk; one on a drive that isn't connected gives way.
+                guard let other = discoveredGames.first(where: { $0.id == install.key }),
+                      Self.folderKey(other.install.installPath) != Self.folderKey(install.installPath) else { continue }
+                found[index].removedKeys.append(install.key)
+                kept.append(other)
+            }
+        }
+        found.removeAll { $0.listedInstalls.isEmpty }
+        let listed = Set(games.map(\.id))
+        if !found.isEmpty {
+            locatedStore.add(found)
+            locationsChanged()
+        }
+        Log.notice(.library, "located", nil, ["games": found.flatMap(\.listedInstalls).map(\.key).joined(separator: ","),
+                                              "kept": kept.map(\.id).joined(separator: ",")])
+        if !kept.isEmpty {
+            let names = ListFormatter.localizedString(byJoining: kept.map(\.displayName))
+            let copy = kept.count == 1
+                ? "the copy in “\((kept[0].install.installPath as NSString).abbreviatingWithTildeInPath)”" : "the copies it has"
+            showAlert("\(names) \(kept.count == 1 ? "is" : "are") already in your library", "Waypoint keeps using \(copy).", in: window)
+        } else if Set(games.map(\.id)) == listed {
+            // Nothing new to see (Battle.net already knew them): say it worked.
+            let keys = Set(found.flatMap(\.listedInstalls).map(\.key))
+            let names = discoveredGames.filter { keys.contains($0.id) }.map(\.displayName)
+            showAlert(names.isEmpty ? "Your games are in your library"
+                      : "\(ListFormatter.localizedString(byJoining: names)) \(names.count == 1 ? "is" : "are") in your library", nil, in: window)
+        }
+    }
+
+    func canRemoveFromLibrary(_ game: Game) -> Bool {
+        game.locationID != nil && downloads[game.id] == nil && !isBusy(game) && !isRunning(game)
+    }
+
+    /// Forgets a game listed from a remembered location (one whose drive
+    /// isn't connected, or a folder located by mistake). Its files stay.
+    func removeFromLibrary(_ game: Game) {
+        guard canRemoveFromLibrary(game), let id = game.locationID else { return }
+        Log.notice(.library, "removed_from_library", nil, ["uid": game.id, "offline": game.isOffline])
+        locatedStore.remove(key: game.install.key, from: id)
+        // Waypoint's own record of it too, should it have updated the game.
+        // Battle.net's record, if it has one, is Battle.net's.
+        if game.isOffline { try? library.stateStore.remove(game.install) }
+        updates.removeValue(forKey: game.id)
+        locationsChanged()
+    }
+
+    /// The remembered locations changed here: the library takes them as
+    /// they are now. Those already scanned keep what the scan found.
+    private func locationsChanged() {
+        locationsRevision += 1
+        library.located = LocatedGames.Scan(locations: locatedStore.locations(), disconnected: library.located.disconnected)
+        rescan()
+    }
+
+    private func showAlert(_ message: String, _ information: String?, in window: NSWindow) {
+        let alert = NSAlert()
+        alert.messageText = message
+        if let information { alert.informativeText = information }
+        alert.beginSheetModal(for: window)
+    }
+
     private let loginWindow = LoginWindow()
     /// Per bundle id, like the web sessions, so test builds never share
     /// keychain items with the installed app.
@@ -193,11 +301,21 @@ final class AppModel {
         }
         // Reads the logs only while that one-time import is still to do.
         downloadQueue.recoverLegacyInstalls(events: Diagnostics.shared.events())
+        // Until they're scanned (when Waypoint becomes active): which drives
+        // are there, from the list of mounted volumes alone.
+        library.located = .unscanned(locatedStore.locations())
         reload()
         let center = NSWorkspace.shared.notificationCenter
         for name in [NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didTerminateApplicationNotification] {
             observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
                 MainActor.assumeIsolated { self?.refreshRunning() }
+            })
+        }
+        // A drive connected or ejected: its remembered games come online or
+        // go offline.
+        for name in [NSWorkspace.didMountNotification, NSWorkspace.didUnmountNotification, NSWorkspace.didRenameVolumeNotification] {
+            observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.scanOffMainThreadOnce() }
             })
         }
         // Coming back to Waypoint picks up games installed or removed
@@ -301,17 +419,33 @@ final class AppModel {
             scansAgain = true
             return
         }
-        let library = library, scans = scansShown, running = runningShown
+        let library = library, scans = scansShown, running = runningShown, revision = locationsRevision
         scanOffMainThread = Task.detached(priority: .userInitiated) { [weak self] in
+            var library = library
+            // The remembered locations are read here only, never on the main thread.
+            library.located = LocatedGames.scan(library.located.locations)
             let scan = LibraryScan(library)
-            await self?.scannedOffMainThread(scan, afterScans: scans, running: running)
+            await self?.scannedOffMainThread(scan, located: library.located, revision: revision, afterScans: scans, running: running)
         }
     }
 
-    private func scannedOffMainThread(_ scan: LibraryScan, afterScans scans: Int, running: Int) {
+    private func scannedOffMainThread(_ scan: LibraryScan, located: LocatedGames.Scan, revision: Int,
+                                      afterScans scans: Int, running: Int) {
         scanOffMainThread = nil
+        let locatedChanged = revision == locationsRevision && located != library.located
+        // A location was remembered or forgotten meanwhile: what this scan
+        // found out about the others (a drive ejected) is read again.
+        if revision != locationsRevision { scansAgain = true }
+        if locatedChanged {
+            library.located = located
+            // Where a renamed drive's folder is now, and the games there.
+            locatedStore.update(with: located.locations)
+        }
         if scans == scansShown {
             show(scan.games, processes: running == runningShown ? scan.processes : nil)
+        } else if locatedChanged {
+            // What was shown meanwhile went by the locations as they were.
+            rescan()
         }
         if scansAgain {
             scansAgain = false
@@ -334,7 +468,9 @@ final class AppModel {
         // Battle.net's records outlive a game whose files are gone (moved to
         // the Trash, or uninstalled here): only what's on disk is listed.
         discoveredGames = found.filter(\.isInstalled)
-        var all = discoveredGames
+        // Except those on a remembered drive that isn't connected: they stay,
+        // and aren't offered for download again.
+        var all = found.filter(\.isListed)
         if let pendingHeroesInstall {
             all.removeAll { $0.id == pendingHeroesInstall.key }
             all.append(GameCatalog.game(for: pendingHeroesInstall))
@@ -356,7 +492,8 @@ final class AppModel {
         }
         refreshRunning(processes: processes)
         Log.info(.library, "scanned", nil, ["games": games.map { "\($0.install.uid)@\($0.install.version ?? "?")" }.joined(separator: ","),
-                                            "missing": found.filter { !$0.isInstalled }.map(\.id).joined(separator: ",")])
+                                            "missing": found.filter { !$0.isInstalled && !$0.isOffline }.map(\.id).joined(separator: ","),
+                                            "offline": found.filter(\.isOffline).map(\.id).joined(separator: ",")])
     }
 
     func heroesEdition(_ platform: InstallPlatform) -> Game? {
@@ -709,7 +846,8 @@ final class AppModel {
     }
 
     func canResumeDownload(uid: String) -> Bool {
-        !isPreparingToQuit && downloads[uid]?.canResume == true && !running.contains(uid) && !isUninstalling(uid: uid)
+        !isPreparingToQuit && downloads[uid]?.canResume == true && !running.contains(uid) && !isUninstalling(uid: uid) &&
+            !games.contains { $0.id == uid && $0.isOffline }
     }
 
     func resumeDownload(uid: String) async {
@@ -816,6 +954,9 @@ final class AppModel {
         phases.removeValue(forKey: game.id)
         updates.removeValue(forKey: game.id)
         reload()
+        // A remembered location's record of it goes too, before its drive
+        // can be ejected and the game kept as offline.
+        if library.located.locations.contains(where: { $0.contains(game.install.installPath) }) { scanOffMainThreadOnce() }
         if let cleanupError {
             let alert = NSAlert()
             alert.messageText = "\(game.displayName) is uninstalled, but the space it used in “\(plan.root.lastPathComponent)” isn’t free yet"

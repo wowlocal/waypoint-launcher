@@ -15,12 +15,22 @@ public struct Game: Identifiable, Equatable, Sendable {
     /// The `.app` bundle to run, if we could find it.
     public var appURL: URL?
     public var architectures: Set<Architecture>
+    /// On a remembered location's drive that isn't connected: it stays in
+    /// the library, but can't be played, updated or verified.
+    public var isOffline = false
+    /// The remembered location (File ▸ Locate Installed Games) it is listed
+    /// from, if any: Remove from Library forgets it there.
+    public var locationID: String?
 
     public enum Architecture: String, Sendable {
         case arm64, x86_64
     }
 
     public var runsNatively: Bool { architectures.contains(.arm64) }
+
+    /// Whether the library lists it: it's on disk, or on a remembered drive
+    /// that isn't connected. Either way it isn't offered for download again.
+    public var isListed: Bool { isInstalled || isOffline }
 
     public var isInstalled: Bool {
         if install.platform == .windows {
@@ -106,35 +116,30 @@ public enum GameCatalog {
     }
 
     public static func game(for install: ProductInstall, fileManager: FileManager = .default) -> Game {
+        let name = displayName(for: install)
         if install.platform == .windows {
-            return Game(install: install, family: .other,
-                        displayName: WindowsTitle.forInstall(install)?.displayName ?? install.productCode,
-                        appURL: nil, architectures: [.x86_64])
+            return Game(install: install, family: .other, displayName: name, appURL: nil, architectures: [.x86_64])
         }
         let family = family(for: install.productCode)
         let root = URL(fileURLWithPath: install.installPath, isDirectory: true)
         var appURL: URL?
-        var name: String
 
         switch family {
         case .hearthstone:
             appURL = existing(root.appendingPathComponent("Hearthstone.app"), fileManager)
-            name = install.productCode == "hsb" ? "Hearthstone" : "Hearthstone (\(install.productCode))"
         case .worldOfWarcraft:
             let folder = wowFolder(for: install.productCode)
             appURL = firstApp(in: root.appendingPathComponent(folder), prefix: "World of Warcraft", fileManager)
-            name = wowFlavorNames[install.productCode] ?? install.productCode
         case .other:
             appURL = ["", "_retail_", "_retail_/arm64", "_retail_/x86_64"].lazy
                 .compactMap { firstApp(in: root.appendingPathComponent($0), prefix: nil, fileManager) }
                 .first
-            name = otherNames[install.productCode] ?? install.productCode
         }
 
         // Known products: the exact app the product config names.
-        if let product = InstallableProduct.forProduct(install.productCode), product.supportedPlatforms.contains(.macOS) {
-            name = product.displayName
-            if let exact = existing(root.appendingPathComponent(product.appPath), fileManager) { appURL = exact }
+        if let product = InstallableProduct.forProduct(install.productCode), product.supportedPlatforms.contains(.macOS),
+           let exact = existing(root.appendingPathComponent(product.appPath), fileManager) {
+            appURL = exact
         }
 
         return Game(
@@ -144,6 +149,24 @@ public enum GameCatalog {
             appURL: appURL,
             architectures: appURL.map(architectures(of:)) ?? []
         )
+    }
+
+    /// A game whose drive isn't connected, made without touching any disk.
+    public static func offlineGame(for install: ProductInstall) -> Game {
+        Game(install: install, family: install.platform == .windows ? .other : family(for: install.productCode),
+             displayName: displayName(for: install), appURL: nil, architectures: [], isOffline: true)
+    }
+
+    static func displayName(for install: ProductInstall) -> String {
+        if install.platform == .windows { return WindowsTitle.forInstall(install)?.displayName ?? install.productCode }
+        if let product = InstallableProduct.forProduct(install.productCode), product.supportedPlatforms.contains(.macOS) {
+            return product.displayName
+        }
+        switch family(for: install.productCode) {
+        case .hearthstone: return install.productCode == "hsb" ? "Hearthstone" : "Hearthstone (\(install.productCode))"
+        case .worldOfWarcraft: return wowFlavorNames[install.productCode] ?? install.productCode
+        case .other: return otherNames[install.productCode] ?? install.productCode
+        }
     }
 
     public static func architectures(of appURL: URL) -> Set<Game.Architecture> {
@@ -190,6 +213,10 @@ public struct GameLibrary: @unchecked Sendable {
     private var explicitSearchRoots: [URL]?
     public var fileManager: FileManager
     public var stateStore: InstallStateStore
+    /// Folders chosen with File ▸ Locate Installed Games, as last scanned
+    /// (`LocatedGames.scan`, off the main thread): their games only fill in
+    /// what the other sources don't have, or whose files are gone.
+    public var located = LocatedGames.Scan()
 
     /// Every supported game's default folder: Battle.net can forget a game
     /// (it lost HotS once), and Waypoint should still find it there rather
@@ -212,44 +239,88 @@ public struct GameLibrary: @unchecked Sendable {
         self.stateStore = stateStore
     }
 
-    public func installs() -> [ProductInstall] {
+    public func installs() -> [ProductInstall] { entries().map(\.install) }
+
+    public func games() -> [Game] {
+        entries().map { entry in
+            var game = entry.offline ? GameCatalog.offlineGame(for: entry.install)
+                : GameCatalog.game(for: entry.install, fileManager: fileManager)
+            game.locationID = entry.location
+            return game
+        }
+    }
+
+    /// Each install found, with the remembered location it is listed from
+    /// (or, offline, the one whose drive it is on).
+    private func entries() -> [(install: ProductInstall, location: String?, offline: Bool)] {
         var byUID: [String: ProductInstall] = [:]
         var order: [String] = []
-        func isOnDisk(_ install: ProductInstall) -> Bool {
-            GameCatalog.game(for: install, fileManager: fileManager).isInstalled
+        var locations: [String: String] = [:]
+        let offline = located.offline
+        // What was removed from the library there isn't kept as offline.
+        func offlineLocation(_ install: ProductInstall) -> String? {
+            offline.first { $0.contains(install.installPath) && !$0.removedKeys.contains(install.key) }?.id
         }
-        func add(_ install: ProductInstall) {
+        // A game on a drive that isn't connected isn't looked for there.
+        func isOnDisk(_ install: ProductInstall) -> Bool {
+            offlineLocation(install) == nil && GameCatalog.game(for: install, fileManager: fileManager).isInstalled
+        }
+        func add(_ install: ProductInstall, location: String? = nil) {
             guard let earlier = byUID[install.key] else {
                 order.append(install.key)
                 byUID[install.key] = install
+                locations[install.key] = location
                 return
             }
             // Later sources only fill gaps; the Agent database is authoritative,
             // unless its copy's files are gone (uninstalled in Waypoint, or
             // moved to the Trash) and this one's are there.
-            if !isOnDisk(earlier), isOnDisk(install) { byUID[install.key] = install }
+            if !isOnDisk(earlier), isOnDisk(install) {
+                byUID[install.key] = install
+                locations[install.key] = location
+            }
         }
 
         if let installs = try? ProductDB.loadAgentDatabase(at: agentDatabase) {
-            installs.forEach(add)
+            installs.forEach { add($0) }
         }
         for root in searchRoots {
             let file = root.appendingPathComponent(".product.db")
             if let data = try? Data(contentsOf: file),
                let installs = try? ProductDB.parseFolderInstalls(data) {
-                installs.forEach(add)
+                installs.forEach { add($0) }
             }
         }
-        // Games Waypoint installed, as long as their folder is still there.
+        // Games Waypoint installed, as long as their folder is still there
+        // (or on a remembered drive that isn't connected).
         for install in stateStore.standaloneInstalls()
-        where fileManager.fileExists(atPath: install.installPath) {
+        where offlineLocation(install) != nil || fileManager.fileExists(atPath: install.installPath) {
             add(install)
         }
-        return order.compactMap { byUID[$0] }.map(stateStore.apply(to:))
-    }
-
-    public func games() -> [Game] {
-        installs().map { GameCatalog.game(for: $0, fileManager: fileManager) }
+        // Located folders come last: a backup copy found there never
+        // replaces the real install, nor a richer record of the same folder.
+        for location in located.connected {
+            for install in location.listedInstalls { add(install, location: location.id) }
+        }
+        // A drive that isn't connected: its games stay listed as they were
+        // last found, unless a copy elsewhere is on disk.
+        for location in offline {
+            for install in location.listedInstalls {
+                if let earlier = byUID[install.key] {
+                    // A richer record of the same folder (Battle.net's) stays.
+                    if isOnDisk(earlier) || offlineLocation(earlier) != nil { continue }
+                } else {
+                    order.append(install.key)
+                }
+                byUID[install.key] = install
+                locations[install.key] = location.id
+            }
+        }
+        return order.compactMap { key in
+            guard let install = byUID[key] else { return nil }
+            let offlineID = offlineLocation(install)
+            return (stateStore.apply(to: install), locations[key] ?? offlineID, offlineID != nil)
+        }
     }
 }
 
