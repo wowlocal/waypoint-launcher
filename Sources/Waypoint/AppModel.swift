@@ -143,7 +143,48 @@ final class AppModel {
     }
     private var profileFetches: Set<String> = []
 
-    private let library = GameLibrary()
+    private var library: GameLibrary {
+        var library = GameLibrary()
+        library.locatedRoots = (UserDefaults.standard.stringArray(forKey: "locatedGameFolders") ?? []).map { URL(fileURLWithPath: $0, isDirectory: true) }
+        return library
+    }
+    private var isLocatingGames = false
+
+    func locateInstalledGames() async {
+        guard !isLocatingGames else { return }
+        isLocatingGames = true
+        defer { isLocatingGames = false }
+        let panel = NSOpenPanel()
+        panel.canChooseDirectories = true; panel.canChooseFiles = false
+        panel.allowsMultipleSelection = false; panel.canCreateDirectories = false
+        panel.prompt = "Locate"
+        panel.message = "Choose an installed game’s folder or a folder containing your games. Files will not be moved or downloaded."
+        guard panel.runModal() == .OK, let selection = panel.url else { return }
+        let roots = await Task.detached(priority: .userInitiated) { LocatedGames.roots(at: selection) }.value
+        guard !roots.isEmpty else {
+            let alert = NSAlert(); alert.messageText = "No supported installed games found"
+            alert.informativeText = "Choose the game’s main folder (for WoW, the folder containing Data and the edition folders), or its parent games folder. Existing Battle.net build records and game files are required. Check that your drive is connected and accessible."
+            alert.runModal(); return
+        }
+        let imports = roots.flatMap { LocatedGames.installs(at: $0) }
+        let keys = Set(imports.map(\.key))
+        let folders = Set(imports.map { Self.folderKey($0.installPath) })
+        guard !downloads.values.contains(where: { job in
+                  guard job.state != .completed, let install = job.request?.install else { return false }
+                  return keys.contains(install.key) || folders.contains(Self.folderKey(install.installPath))
+              }),
+              !keys.contains(where: { isBusy(uid: $0) || running.contains($0) }),
+              !games.contains(where: { folders.contains(Self.folderKey($0.install.installPath)) && (isBusy($0) || running.contains($0.id)) }) else {
+            let alert = NSAlert(); alert.messageText = "This game is in use"
+            alert.informativeText = "Close the game and finish or cancel its download before changing its installation location."
+            alert.runModal(); return
+        }
+        var paths = roots.map(\.path)
+        paths += (UserDefaults.standard.stringArray(forKey: "locatedGameFolders") ?? []).filter { !paths.contains($0) }
+        UserDefaults.standard.set(paths, forKey: "locatedGameFolders")
+        reload()
+    }
+
     private let loginWindow = LoginWindow()
     /// Per bundle id, like the web sessions, so test builds never share
     /// keychain items with the installed app.

@@ -180,6 +180,7 @@ public enum GameCatalog {
 /// it may be used from any thread: the one member that isn't Sendable is the
 /// file manager, and `FileManager.default` is safe to share.
 public struct GameLibrary: @unchecked Sendable {
+    public var locatedRoots: [URL] = []
     public var agentDatabase: URL
     /// Folders to scan for a `.product.db`, so games keep working after the
     /// Battle.net app is removed.
@@ -230,6 +231,8 @@ public struct GameLibrary: @unchecked Sendable {
             if !isOnDisk(earlier), isOnDisk(install) { byUID[install.key] = install }
         }
 
+        // Explicitly chosen locations take precedence over stale Agent paths.
+        for root in locatedRoots { LocatedGames.installs(at: root, fileManager: fileManager).forEach(add) }
         if let installs = try? ProductDB.loadAgentDatabase(at: agentDatabase) {
             installs.forEach(add)
         }

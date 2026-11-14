@@ -29,6 +29,7 @@ enum MainMenu {
         app.addItem(withTitle: "Quit Waypoint", action: #selector(NSApplication.terminate(_:)), keyEquivalent: "q")
 
         let file = NSMenu(title: "File")
+        file.addItem(withTitle: "Locate Installed Games…", action: #selector(AppDelegate.locateInstalledGames(_:)), keyEquivalent: "o")
         file.addItem(withTitle: "Rescan Games", action: #selector(AppDelegate.rescan(_:)), keyEquivalent: "r")
         file.addItem(.separator())
         file.addItem(withTitle: "Close", action: #selector(NSWindow.performClose(_:)), keyEquivalent: "w")

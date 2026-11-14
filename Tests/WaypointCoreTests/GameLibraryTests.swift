@@ -130,3 +130,54 @@ private func makeLibraryApp(at url: URL) throws {
     #expect(game.finderItem.standardizedFileURL == root.standardizedFileURL)
     #expect(game.addOnsFolder == nil)
 }
+
+@Test func locatedGamesRebaseMovedMetadataAndRememberExternalRoot() throws {
+    let fm = FileManager.default
+    let sandbox = fm.temporaryDirectory.appendingPathComponent("waypoint-locate-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: sandbox) }
+    let root = sandbox.appendingPathComponent("External Games/World of Warcraft").resolvingSymlinksInPath()
+    try makeLibraryApp(at: root.appendingPathComponent("_retail_/World of Warcraft.app"))
+    let stale = ProductInstall(uid: "wow", productCode: "wow", installPath: "/Volumes/Old Mac/WoW", region: "eu")
+    let metadata = folderDatabase([stale])
+    try metadata.write(to: root.appendingPathComponent(".product.db"))
+    let roots = LocatedGames.roots(at: root.deletingLastPathComponent())
+    #expect(roots.map { $0.resolvingSymlinksInPath().path } == [root.resolvingSymlinksInPath().path])
+    #expect(LocatedGames.roots(at: root.appendingPathComponent("_retail_")).map { $0.resolvingSymlinksInPath().path } == [root.resolvingSymlinksInPath().path])
+    var library = GameLibrary(agentDatabase: sandbox.appendingPathComponent("missing"), searchRoots: [],
+        stateStore: InstallStateStore(file: sandbox.appendingPathComponent("state.json")))
+    library.locatedRoots = roots
+    #expect(library.games().count == 1)
+    #expect(library.games().first.map { URL(fileURLWithPath: $0.install.installPath).resolvingSymlinksInPath().path } == root.resolvingSymlinksInPath().path)
+    #expect(library.games().first?.install.region == "eu")
+    #expect(try Data(contentsOf: root.appendingPathComponent(".product.db")) == metadata)
+    try fm.moveItem(at: root, to: sandbox.appendingPathComponent("Disconnected"))
+    #expect(library.games().isEmpty)
+    try fm.moveItem(at: sandbox.appendingPathComponent("Disconnected"), to: root)
+    #expect(library.games().count == 1)
+}
+
+@Test func locatedGamesRecoverActiveEditionsAndKeepPlatformsSeparate() throws {
+    let fm = FileManager.default
+    let sandbox = fm.temporaryDirectory.appendingPathComponent("waypoint-locate-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: sandbox) }
+    try makeLibraryApp(at: sandbox.appendingPathComponent("_retail_/World of Warcraft.app"))
+    try makeLibraryApp(at: sandbox.appendingPathComponent("_classic_era_/World of Warcraft Classic.app"))
+    let stale = ProductInstall(uid: "wow", productCode: "wow", installPath: "/old", region: "eu", version: "0.0.1", buildConfig: String(repeating: "d", count: 32))
+    try folderDatabase([stale]).write(to: sandbox.appendingPathComponent(".product.db"))
+    let text = "Branch!STRING:0|Active!DEC:1|Product!STRING:0|Tags!STRING:0|Version!STRING:0|Build Key!HEX:16\neu|1|wow|OSX enUS text?|12.0.0|\(String(repeating: "a", count: 32))\neu|1|wow_classic_era|OSX enUS text?|1.0.0|\(String(repeating: "b", count: 32))\neu|0|wow_classic|OSX enUS text?|2.0.0|\(String(repeating: "c", count: 32))\n"
+    try text.write(to: sandbox.appendingPathComponent(".build.info"), atomically: true, encoding: .utf8)
+    #expect(Set(LocatedGames.installs(at: sandbox).map(\.uid)) == ["wow", "wow_classic_era"])
+    let retail = LocatedGames.installs(at: sandbox).first { $0.uid == "wow" }
+    #expect(retail?.version == "12.0.0")
+    #expect(retail?.buildConfig == String(repeating: "a", count: 32))
+    #expect(retail?.region == "eu")
+    #expect(LocatedGames.installs(at: sandbox).first { $0.uid == "wow_classic_era" }?.region == "eu")
+    try fm.removeItem(at: sandbox.appendingPathComponent(".product.db"))
+    let conflicting = text + "us|1|wow|OSX enUS text?|13.0.0|\(String(repeating: "e", count: 32))\n"
+    try conflicting.write(to: sandbox.appendingPathComponent(".build.info"), atomically: true, encoding: .utf8)
+    #expect(!LocatedGames.installs(at: sandbox).contains { $0.uid == "wow" })
+    try text.replacingOccurrences(of: "OSX", with: "Windows").write(to: sandbox.appendingPathComponent(".build.info"), atomically: true, encoding: .utf8)
+    #expect(LocatedGames.installs(at: sandbox).isEmpty)
+    try Data([0xff]).write(to: sandbox.appendingPathComponent(".product.db"))
+    #expect(LocatedGames.installs(at: sandbox).isEmpty)
+}
