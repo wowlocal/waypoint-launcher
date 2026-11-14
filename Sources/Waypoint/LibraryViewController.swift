@@ -3,7 +3,7 @@ import WaypointCore
 
 /// The library window: installed games with Play and Update, games being
 /// installed, the Battle.net account games launch as (in the subtitle; a
-/// toolbar menu switches it), a + toolbar menu to install more, and
+/// toolbar menu switches it), Available Games to install more, and
 /// Waypoint's own update status in a banner when it has something to say.
 /// The list runs under the toolbar, as the system's own lists do.
 @MainActor
@@ -89,8 +89,6 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
     private let updateText = NSTextField.label(.callout, color: .secondaryLabelColor)
     private let restartButton = NSButton(title: "Restart to Update", target: nil,
                                          action: #selector(AppDelegate.restartToUpdate(_:)))
-    private let installMenu = NSMenu()
-    private var installItem: NSMenuToolbarItem?
     private let accountMenu = NSMenu()
     private var accountItem: NSMenuToolbarItem?
     private var subtitle = ""
@@ -241,16 +239,14 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
         }
         show(rows)
         // Menu items belong to one menu, so each menu gets its own.
-        let installMenuItems = { [weak self] in
-            installChoices.map { product in ActionItem(product.displayName) { self?.install(product) } }
+        let installMenuItems = { [weak self, model = self.model] in
+            installChoices.map { product in ActionItem(product.installationDisplayName(platform: model.defaultPlatform(for: product))) { self?.install(product) } }
         }
 
         // NSMenuToolbarItem shows its menu as a pull-down button does: the
         // first item is the button's own and never appears. Without a
         // placeholder, a signed-out account menu's lone "Sign In…" did
         // nothing, and the account list lost its first row.
-        installMenu.items = installChoices.isEmpty ? [] : [.pullDownPlaceholder(), .sectionHeader(title: "Install a Game")] + installMenuItems()
-        installItem?.isEnabled = !installChoices.isEmpty
         // The same list under the empty state's button, whose title is the
         // pull-down's own first item.
         if rows.isEmpty {
@@ -387,7 +383,7 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
             }
         case .available(let product, _, let picture, let icon):
             let cell = view as? AvailableGameCell
-            cell?.configure(product, picture: picture, icon: icon)
+            cell?.configure(product, platform: model.defaultPlatform(for: product), picture: picture, icon: icon)
             cell?.install = { [weak self] in self?.install(product) }
         }
     }
@@ -411,25 +407,15 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
             accountItem = item
             return item
         }
-        guard identifier == .install else { return nil }
-        let item = NSMenuToolbarItem(itemIdentifier: identifier)
-        item.image = .symbol("plus")
-        item.label = "Install"
-        item.toolTip = "Install a game"
-        item.showsIndicator = false
-        item.autovalidates = false
-        item.menu = installMenu
-        item.isEnabled = !installMenu.items.isEmpty
-        installItem = item
-        return item
+        return nil
     }
 
     func toolbarDefaultItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.flexibleSpace, .account, .install]
+        [.flexibleSpace, .account]
     }
 
     func toolbarAllowedItemIdentifiers(_ toolbar: NSToolbar) -> [NSToolbarItem.Identifier] {
-        [.flexibleSpace, .account, .install]
+        [.flexibleSpace, .account]
     }
 
     // MARK: NSTableViewDataSource, NSTableViewDelegate
@@ -451,7 +437,6 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
 }
 
 private extension NSToolbarItem.Identifier {
-    static let install = Self("install")
     static let account = Self("account")
 }
 

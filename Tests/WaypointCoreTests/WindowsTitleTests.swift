@@ -145,3 +145,17 @@ private func windowsFixture(_ title: WindowsTitle) throws -> Data {
     try fm.removeItem(at: resources)
     #expect(try Data(contentsOf: installed) == bytes)
 }
+
+@Test func installationNamesDescribeTheSelectedPlatformWithoutChangingIdentity() {
+    for title in WindowsTitle.allCases {
+        let product = title.product
+        #expect(product.installationDisplayName(platform: .macOS) == product.displayName)
+        let label = product.installationDisplayName(platform: .windows)
+        #expect(label.contains(title.compatibilityLabel))
+        #expect(label.contains("Preview") == !title.isQualified)
+        #expect(product.uid == title.uid)
+    }
+    let wow = InstallableProduct.native.first { $0.productCode == "wow" }!
+    #expect(wow.installationDisplayName(platform: .macOS) == wow.displayName)
+    #expect(wow.installationDisplayName(platform: .windows) == wow.displayName)
+}

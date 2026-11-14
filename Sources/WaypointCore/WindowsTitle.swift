@@ -31,6 +31,10 @@ public enum WindowsTitle: String, CaseIterable, Sendable {
     }
     public var folderName: String { self == .diabloII ? "Diablo II Resurrected" : displayName }
     public var backend: Backend { self == .heroes ? .dxmt : .d3dMetal }
+    /// User-facing compatibility layer; these games are not macOS native.
+    public var compatibilityLabel: String {
+        backend == .dxmt ? "DXMT/Wine" : "D3DMetal/Wine"
+    }
     public var executablePath: String {
         switch self {
         case .heroes: "Support64/HeroesSwitcher_x64.exe"

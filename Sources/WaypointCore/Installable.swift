@@ -6,6 +6,15 @@ import Foundation
 /// time, so this only pins down what doesn't change between builds.
 public struct InstallableProduct: Sendable, Identifiable, Equatable, Codable {
     public var id: String { uid }
+
+    /// Presentation only: never changes installation identity or folder names.
+    public func installationDisplayName(platform: InstallPlatform) -> String {
+        guard platform == .windows, let title = WindowsTitle(rawValue: productCode),
+              title.uid == uid else { return displayName }
+        let preview = title.isQualified ? "" : " · Preview"
+        return "\(displayName) (\(title.compatibilityLabel)\(preview))"
+    }
+
     /// Battle.net's install uid; also what `-uid` passes to the game. Not
     /// always the product code: Battle.net's own product.db and logs say
     /// `heroes`, `diablo3` and `wow_classic_anniversary`.
