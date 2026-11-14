@@ -1,9 +1,16 @@
 import AppKit
 import WaypointCore
 
-/// Optional Safari handoff. No credentials are read from browser storage or clipboard.
+/// Signs in to WoW in the user's own browser, for its password manager or a
+/// passkey. Blizzard's page ends on `http://localhost:0/?ST=…`, which no
+/// browser can open; the user pastes that address here. Nothing is read from
+/// the browser or the pasteboard on its own.
+///
+/// A pasted address is only a claim: it's used once the game service signed
+/// in with its ticket and said whose it is.
 @MainActor
-final class BrowserReturnSheet: NSObject, NSWindowDelegate {
+final class BrowserReturnSheet: NSObject, NSWindowDelegate, NSTextFieldDelegate {
+    /// Who the game service said the ticket belongs to, once it did.
     private(set) var verifiedProfile: NativeAccountProfile?
     private var window: NSWindow?
     private weak var parent: NSWindow?
@@ -11,96 +18,159 @@ final class BrowserReturnSheet: NSObject, NSWindowDelegate {
     private let field = NSSecureTextField()
     private let status = NSTextField(wrappingLabelWithString: "")
     private let spinner = NSProgressIndicator()
-    private var useButton = NSButton()
+    private var signInButton = NSButton()
     private var openButton = NSButton()
     private var url: URL?
+    private var expectedOwner: String?
     private var task: Task<Void, Never>?
 
-    func run(on parent: NSWindow, url: URL) async -> LoginToken? {
-        self.parent = parent; self.url = url; verifiedProfile = nil
+    /// `expectedOwner`: the account being signed in to again, if any; an
+    /// address for another one is refused.
+    func run(on parent: NSWindow, url: URL, expectedOwner: String? = nil) async -> LoginToken? {
+        self.parent = parent
+        self.url = url
+        self.expectedOwner = expectedOwner
+        verifiedProfile = nil
         return await withCheckedContinuation { continuation in
             self.continuation = continuation
-            let panel = NSPanel(contentRect: NSRect(x:0,y:0,width:520,height:430), styleMask:[.titled,.closable],backing:.buffered,defer:false)
-            panel.title = "Sign in using Safari"; panel.isReleasedWhenClosed = false; panel.delegate = self
+            let panel = NSPanel(contentRect: NSRect(x: 0, y: 0, width: 460, height: 300),
+                                styleMask: [.titled], backing: .buffered, defer: false)
+            panel.isReleasedWhenClosed = false
+            panel.delegate = self
             self.window = panel
-            let title = NSTextField(labelWithString:"Use your browser’s password manager")
-            title.font = .systemFont(ofSize:17,weight:.semibold)
-            let instructions = NSTextField(wrappingLabelWithString:"Sign in on Blizzard’s page in Safari. When Safari reaches its localhost error page, press ⌘L then ⌘C. Paste that return address below—it contains your game ticket, so keep it private.")
+
+            let title = NSTextField(labelWithString: "Sign In with Browser")
+            title.font = .boldSystemFont(ofSize: NSFont.systemFontSize)
+            let instructions = NSTextField(wrappingLabelWithString: "Sign in on Blizzard’s page in your browser. When the browser shows a page that can’t be reached, copy the whole address from its address bar and paste it here. Keep it private: it signs in as you. A Private Window keeps it out of the browser’s history.")
             instructions.textColor = .secondaryLabelColor
-            openButton = NSButton(title:"Open Battle.net in Safari",target:self,action:#selector(openBrowser))
-            field.placeholderString = "Paste the complete browser return address"
-            field.setAccessibilityLabel("Private browser return address")
-            useButton = NSButton(title:"Verify and sign in",target:self,action:#selector(useReturn)); useButton.keyEquivalent="\r"
-            let cancel = NSButton(title:"Back",target:self,action:#selector(cancel));cancel.keyEquivalent="\u{1b}"
-            spinner.style = .spinning;spinner.controlSize = .small;spinner.isDisplayedWhenStopped = false
+            openButton = NSButton(title: "Open Browser", target: self, action: #selector(openBrowser))
+            field.placeholderString = "http://localhost:0/?ST=…"
+            field.setAccessibilityLabel("Address from the browser")
+            field.delegate = self
+            signInButton = NSButton(title: "Sign In", target: self, action: #selector(signIn))
+            signInButton.keyEquivalent = "\r"
+            signInButton.isEnabled = false
+            let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancel))
+            cancel.keyEquivalent = "\u{1b}"
+            spinner.style = .spinning
+            spinner.controlSize = .small
+            spinner.isDisplayedWhenStopped = false
             status.textColor = .secondaryLabelColor
-            let progress = NSStackView(views:[spinner,status]);progress.spacing=10
-            let buttons = NSStackView(views:[NSView(),cancel,useButton]);buttons.spacing=10
-            let stack = NSStackView(views:[title,instructions,openButton,field,progress,NSView(),buttons])
-            stack.orientation = .vertical;stack.alignment = .leading;stack.spacing=12;stack.translatesAutoresizingMaskIntoConstraints=false
-            panel.contentView!.addSubview(stack)
+            let progress = NSStackView(views: [spinner, status])
+            progress.spacing = 8
+            let buttons = NSStackView(views: [NSView(), cancel, signInButton])
+            buttons.spacing = 12
+            let stack = NSStackView(views: [title, instructions, openButton, field, progress, buttons])
+            stack.orientation = .vertical
+            stack.alignment = .leading
+            stack.spacing = 12
+            stack.setCustomSpacing(20, after: progress)
+            stack.translatesAutoresizingMaskIntoConstraints = false
+            let content = panel.contentView!
+            content.addSubview(stack)
             NSLayoutConstraint.activate([
-                stack.leadingAnchor.constraint(equalTo:panel.contentView!.leadingAnchor,constant:20),
-                stack.trailingAnchor.constraint(equalTo:panel.contentView!.trailingAnchor,constant:-20),
-                stack.topAnchor.constraint(equalTo:panel.contentView!.topAnchor,constant:20),
-                stack.bottomAnchor.constraint(equalTo:panel.contentView!.bottomAnchor,constant:-20),
-                instructions.widthAnchor.constraint(equalTo:stack.widthAnchor),field.widthAnchor.constraint(equalTo:stack.widthAnchor),
-                progress.widthAnchor.constraint(equalTo:stack.widthAnchor),buttons.widthAnchor.constraint(equalTo:stack.widthAnchor),
+                stack.leadingAnchor.constraint(equalTo: content.leadingAnchor, constant: 20),
+                stack.trailingAnchor.constraint(equalTo: content.trailingAnchor, constant: -20),
+                stack.topAnchor.constraint(equalTo: content.topAnchor, constant: 20),
+                stack.bottomAnchor.constraint(equalTo: content.bottomAnchor, constant: -20),
+                instructions.widthAnchor.constraint(equalTo: stack.widthAnchor),
+                field.widthAnchor.constraint(equalTo: stack.widthAnchor),
+                progress.widthAnchor.constraint(equalTo: stack.widthAnchor),
+                buttons.widthAnchor.constraint(equalTo: stack.widthAnchor),
             ])
             parent.beginSheet(panel)
         }
     }
-    @objc private func openBrowser() {
-        guard let url, let safari = NSWorkspace.shared.urlForApplication(withBundleIdentifier:"com.apple.Safari") else {
-            status.stringValue="Safari couldn’t be opened.";return
-        }
-        NSWorkspace.shared.open([url],withApplicationAt:safari,configuration:NSWorkspace.OpenConfiguration())
+
+    func controlTextDidChange(_ notification: Notification) {
+        signInButton.isEnabled = task == nil && !field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
     }
-    @objc private func useReturn() {
+
+    @objc private func openBrowser() {
+        guard let url else { return }
+        // The default browser: any of them ends on the same unreachable address.
+        if !NSWorkspace.shared.open(url) { status.stringValue = "Your browser couldn’t be opened." }
+    }
+
+    @objc private func signIn() {
         guard task == nil else { return }
-        let text = field.stringValue; field.stringValue = ""
-        guard let token = BrowserLoginReturn.parse(text) else {
-            status.stringValue="Paste the full localhost return address from Safari’s address bar.";return
+        let text = field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard let token = BrowserLoginReturn.parse(text, expectedOwner: expectedOwner) else {
+            status.stringValue = BrowserLoginReturn.parse(text) == nil
+                ? "Paste the whole address from the browser’s address bar."
+                : "That address signs in to a different Battle.net account."
+            return
         }
-        // A separate native authentication session must not disrupt an open client.
-        guard !RunningProcesses.executables().contains(where: { URL(fileURLWithPath:$0.path).lastPathComponent.hasPrefix("World of Warcraft") }) else {
-            status.stringValue="Close World of Warcraft before verifying this sign-in.";return
+        // Verifying signs in to the game service, which an open WoW would notice.
+        guard !WoWAccountDiscovery.isWoWRunning() else {
+            status.stringValue = "Close World of Warcraft, then try again."
+            return
         }
-        useButton.isEnabled=false;openButton.isEnabled=false;spinner.startAnimation(nil)
-        status.stringValue="Verifying your game login with Blizzard…"
-        task=Task { [weak self] in
+        setVerifying(true)
+        task = Task { [weak self] in
             guard let self else { return }
-            defer { self.task=nil;self.useButton.isEnabled=true;self.openButton.isEnabled=true;self.spinner.stopAnimation(nil) }
-            let configuration=URLSessionConfiguration.ephemeral
-            configuration.waitsForConnectivity=false;configuration.timeoutIntervalForRequest=10;configuration.timeoutIntervalForResource=20
-            let session=URLSession(configuration:configuration)
-            defer { session.invalidateAndCancel() }
+            defer {
+                self.task = nil
+                self.setVerifying(false)
+            }
             do {
-                // Cold-start verification: no installed game or Battle.net metadata required.
-                let version=try await VersionService(session:session).latest(product:"wowf",region:.us)
-                guard version.buildID>0, version.region=="us" else { throw WoWAccountDiscovery.Failure.unavailable }
+                // Works without WoW installed: the build is the live one.
+                let build = try await WoWAccountDiscovery.liveBuild(region: .us)
                 guard !Task.isCancelled, self.continuation != nil else { return }
-                guard !RunningProcesses.executables().contains(where: { URL(fileURLWithPath:$0.path).lastPathComponent.hasPrefix("World of Warcraft") }) else {
-                    self.status.stringValue="Close World of Warcraft before verifying this sign-in.";return
-                }
-                let profile = try await WoWAccountDiscovery().profile(token: token, build: UInt64(version.buildID), region: .us)
+                let profile = try await WoWAccountDiscovery().profile(token: token, build: build, region: .us)
                 guard !Task.isCancelled, self.continuation != nil else { return }
+                guard profile.accountID == token.accountID else { throw WoWAccountDiscovery.Failure.identityMismatch }
                 self.verifiedProfile = profile
+                // The address signs in as the user: don't leave it lying around.
+                let pasteboard = NSPasteboard.general
+                if pasteboard.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines) == text {
+                    pasteboard.clearContents()
+                }
                 self.finish(token)
             } catch {
                 guard !Task.isCancelled, self.continuation != nil else { return }
-                self.status.stringValue="Blizzard couldn’t verify this return. Sign in again in Safari and retry. No saved login was replaced."
+                Log.notice(.auth, "browser_return_unverified", nil, ["error": error])
+                self.status.stringValue = switch error as? WoWAccountDiscovery.Failure {
+                case .gameRunning: "Close World of Warcraft, then try again."
+                case .unavailable, .timedOut, nil: "Couldn’t reach Blizzard. Check your connection and try again."
+                default: "Blizzard didn’t accept this address. Sign in again in the browser and paste the new address."
+                }
             }
         }
     }
-    @objc func cancel() { finish(nil) }
-    private func finish(_ token: LoginToken?) {
-        guard let continuation else { return };self.continuation=nil
-        if token == nil { verifiedProfile = nil }
-        task?.cancel();field.stringValue=""
-        if let window { window.delegate=nil;parent?.endSheet(window);window.orderOut(nil) }
-        window=nil;url=nil
-        continuation.resume(returning:token)
+
+    private func setVerifying(_ verifying: Bool) {
+        field.isEnabled = !verifying
+        openButton.isEnabled = !verifying
+        signInButton.isEnabled = !verifying && !field.stringValue.isEmpty
+        if verifying {
+            spinner.startAnimation(nil)
+            status.stringValue = "Checking with Blizzard…"
+        } else {
+            spinner.stopAnimation(nil)
+        }
     }
-    func windowShouldClose(_ sender:NSWindow)->Bool { cancel();return false }
+
+    @objc func cancel() { finish(nil) }
+
+    private func finish(_ token: LoginToken?) {
+        guard let continuation else { return }
+        self.continuation = nil
+        if token == nil { verifiedProfile = nil }
+        task?.cancel()
+        field.stringValue = ""
+        if let window {
+            window.delegate = nil
+            parent?.endSheet(window)
+            window.orderOut(nil)
+        }
+        window = nil
+        url = nil
+        continuation.resume(returning: token)
+    }
+
+    func windowShouldClose(_ sender: NSWindow) -> Bool {
+        cancel()
+        return false
+    }
 }

@@ -1074,14 +1074,15 @@ final class AppModel {
         let session = WebSessionID.fresh()
         Log.notice(.auth, "login_window_shown", nil, ["codename": target.codename, "region": target.region.rawValue, "reason": reason])
         guard let token = await loginWindow.run(BattleNetLogin.url(codename: target.codename, region: target.region),
-                                                title: title, session: session, accountName: accountName)
+                                                title: title, session: session, accountName: accountName,
+                                                expectedOwner: replacing)
         else {
             Log.notice(.auth, "sign_in_cancelled", nil, ["reason": reason])
             await WebSession.delete(session)
             return
         }
         Log.info(.auth, "token", nil, ["source": "login_window", "codename": target.codename])
-        let saved = await adopt(token, codename: target.codename, session: session, typedName: loginWindow.typedAccountName)
+        let saved = await adoptFromLoginWindow(token, codename: target.codename, session: session)
         if let replacing, token.accountID == replacing {
             if saved {
                 do {
@@ -1158,6 +1159,23 @@ final class AppModel {
         return (plan?.codename ?? InstallableProduct.hearthstone.codename, plan?.region ?? regionOverride ?? .us)
     }
 
+    /// `adopt` for a token from the login window. One its browser sign-in
+    /// returned leaves a saved account's web session as it is, since that
+    /// session never signed in, and names the account by what the game
+    /// service said.
+    @discardableResult
+    private func adoptFromLoginWindow(_ token: LoginToken, codename: String, session: WebSessionID,
+                                      activate: Bool = true) async -> Bool {
+        guard let profile = loginWindow.verifiedProfile, profile.accountID == token.accountID else {
+            return await adopt(token, codename: codename, session: session, typedName: loginWindow.typedAccountName,
+                               activate: activate)
+        }
+        Log.info(.auth, "token", nil, ["source": "browser", "codename": codename])
+        let kept = accountList[token.accountID]?.session
+        if let kept, kept != session { await WebSession.delete(session) }
+        return await adopt(token, codename: codename, session: kept ?? session, activate: activate, profile: profile)
+    }
+
     /// Remembers who signed in where: that account, new or saved, becomes
     /// active and keeps the token for next time. A session it no longer uses
     /// is deleted.
@@ -1167,11 +1185,12 @@ final class AppModel {
     /// Returns whether the token made it into the keychain.
     @discardableResult
     private func adopt(_ token: LoginToken, codename: String, session: WebSessionID, typedName: String? = nil,
-                       activate: Bool = true) async -> Bool {
+                       activate: Bool = true, profile: NativeAccountProfile? = nil) async -> Bool {
         let id = token.accountID
         let isNew = accountList[id] == nil
         let unused = accountList.signedIn(id, session: session, activate: activate)
         if let typedName, accountList[id]?.email == nil { accountList.setProfile(id, battleTag: nil, email: typedName) }
+        if let profile { accountList.setNativeProfile(profile, for: id) }
         var saved = true
         do {
             try tokenVault.save(token, codename: codename)
@@ -1301,7 +1320,8 @@ final class AppModel {
                 Log.notice(.auth, "automatic_login_paused")
                 let notice = "Automatic login is paused. Complete sign-in below. If your password changed, \(updateSavedLoginHint(account))."
                 guard let token = await loginWindow.run(url, title: title, session: session,
-                                                       preparedWebView: view, notice: notice) else {
+                                                       preparedWebView: view, notice: notice,
+                                                       expectedOwner: account.id) else {
                     if session != account.session { await WebSession.delete(session) }
                     return nil
                 }
@@ -1312,8 +1332,7 @@ final class AppModel {
                 }
                 // Manual sign-in may have used another password: only an
                 // explicit Update Saved Login re-enables these credentials.
-                await adopt(token, codename: plan.codename, session: session, typedName: loginWindow.typedAccountName,
-                            activate: activate)
+                await adoptFromLoginWindow(token, codename: plan.codename, session: session, activate: activate)
                 return token
             case .failed:
                 state.failedTemporarily()
@@ -1333,8 +1352,11 @@ final class AppModel {
         }
         let session = WebSessionID.fresh()
         Log.notice(.auth, "login_window_shown", nil, ["codename": plan.codename, "region": plan.region.rawValue, "forced": forceSignIn])
+        // Play As and Sign In Again and Play are for one account; a browser
+        // sign-in to another is refused there.
         guard let token = await loginWindow.run(url, title: title, session: session, accountName: account?.email,
-                                               notice: notices.isEmpty ? nil : notices.joined(separator: "\n\n")) else {
+                                               notice: notices.isEmpty ? nil : notices.joined(separator: "\n\n"),
+                                               expectedOwner: forceSignIn || !activate ? account?.id : nil) else {
             await WebSession.delete(session)
             return nil
         }
@@ -1349,8 +1371,7 @@ final class AppModel {
             return nil
         }
         Log.info(.auth, "token", nil, ["source": "login_window", "codename": plan.codename])
-        await adopt(token, codename: plan.codename, session: session, typedName: loginWindow.typedAccountName,
-                    activate: activate)
+        await adoptFromLoginWindow(token, codename: plan.codename, session: session, activate: activate)
         return token
     }
 

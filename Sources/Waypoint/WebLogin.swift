@@ -208,6 +208,9 @@ final class LoginWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler {
     /// last `run`, to name the account by: Blizzard's account page doesn't
     /// see this login's session, so it can't say the BattleTag or email.
     private(set) var typedAccountName: String?
+    /// Set when the last `run`'s token came back from the user's browser
+    /// rather than this window: who the game service said it belongs to.
+    /// This window's web session then never signed in.
     private(set) var verifiedProfile: NativeAccountProfile?
     /// Covers the page while the known email or phone goes in, until the
     /// password step shows; it also takes the clicks meant for the page.
@@ -223,10 +226,13 @@ final class LoginWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler {
     private var prefillTask: Task<Void, Never>?
     private var loadWatchdog: Task<Void, Never>?
     private var browserSheet: BrowserReturnSheet?
+    private var expectedOwner: String?
 
     /// WebKit lets only browsers and the site's own apps use passkeys, so
     /// Blizzard's passkey sign-in can't finish in this window.
     private static let passkeyNotice = "Passkeys don’t work in Waypoint. If Battle.net asks for one, sign in with your password instead."
+    /// Where the browser can sign in instead, a passkey works there.
+    private static let browserPasskeyNotice = "Passkeys don’t work in Waypoint. To use one, choose Sign In with Browser."
     /// Hides the page's buttons that start a passkey sign-in ("Use passkey"
     /// next to the password), which can only fail here. Only those: a "can't
     /// use your passkey?" link may be the way back to the password. The page
@@ -277,10 +283,12 @@ final class LoginWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler {
 
     /// `accountName`: the email or phone of the account being signed in to.
     /// It's filled into the form's first step, which is submitted once; the
-    /// page shows once it's at the password.
+    /// page shows once it's at the password. `expectedOwner`: that account's
+    /// id, when only it may sign in; a browser sign-in to another is refused.
     func run(_ url: URL, title: String, session: WebSessionID, accountName: String? = nil,
-             preparedWebView: WKWebView? = nil, notice: String? = nil) async -> LoginToken? {
+             preparedWebView: WKWebView? = nil, notice: String? = nil, expectedOwner: String? = nil) async -> LoginToken? {
         verifiedProfile = nil
+        self.expectedOwner = expectedOwner
         return await withCheckedContinuation { continuation in
             self.continuation = continuation
             let catcher = TokenCatcher()
@@ -332,32 +340,37 @@ final class LoginWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler {
             let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 720),
                                   styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
             window.title = title
-            window.appearance = NSAppearance(named: .darkAqua)
             window.contentMinSize = NSSize(width: 480, height: 600)
-            let noticeLabel = NSTextField(wrappingLabelWithString: notice ?? "")
+            // The browser return is verified with WoW's game service, which
+            // only the Americas sign-in has been tried with.
+            let supportsBrowserReturn = url.host == "us.battle.net"
+                && URLComponents(url: url, resolvingAgainstBaseURL: false)?.queryItems?
+                    .contains { $0.name == "app" && $0.value == "WoW" } == true
+            let passkey = supportsBrowserReturn ? Self.browserPasskeyNotice : Self.passkeyNotice
+            let noticeLabel = NSTextField(wrappingLabelWithString: [notice, passkey].compactMap { $0 }.joined(separator: "\n\n"))
             noticeLabel.textColor = .secondaryLabelColor
-            noticeLabel.font = .systemFont(ofSize: 12)
+            noticeLabel.font = .preferredFont(forTextStyle: .subheadline)
             connectionStatus = NSTextField(labelWithString: preparedWebView == nil ? "Connecting to Battle.net…" : "Waiting for sign-in")
             connectionStatus.font = .systemFont(ofSize: 11)
             connectionStatus.textColor = .secondaryLabelColor
             connectionStatus.lineBreakMode = .byTruncatingTail
-            let help = NSButton(title: "Sign-in help", target: self, action: #selector(showHelp))
-            help.bezelStyle = .inline
             retryButton = NSButton(title: "Retry", target: self, action: #selector(retry))
             retryButton.isHidden = true
             let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancel))
             cancel.keyEquivalent = "\u{1b}"
             connectionSpinner = NSProgressIndicator()
-            connectionSpinner.style = .spinning; connectionSpinner.controlSize = .small
+            connectionSpinner.style = .spinning
+            connectionSpinner.controlSize = .small
             connectionSpinner.isDisplayedWhenStopped = false
             if preparedWebView == nil { connectionSpinner.startAnimation(nil) }
-            let browser = NSButton(title:"Use Safari…",target:self,action:#selector(useBrowser))
-            let supportsBrowserReturn = url.host == "us.battle.net" && URLComponents(url:url,resolvingAgainstBaseURL:false)?.queryItems?.contains(where: { $0.name == "app" && $0.value == "WoW" }) == true
-            let footerViews: [NSView] = [help] + (supportsBrowserReturn ? [browser] : []) + [connectionSpinner, connectionStatus, NSView(), retryButton, cancel]
+            let browser = NSButton(title: "Sign In with Browser…", target: self, action: #selector(useBrowser))
+            let footerViews: [NSView] = (supportsBrowserReturn ? [browser] : [])
+                + [connectionSpinner, connectionStatus, NSView(), retryButton, cancel]
             let footer = NSStackView(views: footerViews)
-            footer.orientation = .horizontal; footer.spacing = 10
+            footer.orientation = .horizontal
+            footer.spacing = 10
             let container = NSView()
-            for view in [webView, footer] + (notice == nil ? [] : [noticeLabel]) {
+            for view in [noticeLabel, webView, footer] {
                 view.translatesAutoresizingMaskIntoConstraints = false
                 container.addSubview(view)
             }
@@ -369,17 +382,11 @@ final class LoginWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler {
                 footer.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
                 footer.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -12),
                 connectionStatus.widthAnchor.constraint(lessThanOrEqualToConstant: 130),
+                noticeLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
+                noticeLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
+                noticeLabel.topAnchor.constraint(equalTo: container.topAnchor, constant: 12),
+                webView.topAnchor.constraint(equalTo: noticeLabel.bottomAnchor, constant: 12),
             ])
-            if notice != nil {
-                NSLayoutConstraint.activate([
-                    noticeLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 20),
-                    noticeLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -20),
-                    noticeLabel.topAnchor.constraint(equalTo: container.topAnchor, constant: 16),
-                    webView.topAnchor.constraint(equalTo: noticeLabel.bottomAnchor, constant: 12),
-                ])
-            } else {
-                webView.topAnchor.constraint(equalTo: container.topAnchor).isActive = true
-            }
             if let accountName, preparedWebView == nil, let host = url.host {
                 // Transparent, not hidden: WebKit throttles pages it thinks are
                 // hidden. The page's own dark backdrop shows meanwhile.
@@ -426,37 +433,39 @@ final class LoginWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler {
     }
 
     @objc private func useBrowser() {
-        guard browserSheet == nil, continuation != nil, let window, let url=initialURL else { return }
-        prefillTask?.cancel();loadWatchdog?.cancel();webView?.stopLoading();reveal()
+        guard browserSheet == nil, continuation != nil, let window, let url = initialURL else { return }
+        prefillTask?.cancel()
+        loadWatchdog?.cancel()
+        webView?.stopLoading()
+        reveal()
         connectionSpinner.stopAnimation(nil)
-        let sheet=BrowserReturnSheet();browserSheet=sheet
+        let sheet = BrowserReturnSheet()
+        browserSheet = sheet
+        let owner = expectedOwner
         Task { [weak self] in
             guard let self, self.continuation != nil, self.browserSheet === sheet else { return }
-            let token=await sheet.run(on:window,url:url)
+            let token = await sheet.run(on: window, url: url, expectedOwner: owner)
             guard self.continuation != nil, self.browserSheet === sheet else { return }
-            self.browserSheet=nil
+            self.browserSheet = nil
             if let token {
                 self.verifiedProfile = sheet.verifiedProfile
                 self.typedAccountName = nil
                 self.finish(token)
-            }
-            else {
-                self.connectionStatus.stringValue="Continue here or Retry"
-                self.retryButton.isHidden=false
+            } else {
+                self.connectionStatus.stringValue = "Continue here or Retry"
+                self.retryButton.isHidden = false
             }
         }
     }
+
     @objc private func cancel() { finish(nil) }
-    @objc private func showHelp() {
-        let alert = NSAlert()
-        alert.messageText = "Signing in to Battle.net"
-        alert.informativeText = Self.passkeyNotice + "\n\nComplete any Authenticator or security checks on Blizzard’s page. Waypoint reuses saved game authorization for later launches."
-        if let window { alert.beginSheetModal(for: window) }
-    }
+
     @objc private func retry() {
         guard let url = initialURL, let webView else { return }
-        prefillTask?.cancel(); filledAccountName = nil
-        errorOverlay?.removeFromSuperview(); errorOverlay = nil
+        prefillTask?.cancel()
+        filledAccountName = nil
+        errorOverlay?.removeFromSuperview()
+        errorOverlay = nil
         retryButton.isHidden = true
         connectionStatus.stringValue = "Connecting to Battle.net…"
         connectionSpinner.startAnimation(nil)
@@ -475,7 +484,10 @@ final class LoginWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler {
     }
     private func showFailure(statusCode: Int? = nil) {
         guard continuation != nil, let webView, let container = webView.superview else { return }
-        prefillTask?.cancel(); loadWatchdog?.cancel(); webView.stopLoading(); reveal()
+        prefillTask?.cancel()
+        loadWatchdog?.cancel()
+        webView.stopLoading()
+        reveal()
         errorOverlay?.removeFromSuperview()
         webView.isHidden = true
         connectionStatus.stringValue = "Connection interrupted"
@@ -486,12 +498,16 @@ final class LoginWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler {
         let detail = NSTextField(wrappingLabelWithString: statusCode == 429
             ? "Wait a moment, then try again. Your saved login and account choices are unchanged."
             : "Check your internet connection, then try again. Your saved login and account choices are unchanged.")
-        detail.textColor = .secondaryLabelColor; detail.alignment = .center
+        detail.textColor = .secondaryLabelColor
+        detail.alignment = .center
         let stack = NSStackView(views: [title, detail])
-        stack.orientation = .vertical; stack.spacing = 12
+        stack.orientation = .vertical
+        stack.spacing = 12
         stack.translatesAutoresizingMaskIntoConstraints = false
-        let overlay = NSView(); overlay.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(overlay); overlay.addSubview(stack)
+        let overlay = NSView()
+        overlay.translatesAutoresizingMaskIntoConstraints = false
+        container.addSubview(overlay)
+        overlay.addSubview(stack)
         NSLayoutConstraint.activate([
             overlay.leadingAnchor.constraint(equalTo: webView.leadingAnchor),
             overlay.trailingAnchor.constraint(equalTo: webView.trailingAnchor),
@@ -558,11 +574,17 @@ final class LoginWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler {
         guard let continuation else { return }
         self.continuation = nil
         if token == nil { verifiedProfile = nil }
-        browserSheet?.cancel();browserSheet=nil
-        prefillTask?.cancel(); prefillTask = nil
-        loadWatchdog?.cancel(); loadWatchdog = nil
+        browserSheet?.cancel()
+        browserSheet = nil
+        prefillTask?.cancel()
+        prefillTask = nil
+        loadWatchdog?.cancel()
+        loadWatchdog = nil
         webView?.stopLoading()
-        errorOverlay?.removeFromSuperview(); errorOverlay = nil; initialURL = nil
+        errorOverlay?.removeFromSuperview()
+        errorOverlay = nil
+        initialURL = nil
+        expectedOwner = nil
         webView?.configuration.userContentController.removeScriptMessageHandler(forName: Self.accountNameHandler)
         webView = nil
         loadingOverlay = nil
