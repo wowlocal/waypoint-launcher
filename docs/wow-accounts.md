@@ -28,14 +28,23 @@ it. **Choose When WoW Starts** clears the choice. **Refresh Accounts…** opens
 the same lookup sheet when needed. Unsupported regions and accounts without a
 saved WoW sign-in do not show an unusable lookup action.
 
+The library row shows the chosen license next to the version and region, but
+only when the account has more than one license and the chosen one is still
+listed.
+
 Lookup is currently limited to Americas, the region verified by the original
 contributor. Other regions keep the existing behavior: WoW chooses at login.
 Discovery does not establish subscription status or access to any particular
 WoW edition. WoW's servers make those decisions.
 
-A refreshed catalog never silently replaces a choice it still lists; a chosen
-license the latest lookup no longer lists stays chosen until another choice is
-made. The single-license rule above is the only automatic choice.
+A refreshed catalog never silently replaces a choice it still lists. A chosen
+license the latest lookup no longer lists stays in the menu, checked and
+marked **(No Longer on Account)**, until another choice is made. Play is never
+blocked by it: that launch goes out without `GAME_ACCOUNT`, so WoW chooses. A
+license listed under the same ID with a new name launches under the new name.
+A lookup that finds no licenses is remembered across restarts too, so "none
+found" is not mistaken for "never looked up". The single-license rule above is
+the only automatic choice.
 
 Canceling a pending lookup, timeout and lookup failure preserve the existing
 choice and cached accounts. Refresh changes the cache only after the complete
@@ -74,7 +83,9 @@ The protocol reference and original working launch proof came from
 [wubsylol's contribution](https://github.com/wowlocal/waypoint-launcher/issues/7)
 and its `contrib/wow-licence-selection` branch. This implementation keeps
 discovery off the Play path and isolates the remembered choices from the
-catalog cache.
+catalog cache. Persisting empty lookups, the row label and unavailable
+licenses came from wubsylol's follow-up,
+[#16](https://github.com/wowlocal/waypoint-launcher/pull/16).
 
 ## Validation
 

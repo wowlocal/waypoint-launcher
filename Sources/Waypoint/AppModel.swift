@@ -899,6 +899,10 @@ final class AppModel {
             }
             if plan.codename == "WoW", !plan.isWindows {
                 plan.gameAccount = wowAccountStore.launchAccount(for: token, uid: game.id, region: plan.region)
+                if plan.gameAccount == nil, wowAccountStore.selected(owner: token.accountID, uid: game.id, region: plan.region) != nil {
+                    // Gone from the account at the last lookup: WoW chooses.
+                    Log.notice(.launch, "wow_account_unavailable", nil, ["uid": game.id])
+                }
             }
             phases[game.id] = .launching
             if let session {
@@ -966,12 +970,22 @@ final class AppModel {
     }
 
     /// The last lookup's licenses, plus the saved choice if that lookup no
-    /// longer listed it.
+    /// longer listed it (shown as unavailable).
     func knownWoWAccounts(for game: Game) -> [WoWGameAccount] {
         guard let scope = wowAccountScope(for: game) else { return [] }
         var accounts = wowAccountStore.cachedAccounts(owner: scope.owner, region: scope.region)
         if let selected = selectedWoWAccount(for: game), !accounts.contains(where: { $0.id == selected.id }) { accounts.append(selected) }
         return accounts
+    }
+
+    func isAvailableWoWAccount(_ account: WoWGameAccount, for game: Game) -> Bool {
+        guard let scope = wowAccountScope(for: game) else { return false }
+        return wowAccountStore.isAvailable(account, owner: scope.owner, region: scope.region)
+    }
+
+    /// The license the library row shows, when there's a choice to show.
+    func shownWoWAccount(for game: Game) -> WoWGameAccount? {
+        wowAccountScope(for: game).flatMap { wowAccountStore.shownChoice(in: $0) }
     }
 
     /// `nil` lets WoW choose at login. Refused while the game is busy, and

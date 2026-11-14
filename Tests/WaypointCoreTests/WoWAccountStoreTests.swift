@@ -72,6 +72,59 @@ private func withDefaults(_ body: (UserDefaults) throws -> Void) throws {
 
 private let us1 = WoWAccountScope(owner: "1", uid: "wow", region: .us)
 
+@Test func aSuccessfulEmptyLookupSurvivesRestart() throws {
+    var store = WoWAccountStore()
+    #expect(!store.hasCatalog(owner: "1", region: .us))
+    store.select(wow1, owner: "1", uid: "wow", region: .us)
+    #expect(store.isAvailable(wow1, owner: "1", region: .us), "nothing to compare with yet")
+    store.cache([], owner: "1", region: .us)
+    #expect(store.hasCatalog(owner: "1", region: .us))
+    #expect(!store.hasCatalog(owner: "1", region: .eu))
+    #expect(!store.isAvailable(wow1, owner: "1", region: .us))
+    try withDefaults { defaults in
+        store.save(to: defaults)
+        let loaded = WoWAccountStore.load(from: defaults)
+        #expect(loaded == store)
+        #expect(loaded.hasCatalog(owner: "1", region: .us))
+        #expect(loaded.cachedAccounts(owner: "1", region: .us).isEmpty)
+        #expect(loaded.selected(owner: "1", uid: "wow", region: .us) == wow1)
+        #expect(!loaded.isAvailable(wow1, owner: "1", region: .us))
+    }
+    store.remove(owner: "1")
+    #expect(!store.hasCatalog(owner: "1", region: .us))
+}
+
+@Test func aLicenseNoLongerOnTheAccountLaunchesAsAutomatic() throws {
+    let token = try #require(LoginToken("US-0123456789abcdef0123456789abcdef-1"))
+    var store = WoWAccountStore()
+    store.cache([wow1, wow2], owner: "1", region: .us)
+    store.select(wow2, owner: "1", uid: "wow", region: .us)
+    #expect(store.launchAccount(for: token, uid: "wow", region: .us) == "WoW2")
+    store.cache([wow1], owner: "1", region: .us)
+    // Still the saved choice (shown as unavailable), but Play lets WoW choose.
+    #expect(store.selected(owner: "1", uid: "wow", region: .us) == wow2)
+    #expect(!store.isAvailable(wow2, owner: "1", region: .us))
+    #expect(store.launchAccount(for: token, uid: "wow", region: .us) == nil)
+    store.cache([], owner: "1", region: .us)
+    #expect(store.launchAccount(for: token, uid: "wow", region: .us) == nil)
+    // Before any lookup a saved choice goes out as it is.
+    var fresh = WoWAccountStore()
+    fresh.select(wow2, owner: "1", uid: "wow", region: .us)
+    #expect(fresh.launchAccount(for: token, uid: "wow", region: .us) == "WoW2")
+}
+
+@Test func aRenamedLicenseLaunchesAndShowsUnderItsCurrentName() throws {
+    let token = try #require(LoginToken("US-0123456789abcdef0123456789abcdef-1"))
+    var store = WoWAccountStore()
+    store.cache([wow1, wow2], owner: "1", region: .us)
+    store.select(wow2, owner: "1", uid: "wow", region: .us)
+    let renamed = WoWGameAccount(id: wow2.id, name: "WoW5")
+    store.cache([wow1, renamed], owner: "1", region: .us)
+    #expect(store.isAvailable(wow2, owner: "1", region: .us))
+    #expect(store.launchAccount(for: token, uid: "wow", region: .us) == "WoW5")
+    #expect(store.shownChoice(in: us1) == renamed)
+}
+
 @Test func aLookupWithOneLicenseChoosesIt() {
     var store = WoWAccountStore()
     do { let r = store.selectOnlyAccount(in: us1); #expect(r == nil, "no lookup yet") }
@@ -123,6 +176,21 @@ private let us1 = WoWAccountScope(owner: "1", uid: "wow", region: .us)
     #expect(store.selected(owner: "1", uid: "wow", region: .us) == wow2)
     do { let r = store.select(nil, in: us1, current: us1); #expect(r) }
     #expect(store.selected(owner: "1", uid: "wow", region: .us) == nil)
+}
+
+@Test func theRowShowsTheChoiceOnlyWhenThereIsOneToMake() {
+    var store = WoWAccountStore()
+    store.select(wow1, owner: "1", uid: "wow", region: .us)
+    #expect(store.shownChoice(in: us1) == nil, "no lookup yet")
+    store.cache([wow1], owner: "1", region: .us)
+    #expect(store.shownChoice(in: us1) == nil, "only one licence")
+    store.cache([wow1, wow2], owner: "1", region: .us)
+    #expect(store.shownChoice(in: us1) == wow1)
+    store.select(nil, owner: "1", uid: "wow", region: .us)
+    #expect(store.shownChoice(in: us1) == nil, "WoW chooses")
+    store.select(wow2, owner: "1", uid: "wow", region: .us)
+    store.cache([wow1, WoWGameAccount(id: "103", name: "WoW3")], owner: "1", region: .us)
+    #expect(store.shownChoice(in: us1) == nil, "no longer on the account")
 }
 
 @Test func knownAccountsArePerOwnerAndRegion() {

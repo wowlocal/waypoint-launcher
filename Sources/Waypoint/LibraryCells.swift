@@ -12,6 +12,8 @@ struct GameRowState {
     var canPlay: Bool
     var canUpdate: Bool
     var showsEdition: Bool
+    /// The chosen WoW license, when the account has several to choose from.
+    var wowAccount: String?
     var download: DownloadControls
     /// The game's picture, once it has been downloaded.
     var banner: URL?
@@ -23,6 +25,7 @@ extension GameRowState {
                   update: model.availableUpdate(for: game), canPlay: model.canPlay(game),
                   canUpdate: model.canUpdate(game), showsEdition: game.install.productCode == "hero" &&
                     (WindowsHeroes.isAvailable || model.heroesEdition(.windows) != nil),
+                  wowAccount: model.shownWoWAccount(for: game)?.name,
                   download: DownloadControls(uid: game.id, model: model),
                   banner: model.artwork(productCode: game.install.productCode).picture)
     }
@@ -196,7 +199,7 @@ final class GameCell: NSView {
                 detail.stringValue = GameUpdate.canUpdate(game.install) ? "Update available" : "Update available in Battle.net"
                 detail.textColor = .systemOrange
             } else {
-                detail.stringValue = Self.summary(of: game)
+                detail.stringValue = Self.summary(of: game, wowAccount: state.wowAccount)
             }
         }
 
@@ -384,7 +387,11 @@ final class GameCell: NSView {
                     choices.addItem(.separator())
                     for account in accounts {
                         let title = WoWAccountSheet.title(for: account, among: accounts)
-                        let choice = ActionItem(title, enabled: model.canPlay(game)) {
+                        // A license the last lookup no longer listed stays
+                        // visible; Play then lets WoW choose.
+                        let available = model.isAvailableWoWAccount(account, for: game)
+                        let choice = ActionItem(available ? title : "\(title) (No Longer on Account)",
+                                                enabled: available && model.canPlay(game)) {
                             try? model.useWoWAccount(account, for: game, in: scope)
                         }
                         choice.state = selected?.id == account.id ? .on : .off
@@ -442,14 +449,15 @@ final class GameCell: NSView {
         return menu.items.isEmpty ? nil : menu
     }
 
-    /// "36.6.3 · EU", plus "Intel" for games that need Rosetta. The full
-    /// version is in the name's tooltip.
-    private static func summary(of game: Game) -> String {
+    /// "36.6.3 · EU", plus "Intel" for games that need Rosetta and the
+    /// chosen WoW license. The full version is in the name's tooltip.
+    private static func summary(of game: Game, wowAccount: String?) -> String {
         var parts: [String] = []
         if let version = game.install.version {
             parts.append(version.split(separator: ".").prefix(3).joined(separator: "."))
         }
         if let region = game.install.region { parts.append(region.uppercased()) }
+        if let wowAccount { parts.append(wowAccount) }
         if game.install.platform == .windows {
             parts.append("Windows")
             if WindowsTitle.forInstall(game.install)?.isQualified == false { parts.append("Preview") }

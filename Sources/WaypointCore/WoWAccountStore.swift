@@ -81,9 +81,24 @@ public struct WoWAccountStore: Equatable, Sendable {
 
     /// The `GAME_ACCOUNT` to hand over with `token`. The owner comes from the
     /// token itself, so one account's licence can't ride along with another
-    /// account's login.
+    /// account's login. A choice the last lookup no longer listed goes out as
+    /// automatic: the game picks, rather than Play failing on a stale name.
     public func launchAccount(for token: LoginToken, uid: String, region: Region) -> String? {
-        selected(owner: token.accountID, uid: uid, region: region)?.name
+        selected(owner: token.accountID, uid: uid, region: region)
+            .flatMap { listed($0, owner: token.accountID, region: region) }?.name
+    }
+
+    /// Whether a saved choice is still on the account. Before any lookup
+    /// there is nothing to compare with, so it counts as available.
+    public func isAvailable(_ account: WoWGameAccount, owner: String, region: Region) -> Bool {
+        listed(account, owner: owner, region: region) != nil
+    }
+
+    /// The last lookup's entry for `account`'s id, so a renamed license goes
+    /// out under its current name; `account` itself before any lookup.
+    private func listed(_ account: WoWGameAccount, owner: String, region: Region) -> WoWGameAccount? {
+        guard hasCatalog(owner: owner, region: region) else { return account }
+        return cachedAccounts(owner: owner, region: region).first { $0.id == account.id }
     }
 
     /// After a lookup with exactly one license there is nothing to choose, so
@@ -110,6 +125,14 @@ public struct WoWAccountStore: Equatable, Sendable {
         return select(account, owner: scope.owner, uid: scope.uid, region: scope.region)
     }
 
+    /// The choice worth showing in the library row: only when there is more
+    /// than one license to pick from and the chosen one is still listed.
+    public func shownChoice(in scope: WoWAccountScope) -> WoWGameAccount? {
+        guard cachedAccounts(owner: scope.owner, region: scope.region).count > 1,
+              let chosen = selected(owner: scope.owner, uid: scope.uid, region: scope.region) else { return nil }
+        return listed(chosen, owner: scope.owner, region: scope.region)
+    }
+
     /// `nil` goes back to automatic. Malformed input leaves the saved
     /// choice alone and returns false.
     @discardableResult
@@ -129,9 +152,15 @@ public struct WoWAccountStore: Equatable, Sendable {
         catalogs.first { $0.owner == owner && $0.region == region }?.accounts ?? []
     }
 
-    /// Replaces the known licences after a refresh. Never touches the saved
-    /// choice: a licence missing from one refresh stays selected until the
-    /// user changes it. A list with anything malformed in it, or
+    /// Tells "looked up, none found" apart from "never looked up".
+    public func hasCatalog(owner: String, region: Region) -> Bool {
+        catalogs.contains { $0.owner == owner && $0.region == region }
+    }
+
+    /// Replaces the known licenses after a refresh, keeping an empty result
+    /// too. Never touches the saved choice: a license missing from one
+    /// refresh stays selected (shown as unavailable, launched as automatic)
+    /// until the user changes it. A list with anything malformed in it, or
     /// too many entries, is rejected whole and the previous cache kept.
     @discardableResult
     public mutating func cache(_ accounts: [WoWGameAccount], owner: String, region: Region) -> Bool {
@@ -140,10 +169,8 @@ public struct WoWAccountStore: Equatable, Sendable {
         let unique = accounts.filter { seen.insert($0.id).inserted }
         guard unique.count <= Self.maxAccounts else { return false }
         catalogs.removeAll { $0.owner == owner && $0.region == region }
-        if !unique.isEmpty {
-            catalogs.append(Catalog(owner: owner, region: region, accounts: unique))
-            if catalogs.count > Self.maxEntries { catalogs.removeFirst(catalogs.count - Self.maxEntries) }
-        }
+        catalogs.append(Catalog(owner: owner, region: region, accounts: unique))
+        if catalogs.count > Self.maxEntries { catalogs.removeFirst(catalogs.count - Self.maxEntries) }
         return true
     }
 
