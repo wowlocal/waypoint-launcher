@@ -18,6 +18,9 @@ final class AppUpdater: NSObject {
     private(set) var isBusy = false
     /// A downloaded update waiting for Waypoint to restart.
     private(set) var readyVersion: String?
+    @ObservationIgnored var updateAvailable: ((String, String) -> Void)?
+    @ObservationIgnored var noUpdateAvailable: (() -> Void)?
+    @ObservationIgnored private var readyBuild: String?
     @ObservationIgnored var prepareForRestart: (@MainActor () async -> Bool)?
 
     @ObservationIgnored private var controller: SPUStandardUpdaterController?
@@ -41,6 +44,10 @@ final class AppUpdater: NSObject {
         controller.updater.automaticallyDownloadsUpdates = true
         self.controller = controller
         controller.updater.checkForUpdatesInBackground()
+    }
+
+    func announceAvailableUpdate() {
+        if let readyVersion { updateAvailable?(readyVersion, readyBuild ?? readyVersion) }
     }
 
     /// "Check for Updates": still a background check, so the answer shows
@@ -119,7 +126,9 @@ extension AppUpdater: SPUUpdaterDelegate {
         MainActor.assumeIsolated {
             installNow = handler
             readyVersion = version
+            readyBuild = item.versionString
             show("Waypoint \(version) is ready. It installs when you quit, or restart now.")
+            updateAvailable?(version, item.versionString)
         }
         return true
     }
@@ -127,6 +136,7 @@ extension AppUpdater: SPUUpdaterDelegate {
     nonisolated func updaterDidNotFindUpdate(_ updater: SPUUpdater) {
         Log.info(.selfUpdate, "up_to_date")
         MainActor.assumeIsolated {
+            noUpdateAvailable?()
             if userInitiated { show("Waypoint is up to date.", clearAfter: 4) }
         }
     }

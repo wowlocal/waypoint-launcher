@@ -11,6 +11,7 @@ final class MenuBarItem: NSObject, NSMenuDelegate {
     private let model: AppModel
     private let appUpdater: AppUpdater
     private var statusItem: NSStatusItem?
+    private var quickActions: NSMenu?
     private var visibility: NSKeyValueObservation?
     private var observer: NSObjectProtocol?
 
@@ -35,7 +36,11 @@ final class MenuBarItem: NSObject, NSMenuDelegate {
             let menu = NSMenu()
             menu.autoenablesItems = false
             menu.delegate = self
-            item.menu = menu
+            quickActions = menu
+            item.button?.target = self
+            item.button?.action = #selector(statusItemClicked(_:))
+            item.button?.sendAction(on: [.leftMouseUp, .rightMouseUp])
+            item.button?.toolTip = "Show or hide Waypoint (right-click for quick actions)"
             // ⌘-dragging the item out of the menu bar turns the setting off.
             // AppKit remembers such a removal, so opting back in has to make
             // the item visible again explicitly.
@@ -51,12 +56,26 @@ final class MenuBarItem: NSObject, NSMenuDelegate {
         } else if !wanted, let item = statusItem {
             visibility = nil
             statusItem = nil
+            quickActions = nil
             NSStatusBar.system.removeStatusItem(item)
+        }
+    }
+
+    @objc private func statusItemClicked(_ sender: NSStatusBarButton) {
+        if let event = NSApp.currentEvent,
+           event.type == .rightMouseUp || event.modifierFlags.contains(.control),
+           let quickActions {
+            NSMenu.popUpContextMenu(quickActions, with: event, for: sender)
+        } else {
+            NSApp.sendAction(#selector(AppDelegate.toggleLibrary(_:)), to: nil, from: sender)
         }
     }
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
+        menu.addItem(NSMenuItem(title: "Open Waypoint", action: #selector(AppDelegate.showLibrary(_:)), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Settings…", action: #selector(AppDelegate.showSettings(_:)), keyEquivalent: ","))
+        menu.addItem(.separator())
         for game in model.games where game.isSupported {
             if let item = downloadItem(uid: game.id, name: game.displayName, phase: model.phase(of: game)) {
                 menu.addItem(item)

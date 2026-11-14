@@ -1,11 +1,23 @@
 import AppKit
 import WaypointCore
+import ServiceManagement
 
 /// Settings (⌘,): sign-in, download speed, game artwork and the opt-in menu
 /// bar item.
 @MainActor
 final class SettingsViewController: NSViewController {
     private let model: AppModel
+    private let backgroundServices: BackgroundServices
+    private let hideDockCheckbox = NSButton(checkboxWithTitle: "Hide Dock icon (menu bar only)", target: nil, action: nil)
+    private let loginCheckbox = NSButton(checkboxWithTitle: "Start Waypoint at login", target: nil, action: nil)
+    private let automaticCheckbox = NSButton(checkboxWithTitle: "Automatically check for game updates", target: nil, action: nil)
+    private let notificationsCheckbox = NSButton(checkboxWithTitle: "Notify me when updates are available", target: nil, action: nil)
+    private let testNotificationButton = NSButton(title: "Send Test Notification", target: nil, action: nil)
+    private let notificationTestNote = NSTextField(wrappingLabelWithString: "")
+    private let backgroundNote = NSTextField(wrappingLabelWithString: "")
+    private let loginSettings = NSButton(title: "Login Items Settings…", target: nil, action: nil)
+    private var changingLogin = false
+    private var changingNotifications = false
     private let appearancePopup = NSPopUpButton()
     private let regionPopup = NSPopUpButton()
     private let menuBarCheckbox = NSButton(checkboxWithTitle: "Show Waypoint in the menu bar", target: nil, action: nil)
@@ -19,8 +31,9 @@ final class SettingsViewController: NSViewController {
     private let forgetLoginButton = NSButton(title: "Forget Saved Login", target: nil, action: nil)
     private var defaultsObserver: NSObjectProtocol?
 
-    init(model: AppModel) {
+    init(model: AppModel, backgroundServices: BackgroundServices) {
         self.model = model
+        self.backgroundServices = backgroundServices
         super.init(nibName: nil, bundle: nil)
         title = "Settings"
     }
@@ -75,11 +88,36 @@ final class SettingsViewController: NSViewController {
         let loginButtons = NSStackView(views: [saveLoginButton, forgetLoginButton])
         loginButtons.spacing = 8
 
+        for (button, action) in [
+            (hideDockCheckbox, #selector(hideDockChanged)),
+            (loginCheckbox, #selector(loginChanged)),
+            (automaticCheckbox, #selector(automaticChanged)),
+            (notificationsCheckbox, #selector(notificationsChanged)),
+            (loginSettings, #selector(openLoginSettings)),
+            (testNotificationButton, #selector(sendTestNotification)),
+        ] { button.target = self; button.action = action }
+        notificationTestNote.font = .preferredFont(forTextStyle: .subheadline)
+        notificationTestNote.textColor = .secondaryLabelColor
+        notificationTestNote.preferredMaxLayoutWidth = 360
+        notificationTestNote.widthAnchor.constraint(equalToConstant: 360).isActive = true
+        backgroundNote.font = .preferredFont(forTextStyle: .subheadline)
+        backgroundNote.textColor = .secondaryLabelColor
+        backgroundNote.preferredMaxLayoutWidth = 360
+        backgroundNote.widthAnchor.constraint(equalToConstant: 360).isActive = true
+        let backgroundOptions = NSStackView(views: [menuBarCheckbox, hideDockCheckbox, loginCheckbox, loginSettings])
+        backgroundOptions.orientation = .vertical
+        backgroundOptions.alignment = .leading
+        backgroundOptions.spacing = 8
+        let updateOptions = NSStackView(views: [automaticCheckbox, notificationsCheckbox, testNotificationButton, notificationTestNote, backgroundNote])
+        updateOptions.orientation = .vertical
+        updateOptions.alignment = .leading
+        updateOptions.spacing = 8
+
         let grid = NSGridView(views: [
             [NSTextField(labelWithString: "Appearance:"), appearancePopup],
             [NSTextField(labelWithString: "Region:"), regionPopup],
             [NSGridCell.emptyContentView, regionNote],
-            [NSTextField(labelWithString: "Menu bar:"), menuBarCheckbox],
+            [NSTextField(labelWithString: "Background:"), backgroundOptions],
             [NSTextField(labelWithString: "Artwork:"), artworkCheckbox],
             [NSGridCell.emptyContentView, artworkNote],
             [NSTextField(labelWithString: "Download speed:"), speedRow],
@@ -87,6 +125,7 @@ final class SettingsViewController: NSViewController {
             [NSTextField(labelWithString: "Account:"), accountLabel],
             [NSGridCell.emptyContentView, savedLoginNote],
             [NSGridCell.emptyContentView, loginButtons],
+            [NSTextField(labelWithString: "Updates:"), updateOptions],
         ])
         grid.column(at: 0).xPlacement = .trailing
         grid.rowAlignment = .firstBaseline
@@ -96,6 +135,7 @@ final class SettingsViewController: NSViewController {
         grid.row(at: 4).topPadding = 12
         grid.row(at: 6).topPadding = 12
         grid.row(at: 8).topPadding = 12
+        grid.row(at: 11).topPadding = 12
 
         let container = NSView()
         grid.translatesAutoresizingMaskIntoConstraints = false
@@ -108,6 +148,7 @@ final class SettingsViewController: NSViewController {
         ])
         view = container
 
+        observeChanges { [weak self] in self?.renderBackground() }
         observeChanges { [weak self] in self?.renderRegion() }
         observeChanges { [weak self] in self?.renderSavedLogin() }
         observeChanges { [weak self] in self?.renderArtwork() }
@@ -116,6 +157,7 @@ final class SettingsViewController: NSViewController {
             forName: UserDefaults.didChangeNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
                 self?.renderAppearance()
+                self?.renderBackground()
                 self?.renderMenuBar()
                 self?.renderSpeed()
             }
@@ -134,6 +176,54 @@ final class SettingsViewController: NSViewController {
         guard AppAppearance.Mode.allCases.indices.contains(index) else { return }
         AppAppearance.select(AppAppearance.Mode.allCases[index])
     }
+
+    private func renderBackground() {
+        let defaults = UserDefaults.standard
+        hideDockCheckbox.state = defaults.bool(forKey: UpdatePreferences.hideDockKey) ? .on : .off
+        automaticCheckbox.state = UpdatePreferences.automatic() ? .on : .off
+        notificationsCheckbox.state = defaults.bool(forKey: UpdatePreferences.notificationsKey) ? .on : .off
+        loginCheckbox.state = backgroundServices.loginStatus == .enabled || backgroundServices.loginStatus == .requiresApproval ? .on : .off
+        loginCheckbox.isEnabled = !changingLogin && backgroundServices.supportsSystemIntegration
+        notificationsCheckbox.isEnabled = !changingNotifications && backgroundServices.supportsSystemIntegration
+        notificationTestNote.stringValue = backgroundServices.notificationTestStatus ?? ""
+        notificationTestNote.isHidden = backgroundServices.notificationTestStatus == nil
+        testNotificationButton.isEnabled = !backgroundServices.isTestingNotification && backgroundServices.supportsSystemIntegration &&
+            defaults.bool(forKey: UpdatePreferences.notificationsKey) && backgroundServices.notificationStatus == .authorized
+        loginSettings.isHidden = backgroundServices.loginStatus != .requiresApproval
+        var note = "Checks installed games every 30 minutes while Waypoint is running. Game updates require your approval."
+        if !backgroundServices.supportsSystemIntegration { note += " Notifications and login items require an installed app bundle." }
+        if backgroundServices.loginStatus == .requiresApproval { note += " Approve Waypoint in Login Items Settings." }
+        if backgroundServices.notificationStatus == .denied { note += " Notifications are blocked in macOS Notification Settings." }
+        if let error = backgroundServices.errorMessage { note += " " + error }
+        backgroundNote.stringValue = note
+    }
+
+    @objc private func hideDockChanged() { backgroundServices.setHideDock(hideDockCheckbox.state == .on) }
+    @objc private func automaticChanged() {
+        UserDefaults.standard.set(automaticCheckbox.state == .on, forKey: UpdatePreferences.automaticKey)
+        if automaticCheckbox.state == .on { Task { await model.checkForUpdates() } }
+    }
+    @objc private func loginChanged() {
+        let enabled = loginCheckbox.state == .on
+        changingLogin = true; renderBackground()
+        Task {
+            await backgroundServices.setLoginEnabled(enabled)
+            changingLogin = false; renderBackground()
+        }
+    }
+    @objc private func notificationsChanged() {
+        let enabled = notificationsCheckbox.state == .on
+        changingNotifications = true; renderBackground()
+        Task {
+            await backgroundServices.setNotificationsEnabled(enabled)
+            changingNotifications = false; renderBackground()
+            if UserDefaults.standard.bool(forKey: UpdatePreferences.notificationsKey) {
+                await model.checkForUpdates(force: true)
+            }
+        }
+    }
+    @objc private func sendTestNotification() { Task { await backgroundServices.sendTestNotification() } }
+    @objc private func openLoginSettings() { SMAppService.openSystemSettingsLoginItems() }
 
     private func renderRegion() {
         let region = model.regionOverride.flatMap { Region.allCases.firstIndex(of: $0) }
