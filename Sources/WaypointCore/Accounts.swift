@@ -132,6 +132,13 @@ public struct TokenVault: Sendable {
         tokens(account: account)[codename].flatMap(LoginToken.init)
     }
 
+    /// Menu availability must never open a Keychain prompt.
+    public func hasToken(account: String, codename: String) -> Bool {
+        guard let value = tokens(account: account, allowInteraction: false)[codename],
+              let token = LoginToken(value) else { return false }
+        return token.accountID == account
+    }
+
     public func save(_ token: LoginToken, codename: String) throws {
         var tokens = tokens(account: token.accountID)
         tokens[codename] = token.value
@@ -161,8 +168,12 @@ public struct TokenVault: Sendable {
         SecItemDelete(query(account) as CFDictionary)
     }
 
-    private func tokens(account: String) -> [String: String] {
+    private func tokens(account: String, allowInteraction: Bool = true) -> [String: String] {
         var item = query(account)
+        if !allowInteraction {
+            // The vault uses the login keychain, as SavedLogin does.
+            item[kSecUseAuthenticationUI] = kSecUseAuthenticationUIFail
+        }
         item[kSecReturnData] = true
         item[kSecMatchLimit] = kSecMatchLimitOne
         var result: CFTypeRef?

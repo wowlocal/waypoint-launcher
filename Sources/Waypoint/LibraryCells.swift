@@ -359,6 +359,40 @@ final class GameCell: NSView {
             if model.availableUpdate(for: game) != nil {
                 menu.addItem(ActionItem("Play Without Updating") { Task { await model.play(game) } })
             }
+            if model.offersWoWAccounts(game) {
+                let choose = ActionItem("Find WoW Accounts…", enabled: model.canPlay(game)) { [weak self] in
+                    self?.window?.contentViewController?.presentAsSheet(WoWAccountSheet {
+                        try await model.findWoWAccounts(for: game)
+                    })
+                }
+                let accounts = model.knownWoWAccounts(for: game)
+                if accounts.isEmpty {
+                    menu.addItem(choose)
+                } else {
+                    let selected = model.selectedWoWAccount(for: game)
+                    let item = NSMenuItem(title: "WoW Account", action: nil, keyEquivalent: "")
+                    let choices = NSMenu()
+                    choices.autoenablesItems = false
+                    let automatic = ActionItem("Default", enabled: model.canPlay(game)) { model.useWoWAccount(nil, for: game) }
+                    automatic.toolTip = "Let WoW choose an account."
+                    automatic.state = selected == nil ? .on : .off
+                    choices.addItem(automatic)
+                    let repeated = Dictionary(grouping: accounts, by: \.name)
+                    for account in accounts {
+                        let title = repeated[account.name]!.count > 1 ? "\(account.name) (\(account.id))" : account.name
+                        let choice = ActionItem(title, enabled: model.canPlay(game)) { model.useWoWAccount(account, for: game) }
+                        choice.state = selected?.id == account.id ? .on : .off
+                        choices.addItem(choice)
+                    }
+                    if model.canRefreshWoWAccounts(game) {
+                        choices.addItem(.separator())
+                        choose.title = "Refresh Accounts…"
+                        choices.addItem(choose)
+                    }
+                    item.submenu = choices
+                    menu.addItem(item)
+                }
+            }
             let others = model.accounts.filter { $0.id != model.activeAccount?.id }
             if !others.isEmpty {
                 let playAs = NSMenuItem(title: "Play As", action: nil, keyEquivalent: "")

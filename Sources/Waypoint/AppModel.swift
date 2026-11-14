@@ -141,6 +141,10 @@ final class AppModel {
     private var autoLoginStates = AutoLoginState.load() {
         didSet { AutoLoginState.save(autoLoginStates) }
     }
+    private var wowAccountStore = WoWAccountStore.load() {
+        didSet { wowAccountStore.save() }
+    }
+    private var isFindingWoWAccounts = false
     private var profileFetches: Set<String> = []
 
     private let library = GameLibrary()
@@ -849,7 +853,10 @@ final class AppModel {
     }
 
     func canPlay(_ game: Game) -> Bool {
-        !isPreparingToQuit && game.isSupported && !isRunning(game) && !isBusy(game) && !isSigningIn
+        !isPreparingToQuit && game.isSupported && !isRunning(game) && !isBusy(game) && !isSigningIn &&
+            // WoW editions share one launch preference slot. Other games
+            // can start while a WoW client consumes its handoff.
+            !(isNativeWoW(game) && (isFindingWoWAccounts || games.contains { isNativeWoW($0) && phases[$0.id] == .launching }))
     }
 
     /// `forceSignIn` skips the saved token, for when the game rejects it.
@@ -874,8 +881,9 @@ final class AppModel {
             let mode = CGDisplayCopyDisplayMode(displayID)
             let display = mode.map { WindowsDisplay(width: $0.pixelWidth, height: $0.pixelHeight,
                                                     framesPerSecond: screen?.maximumFramesPerSecond ?? 60) }
-            let plan = try GameLauncher.plan(for: game, region: regionOverride, display: display)
+            var plan = try GameLauncher.plan(for: game, region: regionOverride, display: display)
             if plan.isWindows { phases[game.id] = .preparingWindows(nil) }
+            else { phases[game.id] = .signingIn }
             let session = try await GameLauncher.prepareWindows(plan) { [weak self] progress in
                 Task { @MainActor in
                     guard let self, case .preparingWindows = self.phases[game.id] else { return }
@@ -888,6 +896,9 @@ final class AppModel {
                 Log.notice(.auth, "sign_in_cancelled", nil, ["uid": game.id])
                 phases[game.id] = .idle
                 return
+            }
+            if plan.codename == "WoW", !plan.isWindows {
+                plan.gameAccount = wowAccountStore.launchAccount(for: token, uid: game.id, region: plan.region)
             }
             phases[game.id] = .launching
             if let session {
@@ -923,6 +934,67 @@ final class AppModel {
             Log.error(.launch, "failed", nil, ["uid": game.id, "error": error])
             phases[game.id] = .failed(errorMessage(error))
         }
+    }
+
+    // MARK: WoW accounts
+
+    private func isNativeWoW(_ game: Game) -> Bool {
+        game.install.platform == .macOS && GameCatalog.family(for: game.install.productCode) == .worldOfWarcraft
+    }
+
+    func canRefreshWoWAccounts(_ game: Game) -> Bool {
+        guard isNativeWoW(game), let owner = activeAccount?.id,
+              let plan = try? GameLauncher.plan(for: game, region: regionOverride) else { return false }
+        return WoWAccountDiscovery.supports(plan.region) && tokenVault.hasToken(account: owner, codename: "WoW")
+    }
+
+    func offersWoWAccounts(_ game: Game) -> Bool {
+        activeAccount != nil && isNativeWoW(game) && (canRefreshWoWAccounts(game) || !knownWoWAccounts(for: game).isEmpty)
+    }
+
+    func selectedWoWAccount(for game: Game) -> WoWGameAccount? {
+        guard let owner = activeAccount?.id,
+              let plan = try? GameLauncher.plan(for: game, region: regionOverride) else { return nil }
+        return wowAccountStore.selected(owner: owner, uid: game.id, region: plan.region)
+    }
+
+    func knownWoWAccounts(for game: Game) -> [WoWGameAccount] {
+        guard let owner = activeAccount?.id,
+              let plan = try? GameLauncher.plan(for: game, region: regionOverride) else { return [] }
+        var accounts = wowAccountStore.cachedAccounts(owner: owner, region: plan.region)
+        if let selected = selectedWoWAccount(for: game), !accounts.contains(where: { $0.id == selected.id }) { accounts.append(selected) }
+        return accounts
+    }
+
+    func useWoWAccount(_ account: WoWGameAccount?, for game: Game) {
+        guard canPlay(game), isNativeWoW(game), let owner = activeAccount?.id,
+              let plan = try? GameLauncher.plan(for: game, region: regionOverride) else { return }
+        wowAccountStore.select(account, owner: owner, uid: game.id, region: plan.region)
+    }
+
+    func findWoWAccounts(for game: Game) async throws -> [WoWGameAccount] {
+        guard !isRunning(game) else { throw WoWAccountDiscovery.Failure.gameRunning }
+        guard canPlay(game) else {
+            throw NSError(domain: "Waypoint", code: 4, userInfo: [NSLocalizedDescriptionKey: "Finish the current game action, then try again."])
+        }
+        guard canRefreshWoWAccounts(game), let account = activeAccount,
+              let token = tokenVault.token(account: account.id, codename: "WoW"), token.accountID == account.id else {
+            throw NSError(domain: "Waypoint", code: 1, userInfo: [NSLocalizedDescriptionKey: "Play WoW once to sign in, then try again."])
+        }
+        isFindingWoWAccounts = true
+        defer { isFindingWoWAccounts = false }
+        let plan = try GameLauncher.plan(for: game, region: regionOverride)
+        guard let app = game.appURL, let version = Bundle(url: app)?.object(forInfoDictionaryKey: "CFBundleVersion") as? String,
+              let build = version.split(separator: ".").last.flatMap({ UInt64($0) }), build > 0 else {
+            throw NSError(domain: "Waypoint", code: 2, userInfo: [NSLocalizedDescriptionKey: "Couldn’t read this WoW installation’s version."])
+        }
+        let accounts = try await WoWAccountDiscovery().discover(token: token, build: build, region: plan.region)
+        try Task.checkCancellation()
+        guard accountList[account.id] != nil else { throw CancellationError() }
+        guard wowAccountStore.cache(accounts, owner: account.id, region: plan.region) else {
+            throw NSError(domain: "Waypoint", code: 3, userInfo: [NSLocalizedDescriptionKey: "Couldn’t read Blizzard’s account list."])
+        }
+        return accounts
     }
 
     // MARK: Accounts
@@ -1037,6 +1109,7 @@ final class AppModel {
             return
         }
         autoLoginStates.removeValue(forKey: account.id)
+        wowAccountStore.remove(owner: account.id)
         accountList.remove(account.id)
         tokenVault.removeAll(account: account.id)
         for codename in Set(InstallableProduct.all.map(\.codename)) {
