@@ -78,15 +78,14 @@ final class BrowserReturnSheet: NSObject, NSWindowDelegate {
             do {
                 // Cold-start verification: no installed game or Battle.net metadata required.
                 let version=try await VersionService(session:session).latest(product:"wowf",region:.us)
-                guard version.buildID>0, version.region=="us" else { throw NativeGameAccounts.Failure.unavailable }
+                guard version.buildID>0, version.region=="us" else { throw WoWAccountDiscovery.Failure.unavailable }
                 guard !Task.isCancelled, self.continuation != nil else { return }
                 guard !RunningProcesses.executables().contains(where: { URL(fileURLWithPath:$0.path).lastPathComponent.hasPrefix("World of Warcraft") }) else {
                     self.status.stringValue="Close World of Warcraft before verifying this sign-in.";return
                 }
-                let native = NativeGameAccounts()
-                _ = try await native.discover(token: token, build: UInt64(version.buildID), region: .us)
+                let profile = try await WoWAccountDiscovery().profile(token: token, build: UInt64(version.buildID), region: .us)
                 guard !Task.isCancelled, self.continuation != nil else { return }
-                self.verifiedProfile = native.authenticatedProfile
+                self.verifiedProfile = profile
                 self.finish(token)
             } catch {
                 guard !Task.isCancelled, self.continuation != nil else { return }

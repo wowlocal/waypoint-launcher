@@ -1206,15 +1206,15 @@ final class AppModel {
 
     /// Issue fresh target authorization without caching an unmeasured lifetime
     /// or replacing the source account/session. Preview bundles force this route.
-    private func sharedGameAuthorization(account: Account, region: Region, target: NativeGameAccounts.CredentialTarget,
+    private func sharedGameAuthorization(account: Account, region: Region, target: SharedSignIn,
                                          sourceToken: LoginToken? = nil) async -> LoginToken? {
         do {
-            guard region == .us else { throw NativeGameAccounts.Failure.unsupported }
+            guard region == .us else { throw WoWAccountDiscovery.Failure.unsupported }
             guard !RunningProcesses.executables().contains(where: { URL(fileURLWithPath: $0.path).lastPathComponent.hasPrefix("World of Warcraft") }) else {
-                throw NativeGameAccounts.Failure.gameRunning
+                throw WoWAccountDiscovery.Failure.gameRunning
             }
             guard let source = sourceToken ?? tokenVault.token(account: account.id, codename: "WoW"), source.accountID == account.id else {
-                throw NativeGameAccounts.Failure.owner
+                throw WoWAccountDiscovery.Failure.identityMismatch
             }
             let config = URLSessionConfiguration.ephemeral
             config.waitsForConnectivity = false; config.timeoutIntervalForRequest = 10; config.timeoutIntervalForResource = 20
@@ -1222,9 +1222,9 @@ final class AppModel {
             let version = try await VersionService(session: session).latest(product: "wowf", region: .us)
             guard version.buildID > 0, !Task.isCancelled, accountList[account.id] != nil else { return nil }
             guard !RunningProcesses.executables().contains(where: { URL(fileURLWithPath: $0.path).lastPathComponent.hasPrefix("World of Warcraft") }) else {
-                throw NativeGameAccounts.Failure.gameRunning
+                throw WoWAccountDiscovery.Failure.gameRunning
             }
-            let issued = try await NativeGameAccounts().requestCredential(token: source, build: UInt64(version.buildID), region: region, target: target)
+            let issued = try await WoWAccountDiscovery().ticket(for: target, token: source, build: UInt64(version.buildID), region: region)
             guard !Task.isCancelled, accountList[account.id] != nil, issued.accountID == account.id else { return nil }
             Log.info(.auth, "shared_authorization_issued", nil, ["source": "WoW", "target": target.codename])
             return issued
@@ -1232,7 +1232,7 @@ final class AppModel {
             guard !Task.isCancelled else { return nil }
             Log.warning(.auth, "shared_authorization_failed")
             let alert = NSAlert(); alert.messageText = "Shared sign-in could not continue"
-            alert.informativeText = "Shared sign-in requires a saved WoW login for this Battle.net account, the Americas region, and Blizzard games closed on every device. Your saved logins were kept. You can try again, or use Sign In Again and Play to sign in directly to \(target.displayName)."
+            alert.informativeText = "Shared sign-in requires a saved WoW login for this Battle.net account, the Americas region, and Blizzard games closed on every device. Your saved logins were kept. You can try again, or use Sign In Again and Play to sign in directly to the game."
             alert.runModal(); return nil
         }
     }
@@ -1260,7 +1260,7 @@ final class AppModel {
         // of asking for credentials. Missing sources and untested regions keep
         // the established direct-login flow. A failed exchange stops explicitly.
         if !forceSignIn, let account, plan.region == .us,
-           let target = NativeGameAccounts.CredentialTarget(sharedCodename: plan.codename),
+           let target = SharedSignIn(codename: plan.codename),
            let source = tokenVault.token(account: account.id, codename: "WoW"), source.accountID == account.id {
             return await sharedGameAuthorization(account: account, region: plan.region, target: target, sourceToken: source)
         }

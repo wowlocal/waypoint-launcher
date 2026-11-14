@@ -137,10 +137,13 @@ enum WoWAccountWire {
     }
 
     /// Signs in with the web login's ticket, as the game itself does.
-    static func logonRequest(token: LoginToken, build: UInt64) -> Data {
+    /// `program` and `platform` name the game and system signing in: WoW on
+    /// a Mac unless said otherwise.
+    static func logonRequest(token: LoginToken, build: UInt64, program: UInt64 = program,
+                             platform: String = "Mc64") -> Data {
         var body = ProtoWriter()
         body.varint(1, program)
-        body.string(2, "Mc64")
+        body.string(2, platform)
         body.string(3, "enUS")
         body.varint(4, build)
         body.message(10) { $0.string(1, token.value) }
@@ -150,6 +153,14 @@ enum WoWAccountWire {
     static func accountDetailsRequest(handle: Data) -> Data {
         var body = ProtoWriter()
         body.bytes(1, handle)
+        return body.data
+    }
+
+    /// Asks the signed-in session for a ticket to another game (`program`),
+    /// for the same Battle.net account: GenerateAuthToken.
+    static func authTokenRequest(program: UInt64) -> Data {
+        var body = ProtoWriter()
+        body.varint(1, program)
         return body.data
     }
 
@@ -182,5 +193,16 @@ enum WoWAccountWire {
     static func accountDetails(_ body: Data) throws -> (owner: UInt64, name: Data) {
         let info = try Message(body).message(1)
         return (try info.uint(1), try info.bytes(2))
+    }
+
+    static let maximumTicket = 256
+
+    /// The ticket a GenerateAuthToken reply carries. Only its form is checked
+    /// here; whose it is, is up to the caller.
+    static func authToken(_ body: Data) throws -> LoginToken {
+        let data = try Message(body).bytes(1)
+        guard data.count <= maximumTicket, let text = String(data: data, encoding: .utf8),
+              let token = LoginToken(text) else { throw Failure.malformed }
+        return token
     }
 }
