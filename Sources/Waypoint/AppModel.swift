@@ -848,7 +848,7 @@ final class AppModel {
     /// each serve a single request.
     var isSigningIn: Bool {
         isAddingAccount || isManagingSavedLogin || phases.values.contains {
-            switch $0 { case .signingIn, .preparingWindows, .launching: true; default: false }
+            switch $0 { case .signingIn, .preparingWindows: true; default: false }
         }
     }
 
@@ -1223,39 +1223,6 @@ final class AppModel {
         }
     }
 
-    /// Issue fresh target authorization without caching an unmeasured lifetime
-    /// or replacing the source account/session. Preview bundles force this route.
-    private func sharedGameAuthorization(account: Account, region: Region, target: SharedSignIn,
-                                         sourceToken: LoginToken? = nil) async -> LoginToken? {
-        do {
-            guard region == .us else { throw WoWAccountDiscovery.Failure.unsupported }
-            guard !RunningProcesses.executables().contains(where: { URL(fileURLWithPath: $0.path).lastPathComponent.hasPrefix("World of Warcraft") }) else {
-                throw WoWAccountDiscovery.Failure.gameRunning
-            }
-            guard let source = sourceToken ?? tokenVault.token(account: account.id, codename: "WoW"), source.accountID == account.id else {
-                throw WoWAccountDiscovery.Failure.identityMismatch
-            }
-            let config = URLSessionConfiguration.ephemeral
-            config.waitsForConnectivity = false; config.timeoutIntervalForRequest = 10; config.timeoutIntervalForResource = 20
-            let session = URLSession(configuration: config); defer { session.invalidateAndCancel() }
-            let version = try await VersionService(session: session).latest(product: "wowf", region: .us)
-            guard version.buildID > 0, !Task.isCancelled, accountList[account.id] != nil else { return nil }
-            guard !RunningProcesses.executables().contains(where: { URL(fileURLWithPath: $0.path).lastPathComponent.hasPrefix("World of Warcraft") }) else {
-                throw WoWAccountDiscovery.Failure.gameRunning
-            }
-            let issued = try await WoWAccountDiscovery().ticket(for: target, token: source, build: UInt64(version.buildID), region: region)
-            guard !Task.isCancelled, accountList[account.id] != nil, issued.accountID == account.id else { return nil }
-            Log.info(.auth, "shared_authorization_issued", nil, ["source": "WoW", "target": target.codename])
-            return issued
-        } catch {
-            guard !Task.isCancelled else { return nil }
-            Log.warning(.auth, "shared_authorization_failed")
-            let alert = NSAlert(); alert.messageText = "Shared sign-in could not continue"
-            alert.informativeText = "Shared sign-in requires a saved WoW login for this Battle.net account, the Americas region, and Blizzard games closed on every device. Your saved logins were kept. You can try again, or use Sign In Again and Play to sign in directly to the game."
-            alert.runModal(); return nil
-        }
-    }
-
     /// The account's token for the game, from the keychain. Without one (or
     /// when forced), signs in once with the saved password when opted in, then
     /// opens the login window; a rejected saved login goes to the interactive
@@ -1269,19 +1236,28 @@ final class AppModel {
         // Only tokens Waypoint got itself. The one Battle.net leaves in the
         // game's Launch Options can be long expired: the game then shows
         // "Closed" and Waypoint can't tell, so it would keep handing it over.
-        // Cached game tickets are reused; their server lifetime is not assumed.
+        // Nothing is refreshed first: Battle.net's login page keeps no session
+        // that signs in again without the form, and a token lasts for months.
         if !forceSignIn, let account, let token = tokenVault.token(account: account.id, codename: plan.codename) {
             Log.info(.auth, "token", nil, ["source": "keychain", "codename": plan.codename])
             return token
         }
 
-        // A new supported family can use the saved WoW authorization instead
-        // of asking for credentials. Missing sources and untested regions keep
-        // the established direct-login flow. A failed exchange stops explicitly.
-        if !forceSignIn, let account, plan.region == .us,
-           let target = SharedSignIn(codename: plan.codename),
-           let source = tokenVault.token(account: account.id, codename: "WoW"), source.accountID == account.id {
-            return await sharedGameAuthorization(account: account, region: plan.region, target: target, sourceToken: source)
+        // Hearthstone and Diablo IV can get their ticket from the saved WoW
+        // login instead of a sign-in of their own. Whatever stops that, the
+        // usual sign-in below follows, without a word about it.
+        if !forceSignIn, let account, let game = SharedSignIn(codename: plan.codename),
+           let issued = await WoWAccountDiscovery(timeout: .seconds(15))
+               .sharedTicket(for: game, from: tokenVault.token(account: account.id, codename: "WoW"),
+                             account: account.id, region: plan.region),
+           accountList[account.id] != nil {
+            Log.info(.auth, "token", nil, ["source": "shared_sign_in", "codename": plan.codename])
+            do {
+                try tokenVault.save(issued, codename: plan.codename)
+            } catch {
+                Log.warning(.auth, "token_save_failed", nil, ["error": error])
+            }
+            return issued
         }
 
         if let account, var state = autoLoginStates[account.id], state.begin() {

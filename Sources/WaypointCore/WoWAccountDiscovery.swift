@@ -6,8 +6,9 @@ import Network
 /// The same sign-in also tells whose ticket it is (`profile`) and can issue
 /// a ticket for another game (`ticket(for:…)`).
 ///
-/// Only for the explicit "refresh accounts" action. Playing never needs it:
-/// a launch without a chosen account lets the game pick as it always has.
+/// Listing accounts is only for the explicit "refresh accounts" action.
+/// Playing never needs it: a launch without a chosen account lets the game
+/// pick as it always has.
 ///
 /// The sign-in is a game session of its own, so it isn't made while a WoW
 /// client runs. Each call is one bounded attempt on a fresh connection, and
@@ -122,6 +123,32 @@ public final class WoWAccountDiscovery {
     /// game needs no sign-in of its own. `token` is a WoW ticket.
     public func ticket(for game: SharedSignIn, token: LoginToken, build: UInt64, region: Region) async throws -> LoginToken {
         try await withSession(token: token, build: build, region: region) { try await $0.authToken(for: game.program) }
+    }
+
+    /// A ticket for `game` from the account's saved WoW ticket, or nil
+    /// whenever that can't be had: no WoW ticket of that account's, a region
+    /// not tried, WoW running, or any failure on the way. Nothing is asked of
+    /// the network in the first three cases. The caller then signs in the
+    /// usual way, so nil needs no explaining to anyone.
+    /// `build`: the WoW build to sign in with, the live one unless told.
+    public func sharedTicket(for game: SharedSignIn, from wowToken: LoginToken?, account: String, region: Region,
+                             build: @MainActor (Region) async throws -> UInt64 = WoWAccountDiscovery.liveBuild) async -> LoginToken? {
+        func skip(_ reason: String, _ error: (any Error)? = nil) -> LoginToken? {
+            var fields: [String: Any] = ["codename": game.codename, "reason": reason]
+            if let error { fields["error"] = error }
+            Log.info(.auth, "shared_sign_in_skipped", nil, fields)
+            return nil
+        }
+        guard let wowToken, wowToken.accountID == account else { return skip("no_wow_login") }
+        guard Self.supports(region) else { return skip("region") }
+        guard !isWoWRunning() else { return skip("wow_running") }
+        do {
+            let issued = try await ticket(for: game, token: wowToken, build: build(region), region: region)
+            guard issued.accountID == account else { return skip("other_account") }
+            return issued
+        } catch {
+            return skip(error is CancellationError ? "cancelled" : "failed", error)
+        }
     }
 
     /// Signs in on a fresh connection, runs `operation` on it, and closes it.

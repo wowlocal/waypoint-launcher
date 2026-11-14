@@ -663,3 +663,91 @@ private func authTokenRequest(_ token: UInt64, program: UInt64) -> Data {
     #expect(try wowRequest.uint(1) == wow)
     #expect(try wowRequest.bytes(2) == Data("Mc64".utf8))
 }
+
+// MARK: Shared sign-in on Play
+
+/// What one Play of a shared-sign-in game asked of the network.
+@MainActor
+private final class SharedPlay {
+    var connections = 0
+    var buildLookups = 0
+    var servers: [ScriptedServer]
+    var wowRunning = false
+    var buildFails = false
+
+    init(_ servers: [ScriptedServer] = []) { self.servers = servers }
+
+    func sharedTicket(from wowToken: LoginToken? = ticket, account: String = "123", region: Region = .us,
+                timeout: Duration = .seconds(30)) async -> LoginToken? {
+        let discovery = WoWAccountDiscovery(timeout: timeout, isWoWRunning: { self.wowRunning }, transport: { _ in
+            self.connections += 1
+            return self.servers.isEmpty ? ScriptedServer() : self.servers.removeFirst()
+        })
+        return await discovery.sharedTicket(for: .hearthstone, from: wowToken, account: account, region: region) { _ in
+            self.buildLookups += 1
+            if self.buildFails { throw URLError(.notConnectedToInternet) }
+            return 70938
+        }
+    }
+}
+
+private let issued = "US-fedcba9876543210fedcba9876543210-123"
+
+@Test @MainActor func aSharedTicketComesFromTheSavedWoWLogin() async throws {
+    let server = ScriptedServer(signedIn() + [reply(2, text(1, issued))])
+    let play = SharedPlay([server])
+    #expect(await play.sharedTicket()?.value == issued)
+    #expect(play.connections == 1 && server.cancelled)
+}
+
+@Test @MainActor func withoutAWoWLoginOfItsOwnTheUsualSignInFollowsAtOnce() async {
+    for wowToken in [nil, LoginToken("US-0123456789abcdef0123456789abcdef-999")!] {
+        let play = SharedPlay()
+        #expect(await play.sharedTicket(from: wowToken) == nil)
+        #expect(play.connections == 0 && play.buildLookups == 0)
+    }
+    // Regions it hasn't been tried in.
+    for region in Region.allCases where !WoWAccountDiscovery.supports(region) {
+        let play = SharedPlay()
+        #expect(await play.sharedTicket(region: region) == nil)
+        #expect(play.connections == 0 && play.buildLookups == 0)
+    }
+}
+
+@Test @MainActor func whileWoWRunsTheExchangeIsSkipped() async {
+    let play = SharedPlay([ScriptedServer(signedIn() + [reply(2, text(1, issued))])])
+    play.wowRunning = true
+    #expect(await play.sharedTicket() == nil)
+    #expect(play.connections == 0 && play.buildLookups == 0)
+}
+
+@Test @MainActor func anyFailedExchangeEndsInNilForTheUsualSignIn() async {
+    let failures: [[Data]] = [
+        signedIn() + [reply(2, status: 3)], // rejected
+        signedIn() + [reply(2, text(1, "US-fedcba9876543210fedcba9876543210-999"))], // someone else's ticket
+        signedIn(owner: 999) + [reply(2, text(1, issued))], // someone else's session
+        [reply(0), reply(1, status: 5)], // the WoW ticket itself refused
+        signedIn() + [reply(2, text(1, issued)).dropLast(4)], // hung up
+        signedIn() + [reply(2, text(1, "garbage"))],
+    ]
+    for frames in failures {
+        let server = ScriptedServer(frames)
+        let play = SharedPlay([server])
+        #expect(await play.sharedTicket() == nil)
+        #expect(server.cancelled)
+    }
+
+    let stalled = ScriptedServer(signedIn())
+    stalled.stalls = true
+    #expect(await SharedPlay([stalled]).sharedTicket(timeout: .milliseconds(30)) == nil)
+    #expect(stalled.cancelled && stalled.pending == nil)
+
+    let refused = ScriptedServer()
+    refused.failsConnect = true
+    #expect(await SharedPlay([refused]).sharedTicket() == nil)
+
+    let offline = SharedPlay()
+    offline.buildFails = true
+    #expect(await offline.sharedTicket() == nil)
+    #expect(offline.connections == 0)
+}
