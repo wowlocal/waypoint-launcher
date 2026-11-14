@@ -13,7 +13,6 @@ enum AccountMenu {
             let item = ActionItem(account.displayName, enabled: enabled) { model.switchAccount(to: account.id) }
             item.image = .account(account)
             item.state = account.id == model.activeAccount?.id ? .on : .off
-            if #available(macOS 14.4, *), account.battleTag != nil { item.subtitle = account.email }
             return item
         }
         if !items.isEmpty { items.append(.separator()) }
@@ -21,6 +20,9 @@ enum AccountMenu {
             Task { await model.addAccount() }
         })
         if let active = model.activeAccount {
+            let refresh = ActionItem("Refresh BattleTag", enabled: enabled) { Task { await model.refreshBattleTag() } }
+            refresh.toolTip = "Americas accounts. Close WoW on all devices first. Uses the saved login without another sign-in."
+            items.append(refresh)
             items.append(ActionItem("Sign In to \(active.displayName) Again…", enabled: enabled) {
                 Task { await model.signInAgain() }
             })

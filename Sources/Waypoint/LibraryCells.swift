@@ -359,6 +359,15 @@ final class GameCell: NSView {
             if model.availableUpdate(for: game) != nil {
                 menu.addItem(ActionItem("Play Without Updating") { Task { await model.play(game) } })
             }
+            if model.supportsGameAccountSelection(game) {
+                if let selected = model.selectedGameAccountName(for: game) {
+                    let current = NSMenuItem(title:"Game account: \(selected)", action:nil, keyEquivalent:"")
+                    current.isEnabled = false; menu.addItem(current)
+                }
+                menu.addItem(ActionItem("Select account…", enabled: model.canPlay(game)) {
+                    Task { await model.selectGameAccount(for: game) }
+                })
+            }
             let others = model.accounts.filter { $0.id != model.activeAccount?.id }
             if !others.isEmpty {
                 let playAs = NSMenuItem(title: "Play As", action: nil, keyEquivalent: "")

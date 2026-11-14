@@ -13,50 +13,59 @@ public struct LaunchOptions {
     /// The key prefix the game looks under. Not the same as the product code.
     public var gameKey: String
     public var userName: String
+    public var preferencesDomain: String
 
-    public init(gameKey: String, userName: String = NSUserName()) {
+    public init(gameKey: String, userName: String = NSUserName(), preferencesDomain: String = "net.battle") {
         self.gameKey = gameKey
         self.userName = userName
+        self.preferencesDomain = preferencesDomain
     }
 
     public var webTokenKey: String { "Launch Options/\(gameKey)/WEB_TOKEN" }
     public var regionKey: String { "Launch Options/\(gameKey)/REGION" }
+    public var gameAccountKey: String { "Launch Options/\(gameKey)/GAME_ACCOUNT" }
     public var localeKey: String { "Launch Options/\(gameKey)/LOCALE" }
 
     // MARK: Reading and writing
 
     public func storedToken() throws -> String? {
-        guard let data = CFPreferencesCopyAppValue(webTokenKey as CFString, Self.domain) as? Data else { return nil }
+        guard let data = CFPreferencesCopyAppValue(webTokenKey as CFString, preferencesDomain as CFString) as? Data else { return nil }
         return try TokenCipher(userName: userName).decrypt(data)
     }
 
     public func storedRegion() -> String? {
-        CFPreferencesCopyAppValue(regionKey as CFString, Self.domain) as? String
+        CFPreferencesCopyAppValue(regionKey as CFString, preferencesDomain as CFString) as? String
     }
 
     public func storedLocale() -> String? {
-        CFPreferencesCopyAppValue(localeKey as CFString, Self.domain) as? String
+        CFPreferencesCopyAppValue(localeKey as CFString, preferencesDomain as CFString) as? String
     }
 
     /// Writes the token and region the way Battle.net does. Locale is only
     /// written when given, so we don't clobber what the user picked in Battle.net.
-    public func write(token: String, region: Region, locale: String?) throws {
+    public func write(token: String, region: Region, locale: String?, gameAccount: String? = nil) throws {
         let encrypted = try TokenCipher(userName: userName).encrypt(token)
         set(webTokenKey, encrypted as CFData)
         set(regionKey, region.launchOptionValue as CFString)
         if let locale { set(localeKey, locale as CFString) }
-        guard CFPreferencesAppSynchronize(Self.domain) else {
+        if let gameAccount { set(gameAccountKey, gameAccount as CFString) }
+        else if gameKey == "WoW" {
+            // No managed choice for this owner/region: let WoW choose rather
+            // than inherit another launch's licence from shared preferences.
+            CFPreferencesSetAppValue(gameAccountKey as CFString, nil, preferencesDomain as CFString)
+        }
+        guard CFPreferencesAppSynchronize(preferencesDomain as CFString) else {
             throw CocoaError(.fileWriteUnknown, userInfo: [NSLocalizedDescriptionKey: "Could not save net.battle preferences"])
         }
     }
 
     public func clearToken() {
-        CFPreferencesSetAppValue(webTokenKey as CFString, nil, Self.domain)
-        CFPreferencesAppSynchronize(Self.domain)
+        CFPreferencesSetAppValue(webTokenKey as CFString, nil, preferencesDomain as CFString)
+        CFPreferencesAppSynchronize(preferencesDomain as CFString)
     }
 
     private func set(_ key: String, _ value: CFPropertyList) {
-        CFPreferencesSetAppValue(key as CFString, value, Self.domain)
+        CFPreferencesSetAppValue(key as CFString, value, preferencesDomain as CFString)
     }
 }
 

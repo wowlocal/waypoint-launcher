@@ -203,6 +203,7 @@ final class LoginWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler {
     /// last `run`, to name the account by: Blizzard's account page doesn't
     /// see this login's session, so it can't say the BattleTag or email.
     private(set) var typedAccountName: String?
+    private(set) var verifiedProfile: NativeAccountProfile?
     /// Covers the page while the known email or phone goes in, until the
     /// password step shows; it also takes the clicks meant for the page.
     private var loadingOverlay: NSView?
@@ -265,7 +266,8 @@ final class LoginWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler {
     /// page shows once it's at the password.
     func run(_ url: URL, title: String, session: WebSessionID, accountName: String? = nil,
              preparedWebView: WKWebView? = nil, notice: String? = nil) async -> LoginToken? {
-        await withCheckedContinuation { continuation in
+        verifiedProfile = nil
+        return await withCheckedContinuation { continuation in
             self.continuation = continuation
             let catcher = TokenCatcher()
             self.catcher = catcher
@@ -413,6 +415,7 @@ final class LoginWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler {
     private func finish(_ token: LoginToken?) {
         guard let continuation else { return }
         self.continuation = nil
+        if token == nil { verifiedProfile = nil }
         webView?.configuration.userContentController.removeScriptMessageHandler(forName: Self.accountNameHandler)
         webView = nil
         loadingOverlay = nil

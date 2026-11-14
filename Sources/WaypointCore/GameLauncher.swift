@@ -10,6 +10,7 @@ public struct LaunchPlan: Equatable, Sendable {
     public var codename: String
     public var region: Region
     public var locale: String?
+    public var gameAccount: String? = nil
     var windows: WindowsLaunchTarget? = nil
     public var isWindows: Bool { windows != nil }
 }
@@ -84,7 +85,7 @@ public enum GameLauncher {
     @discardableResult
     public static func launch(_ plan: LaunchPlan, token: LoginToken, gameName: String) throws -> Int32 {
         guard !plan.isWindows else { throw LaunchError.unsupported("Launch Windows games from Waypoint") }
-        try LaunchOptions(gameKey: plan.codename).write(token: token.value, region: plan.region, locale: plan.locale)
+        try LaunchOptions(gameKey: plan.codename).write(token: token.value, region: plan.region, locale: plan.locale, gameAccount: plan.gameAccount)
         Log.info(.launch, "launch_options_written", nil, ["codename": plan.codename, "region": plan.region.rawValue, "locale": plan.locale ?? "-"])
 
         do {

@@ -35,9 +35,11 @@ public struct Account: Codable, Equatable, Sendable, Identifiable {
         self.tint = tint
     }
 
-    /// The BattleTag once Blizzard's account page has told us; until then
-    /// the email, or the bare account id.
-    public var displayName: String { battleTag ?? email ?? "Account \(id)" }
+    /// Public-facing account label. Email is retained only for sign-in.
+    public var displayName: String {
+        let tag = battleTag?.trimmingCharacters(in: .whitespacesAndNewlines)
+        return tag.flatMap { $0.isEmpty ? nil : $0 } ?? "Account \(id)"
+    }
 }
 
 /// The saved accounts and the one games launch with.

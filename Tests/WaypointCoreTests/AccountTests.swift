@@ -72,12 +72,12 @@ import Testing
     #expect(list["1"]?.tint == .blue)
 }
 
-@Test func accountNamesFallBackToEmailThenID() {
+@Test func accountNamesHideEmailUntilBattleTagIsKnown() {
     var list = AccountList()
     list.signedIn("42", session: .shared)
     #expect(list["42"]?.displayName == "Account 42")
     list.setProfile("42", battleTag: nil, email: "a@example.com")
-    #expect(list["42"]?.displayName == "a@example.com")
+    #expect(list["42"]?.displayName == "Account 42")
     list.setProfile("42", battleTag: "Name#1234", email: nil)
     #expect(list["42"]?.displayName == "Name#1234")
     #expect(list["42"]?.email == "a@example.com")
@@ -120,4 +120,15 @@ import Testing
     vault.removeAll(account: "111")
     #expect(vault.token(account: "111", codename: "WoW") == nil)
     #expect(vault.token(account: "222", codename: "WTCG") == other)
+}
+
+@Test func accountNamesPreferBattleTagsWithoutExposingEmail() {
+    var list = AccountList()
+    list.signedIn("42", session: .shared)
+    #expect(list["42"]?.displayName == "Account 42")
+    list.setProfile("42", battleTag: nil, email: "a@example.com")
+    #expect(list["42"]?.displayName == "Account 42")
+    list.setProfile("42", battleTag: "Name#1234", email: nil)
+    #expect(list["42"]?.displayName == "Name#1234")
+    #expect(list["42"]?.email == "a@example.com")
 }
