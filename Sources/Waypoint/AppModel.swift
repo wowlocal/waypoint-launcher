@@ -1170,7 +1170,7 @@ final class AppModel {
             return await adopt(token, codename: codename, session: session, typedName: loginWindow.typedAccountName,
                                activate: activate)
         }
-        Log.info(.auth, "token", nil, ["source": "browser", "codename": codename])
+        Log.info(.auth, "browser_return_adopted", nil, ["codename": codename])
         let kept = accountList[token.accountID]?.session
         if let kept, kept != session { await WebSession.delete(session) }
         return await adopt(token, codename: codename, session: kept ?? session, activate: activate, profile: profile)
@@ -1245,8 +1245,9 @@ final class AppModel {
 
         // Hearthstone and Diablo IV can get their ticket from the saved WoW
         // login instead of a sign-in of their own. Whatever stops that, the
-        // usual sign-in below follows, without a word about it.
-        if !forceSignIn, let account, let game = SharedSignIn(codename: plan.codename),
+        // usual sign-in below follows, without a word about it. Not while WoW
+        // accounts are being found: that's a game-service sign-in already.
+        if !forceSignIn, !isFindingWoWAccounts, let account, let game = SharedSignIn(codename: plan.codename),
            let issued = await WoWAccountDiscovery(timeout: .seconds(15))
                .sharedTicket(for: game, from: tokenVault.token(account: account.id, codename: "WoW"),
                              account: account.id, region: plan.region),
@@ -1259,6 +1260,8 @@ final class AppModel {
             }
             return issued
         }
+        // Cancelled meanwhile: nobody is waiting for a login window.
+        guard !Task.isCancelled else { return nil }
 
         if let account, var state = autoLoginStates[account.id], state.begin() {
             autoLoginStates[account.id] = state // Persist before reading/submitting the password.

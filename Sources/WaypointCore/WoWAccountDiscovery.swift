@@ -130,9 +130,11 @@ public final class WoWAccountDiscovery {
     /// not tried, WoW running, or any failure on the way. Nothing is asked of
     /// the network in the first three cases. The caller then signs in the
     /// usual way, so nil needs no explaining to anyone.
-    /// `build`: the WoW build to sign in with, the live one unless told.
+    /// `build`: the WoW build to sign in with; by default the live one, asked
+    /// for within 5 s, as Play waits for all this before the usual sign-in.
     public func sharedTicket(for game: SharedSignIn, from wowToken: LoginToken?, account: String, region: Region,
-                             build: @MainActor (Region) async throws -> UInt64 = WoWAccountDiscovery.liveBuild) async -> LoginToken? {
+                             build: @MainActor (Region) async throws -> UInt64 = { try await liveBuild(region: $0, timeout: 5) })
+        async -> LoginToken? {
         func skip(_ reason: String, _ error: (any Error)? = nil) -> LoginToken? {
             var fields: [String: Any] = ["codename": game.codename, "reason": reason]
             if let error { fields["error"] = error }

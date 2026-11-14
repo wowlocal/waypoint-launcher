@@ -4,7 +4,8 @@ import WaypointCore
 /// Signs in to WoW in the user's own browser, for its password manager or a
 /// passkey. Blizzard's page ends on `http://localhost:0/?ST=…`, which no
 /// browser can open; the user pastes that address here. Nothing is read from
-/// the browser or the pasteboard on its own.
+/// the browser or the pasteboard on its own; reading the pasteboard would
+/// also have macOS ask the user whether to allow it.
 ///
 /// A pasted address is only a claim: it's used once the game service signed
 /// in with its ticket and said whose it is.
@@ -23,6 +24,9 @@ final class BrowserReturnSheet: NSObject, NSWindowDelegate, NSTextFieldDelegate 
     private var url: URL?
     private var expectedOwner: String?
     private var task: Task<Void, Never>?
+    /// The pasteboard's change count when the field last changed: unchanged
+    /// later, it still holds what was there then, most likely the address.
+    private var pasteboardChangeCount: Int?
 
     /// `expectedOwner`: the account being signed in to again, if any; an
     /// address for another one is refused.
@@ -83,8 +87,11 @@ final class BrowserReturnSheet: NSObject, NSWindowDelegate, NSTextFieldDelegate 
     }
 
     func controlTextDidChange(_ notification: Notification) {
-        signInButton.isEnabled = task == nil && !field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty
+        pasteboardChangeCount = NSPasteboard.general.changeCount
+        signInButton.isEnabled = task == nil && hasText
     }
+
+    private var hasText: Bool { !field.stringValue.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty }
 
     @objc private func openBrowser() {
         guard let url else { return }
@@ -123,9 +130,7 @@ final class BrowserReturnSheet: NSObject, NSWindowDelegate, NSTextFieldDelegate 
                 self.verifiedProfile = profile
                 // The address signs in as the user: don't leave it lying around.
                 let pasteboard = NSPasteboard.general
-                if pasteboard.string(forType: .string)?.trimmingCharacters(in: .whitespacesAndNewlines) == text {
-                    pasteboard.clearContents()
-                }
+                if pasteboard.changeCount == self.pasteboardChangeCount { pasteboard.clearContents() }
                 self.finish(token)
             } catch {
                 guard !Task.isCancelled, self.continuation != nil else { return }
@@ -142,7 +147,7 @@ final class BrowserReturnSheet: NSObject, NSWindowDelegate, NSTextFieldDelegate 
     private func setVerifying(_ verifying: Bool) {
         field.isEnabled = !verifying
         openButton.isEnabled = !verifying
-        signInButton.isEnabled = !verifying && !field.stringValue.isEmpty
+        signInButton.isEnabled = !verifying && hasText
         if verifying {
             spinner.startAnimation(nil)
             status.stringValue = "Checking with Blizzard…"

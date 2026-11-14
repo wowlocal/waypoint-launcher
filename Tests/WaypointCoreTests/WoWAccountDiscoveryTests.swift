@@ -645,6 +645,12 @@ private func authTokenRequest(_ token: UInt64, program: UInt64) -> Data {
         }
         #expect(server.cancelled)
     }
+    // Nothing is asked of another account's session.
+    let other = ScriptedServer(signedIn(owner: 999) + [reply(2, text(1, "US-fedcba9876543210fedcba9876543210-999"))])
+    await #expect(throws: WoWAccountDiscovery.Failure.identityMismatch) {
+        try await discovery(other).ticket(for: .diabloIV, token: ticket, build: 70938, region: .us)
+    }
+    #expect(other.sent.count == 2)
 }
 
 @Test func onlyTriedGamesShareTheWoWSignIn() {

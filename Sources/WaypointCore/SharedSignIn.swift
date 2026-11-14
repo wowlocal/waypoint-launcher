@@ -32,12 +32,13 @@ extension WoWAccountDiscovery {
     public nonisolated static func isWoWRunning() -> Bool { isWoWRunning(in: RunningProcesses.executables()) }
 
     /// The live WoW build in `region`, to sign in with where no WoW is
-    /// installed. One short attempt: callers have another way to go.
-    public nonisolated static func liveBuild(region: Region) async throws -> UInt64 {
+    /// installed. One short attempt of at most `timeout` seconds: callers
+    /// have another way to go.
+    public nonisolated static func liveBuild(region: Region, timeout: TimeInterval = 20) async throws -> UInt64 {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.waitsForConnectivity = false
-        configuration.timeoutIntervalForRequest = 10
-        configuration.timeoutIntervalForResource = 20
+        configuration.timeoutIntervalForRequest = min(10, timeout)
+        configuration.timeoutIntervalForResource = timeout
         let session = URLSession(configuration: configuration)
         defer { session.invalidateAndCancel() }
         let version = try await VersionService(session: session).latest(product: "wowf", region: region)
