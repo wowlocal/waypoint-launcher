@@ -199,16 +199,53 @@ public enum BattleNetInstallMetadata {
         }
     }
 
-    /// Publish a complete record atomically, without replacing an existing one.
-    private static func create(_ data: Data, at destination: URL) throws -> Bool {
+    /// Publish a complete record atomically, without replacing an existing
+    /// one. `renameExclusive` returns 0 or the `errno` it failed with.
+    static func create(_ data: Data, at destination: URL,
+                       renameExclusive: (String, String) -> Int32 = { renamex_np($0, $1, UInt32(RENAME_EXCL)) == 0 ? 0 : errno }) throws -> Bool {
         let fm = FileManager.default
         if fm.fileExists(atPath: destination.path) { return false }
         let temporary = destination.deletingLastPathComponent().appendingPathComponent(".waypoint-metadata-\(UUID().uuidString)")
         defer { try? fm.removeItem(at: temporary) }
         try data.write(to: temporary, options: .atomic)
-        if renamex_np(temporary.path, destination.path, UInt32(RENAME_EXCL)) == 0 { return true }
-        if errno == EEXIST { return false }
-        throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        switch renameExclusive(temporary.path, destination.path) {
+        case 0: return true
+        case EEXIST: return false
+        // ExFAT, MS-DOS and SMB volumes don't rename exclusively.
+        case ENOTSUP, EINVAL: return try createExclusively(data, at: destination)
+        case let code: throw POSIXError(POSIXErrorCode(rawValue: code) ?? .EIO)
+        }
+    }
+
+    /// `create` where renaming can't be exclusive: the file is created only
+    /// if there is none, written in full and flushed. One left part-written
+    /// (the disk filled up, say) is removed again.
+    private static func createExclusively(_ data: Data, at destination: URL) throws -> Bool {
+        let fd = open(destination.path, O_WRONLY | O_CREAT | O_EXCL | O_NOFOLLOW | O_CLOEXEC, 0o666)
+        if fd < 0 {
+            if errno == EEXIST { return false }
+            throw POSIXError(POSIXErrorCode(rawValue: errno) ?? .EIO)
+        }
+        var failure: Int32 = 0
+        data.withUnsafeBytes { buffer in
+            var offset = 0
+            while offset < buffer.count {
+                let written = write(fd, buffer.baseAddress! + offset, buffer.count - offset)
+                if written < 0 {
+                    if errno == EINTR { continue }
+                    failure = errno
+                    return
+                }
+                offset += written
+            }
+        }
+        if failure == 0, fsync(fd) != 0 { failure = errno }
+        if close(fd) != 0, failure == 0 { failure = errno }
+        guard failure == 0 else {
+            unlink(destination.path)
+            throw POSIXError(POSIXErrorCode(rawValue: failure) ?? .EIO)
+        }
+        return true
     }
 
     /// The on-disk Agent message, not the central Database envelope. Defaults
