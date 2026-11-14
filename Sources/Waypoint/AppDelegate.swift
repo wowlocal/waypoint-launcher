@@ -114,6 +114,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         appUpdater.restartToUpdate()
     }
 
+    @objc func locateInstalledGames(_ sender: Any?) {
+        Task { await model.locateInstalledGames() }
+    }
+
     @objc func rescan(_ sender: Any?) {
         model.reload()
     }
