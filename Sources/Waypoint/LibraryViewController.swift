@@ -81,7 +81,6 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
 
     private let table = NSTableView()
     private let scrollView = NSScrollView()
-    private let emptyState = NSStackView()
     private let updateBanner = NSView()
     private let updateIcon = NSImageView()
     private let updateSpinner = NSProgressIndicator.spinner()
@@ -130,34 +129,16 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
         scrollView.autohidesScrollers = true
         scrollView.drawsBackground = false
 
-        let emptyIcon = NSImageView(image: .symbol("gamecontroller", pointSize: 44) ?? NSImage())
-        emptyIcon.contentTintColor = .tertiaryLabelColor
-        let emptyTitle = NSTextField.label(.title2)
-        emptyTitle.font = .systemFont(ofSize: emptyTitle.font?.pointSize ?? 17, weight: .semibold)
-        emptyTitle.stringValue = "No Games"
-        let emptyDetail = NSTextField.label(.body, color: .secondaryLabelColor)
-        emptyDetail.stringValue = "Blizzard games on this Mac appear here."
-        emptyState.setViews([emptyIcon, emptyTitle, emptyDetail], in: .center)
-        emptyState.orientation = .vertical
-        emptyState.spacing = 6
-        emptyState.setCustomSpacing(12, after: emptyIcon)
-
-        let content = NSView()
-        for view in [scrollView, emptyState] as [NSView] {
-            view.translatesAutoresizingMaskIntoConstraints = false
-            content.addSubview(view)
-        }
         // The window's content runs under its toolbar: the scroll view insets
-        // its rows itself, the empty state centers in what's left.
-        let visible = content.safeAreaLayoutGuide
+        // its rows itself. There is always a row: Available Games, at least.
+        let content = NSView()
+        scrollView.translatesAutoresizingMaskIntoConstraints = false
+        content.addSubview(scrollView)
         NSLayoutConstraint.activate([
             scrollView.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             scrollView.trailingAnchor.constraint(equalTo: content.trailingAnchor),
             scrollView.topAnchor.constraint(equalTo: content.topAnchor),
             scrollView.bottomAnchor.constraint(equalTo: content.bottomAnchor),
-            emptyState.centerXAnchor.constraint(equalTo: visible.centerXAnchor),
-            emptyState.centerYAnchor.constraint(equalTo: visible.centerYAnchor),
-            emptyState.widthAnchor.constraint(lessThanOrEqualTo: visible.widthAnchor, constant: -32),
         ])
         content.setContentHuggingPriority(.init(1), for: .vertical)
         content.setContentCompressionResistancePriority(.init(1), for: .vertical)
@@ -260,8 +241,6 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
     private func show(_ newRows: [Row]) {
         var previousRows = rows
         rows = newRows
-        scrollView.isHidden = rows.isEmpty
-        emptyState.isHidden = !rows.isEmpty
         let current = rows.map(\.id)
         // Nothing on screen to move, or the person asked for less motion:
         // load the list as it is now.
