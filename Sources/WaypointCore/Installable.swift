@@ -7,12 +7,23 @@ import Foundation
 public struct InstallableProduct: Sendable, Identifiable, Equatable, Codable {
     public var id: String { uid }
 
-    /// Presentation only: never changes installation identity or folder names.
-    public func installationDisplayName(platform: InstallPlatform) -> String {
-        guard platform == .windows, let title = WindowsTitle(rawValue: productCode),
-              title.uid == uid else { return displayName }
-        let preview = title.isQualified ? "" : " · Preview"
-        return "\(displayName) (\(title.compatibilityLabel)\(preview))"
+    /// The name with its platform where that's Windows: "Overwatch (Windows · Preview)".
+    /// `nil` while the platform is still to be chosen (HotS offers both): the
+    /// bare name. Presentation only: never changes identity or folder names.
+    public func displayName(on platform: InstallPlatform?) -> String {
+        guard platform == .windows, let title = windowsTitle else { return displayName }
+        return "\(displayName) (\(title.platformLabel))"
+    }
+
+    /// The Windows title this product installs as, on Windows.
+    public var windowsTitle: WindowsTitle? {
+        WindowsTitle(rawValue: productCode).flatMap { $0.uid == uid ? $0 : nil }
+    }
+
+    /// The platform when there is only one to install for.
+    public var onlyPlatform: InstallPlatform? {
+        let platforms = supportedPlatforms
+        return platforms.count == 1 ? platforms.first : nil
     }
 
     /// Battle.net's install uid; also what `-uid` passes to the game. Not

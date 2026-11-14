@@ -146,16 +146,37 @@ private func windowsFixture(_ title: WindowsTitle) throws -> Data {
     #expect(try Data(contentsOf: installed) == bytes)
 }
 
-@Test func installationNamesDescribeTheSelectedPlatformWithoutChangingIdentity() {
+@Test func namesSayWindowsAndKeepTheBackendForTooltips() {
+    #expect(WindowsTitle.overwatch.product.displayName(on: .windows) == "Overwatch (Windows · Preview)")
+    #expect(WindowsTitle.diabloIV.product.displayName(on: .windows) == "Diablo IV (Windows · Preview)")
+    #expect(WindowsTitle.diabloII.product.displayName(on: .windows) == "Diablo II: Resurrected (Windows · Preview)")
+    #expect(WindowsTitle.heroes.product.displayName(on: .windows) == "Heroes of the Storm (Windows)")
+    #expect(WindowsTitle.heroes.backendDescription == "Runs with Wine and DXMT.")
+    for title in WindowsTitle.allCases where title != .heroes {
+        #expect(title.backendDescription == "Runs with Wine and D3DMetal.")
+        #expect(title.product.onlyPlatform == .windows)
+    }
     for title in WindowsTitle.allCases {
         let product = title.product
-        #expect(product.installationDisplayName(platform: .macOS) == product.displayName)
-        let label = product.installationDisplayName(platform: .windows)
-        #expect(label.contains(title.compatibilityLabel))
-        #expect(label.contains("Preview") == !title.isQualified)
+        #expect(product.windowsTitle == title)
         #expect(product.uid == title.uid)
+        #expect(!product.displayName(on: .windows).contains("Wine"))
     }
+}
+
+@Test func heroesIsNamedPlainlyUntilItsEditionIsChosen() {
+    let heroes = WindowsTitle.heroes.product
+    // The install sheet offers both editions: the row doesn't pick one.
+    #expect(heroes.onlyPlatform == nil)
+    #expect(heroes.displayName(on: heroes.onlyPlatform) == "Heroes of the Storm")
+    #expect(heroes.displayName(on: .macOS) == "Heroes of the Storm")
+}
+
+@Test func nativeGamesKeepTheirNames() {
     let wow = InstallableProduct.native.first { $0.productCode == "wow" }!
-    #expect(wow.installationDisplayName(platform: .macOS) == wow.displayName)
-    #expect(wow.installationDisplayName(platform: .windows) == wow.displayName)
+    #expect(wow.onlyPlatform == .macOS)
+    #expect(wow.windowsTitle == nil)
+    for platform: InstallPlatform? in [nil, .macOS, .windows] {
+        #expect(wow.displayName(on: platform) == wow.displayName)
+    }
 }

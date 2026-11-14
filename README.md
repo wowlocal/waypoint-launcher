@@ -33,7 +33,7 @@ The launcher runs on Apple silicon. Mac games use their own executables; support
 
 ## Features
 
-- **Your library in one window.** Installed games appear above a collapsible **Available Games** list. Install from there or the **+** button. Pictures and icons come from Blizzard's catalog; turn off **Show game artwork** in Settings to remove them and delete the downloaded artwork.
+- **Your library in one window.** Installed games appear above a collapsible **Available Games** list, where you install more. It starts open while nothing is installed. Pictures and icons come from Blizzard's catalog; turn off **Show game artwork** in Settings to remove them and delete the downloaded artwork.
 - **Install, update and repair.** Download directly from Blizzard, update games installed by either launcher, and use **Verify Files** to repair missing or corrupt content. Existing optional content, such as WoW's HighRes textures, is preserved.
 - **Downloads you can leave and resume.** Installs, updates and language changes survive quitting, crashes and Waypoint updates. Pause and resume in the game's row, set a shared speed limit, or keep the Mac awake for a download. Hover over progress for speed, exact sizes and estimated time left.
 - **Sign in once per game.** Use the official Battle.net web login, including two-factor authentication. Each saved account keeps its own sign-ins. Switch accounts or use **Play As** for a single launch; optionally save a login in Keychain.
@@ -134,7 +134,7 @@ Updates are signed with an EdDSA key kept in the keychain under the account `way
 
 ## Usage
 
-1. Open Waypoint. Games already on disk appear in the library. To install one, expand **Available Games** and click **Install**, or use **+** in the toolbar.
+1. Open Waypoint. Games already on disk appear in the library. To install one, click **Install** next to it under **Available Games** (expand the list if it's closed).
 2. Choose the folder, language and region. The install sheet shows the download size and any data already available to reuse.
 3. Press **Play**. Sign in through Battle.net's web page when asked. Each game asks once per account; later launches reuse its saved sign-in.
 

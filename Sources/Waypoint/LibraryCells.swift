@@ -197,6 +197,7 @@ final class GameCell: NSView {
                 detail.textColor = .systemOrange
             } else {
                 detail.stringValue = Self.summary(of: game)
+                detailTooltip = WindowsTitle.forInstall(game.install)?.backendDescription
             }
         }
 
@@ -402,8 +403,9 @@ final class GameCell: NSView {
         return menu.items.isEmpty ? nil : menu
     }
 
-    /// "36.6.3 · EU", plus "Intel" for games that need Rosetta. The full
-    /// version is in the name's tooltip.
+    /// "36.6.3 · EU", plus "Intel" for games that need Rosetta, or "Windows"
+    /// (and "Preview") for Windows games, whose backend is in the line's
+    /// tooltip. The full version is in the name's tooltip.
     private static func summary(of game: Game) -> String {
         var parts: [String] = []
         if let version = game.install.version {
@@ -411,7 +413,7 @@ final class GameCell: NSView {
         }
         if let region = game.install.region { parts.append(region.uppercased()) }
         if game.install.platform == .windows {
-            parts.append(WindowsTitle.forInstall(game.install)?.compatibilityLabel ?? "Windows")
+            parts.append("Windows")
             if WindowsTitle.forInstall(game.install)?.isQualified == false { parts.append("Preview") }
         }
         else if game.appURL != nil, !game.runsNatively { parts.append("Intel") }
@@ -456,7 +458,10 @@ final class InstallableCell: NSView {
         separator.isHidden = !showsSeparator || state.picture != nil
         icon.file = state.icon
         showPicture(state.picture, on: &banner, in: self, below: row)
-        name.stringValue = state.product.installationDisplayName(platform: model.defaultPlatform(for: state.product))
+        let platform = model.shownPlatform(for: state.product)
+        name.stringValue = state.product.displayName(on: platform)
+        let nameTooltip = platform == .windows ? state.product.windowsTitle?.backendDescription : nil
+        if name.toolTip != nameTooltip { name.toolTip = nameTooltip }
         var detailTooltip: String?
         detail.textColor = .secondaryLabelColor
         // Before the first report: an empty bar.
@@ -599,8 +604,10 @@ final class AvailableGameCell: NSView {
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
-    func configure(_ product: InstallableProduct, platform: InstallPlatform, picture: URL?, icon file: URL?) {
-        name.stringValue = product.installationDisplayName(platform: platform)
+    func configure(_ product: InstallableProduct, platform: InstallPlatform?, picture: URL?, icon file: URL?) {
+        name.stringValue = product.displayName(on: platform)
+        let nameTooltip = platform == .windows ? product.windowsTitle?.backendDescription : nil
+        if name.toolTip != nameTooltip { name.toolTip = nameTooltip }
         icon.letter = String(product.displayName.prefix(1)).uppercased()
         icon.file = file
         button.setAccessibilityLabel("Install \(name.stringValue)")

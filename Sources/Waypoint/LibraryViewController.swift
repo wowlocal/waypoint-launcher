@@ -82,7 +82,6 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
     private let table = NSTableView()
     private let scrollView = NSScrollView()
     private let emptyState = NSStackView()
-    private let emptyInstallButton = NSPopUpButton(frame: .zero, pullsDown: true)
     private let updateBanner = NSView()
     private let updateIcon = NSImageView()
     private let updateSpinner = NSProgressIndicator.spinner()
@@ -92,8 +91,10 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
     private let accountMenu = NSMenu()
     private var accountItem: NSMenuToolbarItem?
     private var subtitle = ""
-    /// Whether the games that can be installed show under their heading.
-    private var showsAvailableGames = UserDefaults.standard.bool(forKey: "showsAvailableGames") {
+    /// Whether the games that can be installed show under their heading, once
+    /// the person has opened or closed it. Until then they show while no game
+    /// is installed: Available Games is where installing starts.
+    private var showsAvailableGames = UserDefaults.standard.object(forKey: "showsAvailableGames") as? Bool {
         didSet { UserDefaults.standard.set(showsAvailableGames, forKey: "showsAvailableGames") }
     }
 
@@ -136,14 +137,10 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
         emptyTitle.stringValue = "No Games"
         let emptyDetail = NSTextField.label(.body, color: .secondaryLabelColor)
         emptyDetail.stringValue = "Blizzard games on this Mac appear here."
-        emptyInstallButton.controlSize = .large
-        if #available(macOS 26.0, *) { emptyInstallButton.borderShape = .capsule }
-        emptyInstallButton.autoenablesItems = false
-        emptyState.setViews([emptyIcon, emptyTitle, emptyDetail, emptyInstallButton], in: .center)
+        emptyState.setViews([emptyIcon, emptyTitle, emptyDetail], in: .center)
         emptyState.orientation = .vertical
         emptyState.spacing = 6
         emptyState.setCustomSpacing(12, after: emptyIcon)
-        emptyState.setCustomSpacing(18, after: emptyDetail)
 
         let content = NSView()
         for view in [scrollView, emptyState] as [NSView] {
@@ -214,7 +211,6 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
     /// calls this again whenever any of it changes.
     private func render() {
         var rows = model.games.map { Row.game(GameRowState($0, model: model)) }
-        var installChoices: [InstallableProduct] = []
         // The ones with no row above.
         var available: [Row] = []
         for product in model.installable {
@@ -225,35 +221,21 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
                 let artwork = model.artwork(productCode: product.productCode)
                 available.append(.available(product, key: model.installKey(for: product), picture: artwork.picture, icon: artwork.icon))
             }
-            switch phase {
-            case .updating, .pausing, .paused, .uninstalling: continue
-            default: break
-            }
-            installChoices.append(product)
         }
-        // Under the installed ones. With none installed, the empty state
-        // offers the same list.
-        if !rows.isEmpty, !available.isEmpty {
-            rows.append(.availableHeader(count: available.count, expanded: showsAvailableGames))
-            if showsAvailableGames { rows += available }
+        // Under the installed ones: the one place to install from. Open
+        // while nothing is installed, so a new library starts with it.
+        if !available.isEmpty {
+            // A HotS download has a game row of its own before it's installed.
+            let expanded = showsAvailableGames ?? !model.games.contains(where: \.isInstalled)
+            rows.append(.availableHeader(count: available.count, expanded: expanded))
+            if expanded { rows += available }
         }
         show(rows)
-        // Menu items belong to one menu, so each menu gets its own.
-        let installMenuItems = { [weak self, model = self.model] in
-            installChoices.map { product in ActionItem(product.installationDisplayName(platform: model.defaultPlatform(for: product))) { self?.install(product) } }
-        }
 
         // NSMenuToolbarItem shows its menu as a pull-down button does: the
         // first item is the button's own and never appears. Without a
         // placeholder, a signed-out account menu's lone "Sign In…" did
         // nothing, and the account list lost its first row.
-        // The same list under the empty state's button, whose title is the
-        // pull-down's own first item.
-        if rows.isEmpty {
-            emptyInstallButton.menu?.items = [NSMenuItem(title: "Install a Game", action: nil, keyEquivalent: "")] + installMenuItems()
-            emptyInstallButton.isEnabled = !installChoices.isEmpty
-        }
-
         accountMenu.items = [.pullDownPlaceholder()] + AccountMenu.items(model: model)
         subtitle = model.activeAccount?.displayName ?? "Not signed in"
         view.window?.subtitle = subtitle
@@ -378,12 +360,12 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
             header?.configure(count: count, expanded: expanded)
             header?.toggle = { [weak self] in
                 guard let self else { return }
-                self.showsAvailableGames.toggle()
+                self.showsAvailableGames = !expanded
                 self.render()
             }
         case .available(let product, _, let picture, let icon):
             let cell = view as? AvailableGameCell
-            cell?.configure(product, platform: model.defaultPlatform(for: product), picture: picture, icon: icon)
+            cell?.configure(product, platform: model.shownPlatform(for: product), picture: picture, icon: icon)
             cell?.install = { [weak self] in self?.install(product) }
         }
     }
