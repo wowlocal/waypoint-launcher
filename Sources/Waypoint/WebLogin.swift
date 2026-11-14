@@ -308,7 +308,7 @@ final class LoginWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler {
                 self?.loadWatchdog?.cancel()
                 self?.connectionSpinner.stopAnimation(nil)
                 guard let self, self.errorOverlay == nil else { return }
-                self.connectionStatus.stringValue = "Waiting for sign-in"
+                self.connectionStatus.stringValue = ""
                 if self.filledAccountName == nil { self.reveal() }
             }
             initialURL = url
@@ -337,8 +337,8 @@ final class LoginWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler {
             }
             if preparedWebView == nil { webView.load(URLRequest(url: url)) }
 
-            let window = NSWindow(contentRect: NSRect(x: 0, y: 0, width: 520, height: 720),
-                                  styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
+            let window = LoginWindowFrame(contentRect: NSRect(x: 0, y: 0, width: 520, height: 720),
+                                          styleMask: [.titled, .closable, .resizable], backing: .buffered, defer: false)
             window.title = title
             window.contentMinSize = NSSize(width: 480, height: 600)
             // The browser return is verified with WoW's game service, which
@@ -350,14 +350,12 @@ final class LoginWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler {
             let noticeLabel = NSTextField(wrappingLabelWithString: [notice, passkey].compactMap { $0 }.joined(separator: "\n\n"))
             noticeLabel.textColor = .secondaryLabelColor
             noticeLabel.font = .preferredFont(forTextStyle: .subheadline)
-            connectionStatus = NSTextField(labelWithString: preparedWebView == nil ? "Connecting to Battle.net…" : "Waiting for sign-in")
+            connectionStatus = NSTextField(labelWithString: preparedWebView == nil ? "Connecting to Battle.net…" : "")
             connectionStatus.font = .systemFont(ofSize: 11)
             connectionStatus.textColor = .secondaryLabelColor
             connectionStatus.lineBreakMode = .byTruncatingTail
-            retryButton = NSButton(title: "Retry", target: self, action: #selector(retry))
+            retryButton = NSButton(title: "Try Again", target: self, action: #selector(retry))
             retryButton.isHidden = true
-            let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancel))
-            cancel.keyEquivalent = "\u{1b}"
             connectionSpinner = NSProgressIndicator()
             connectionSpinner.style = .spinning
             connectionSpinner.controlSize = .small
@@ -365,7 +363,7 @@ final class LoginWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler {
             if preparedWebView == nil { connectionSpinner.startAnimation(nil) }
             let browser = NSButton(title: "Sign In with Browser…", target: self, action: #selector(useBrowser))
             let footerViews: [NSView] = (supportsBrowserReturn ? [browser] : [])
-                + [connectionSpinner, connectionStatus, NSView(), retryButton, cancel]
+                + [connectionSpinner, connectionStatus, NSView(), retryButton]
             let footer = NSStackView(views: footerViews)
             footer.orientation = .horizontal
             footer.spacing = 10
@@ -381,7 +379,7 @@ final class LoginWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler {
                 footer.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
                 footer.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
                 footer.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -12),
-                connectionStatus.widthAnchor.constraint(lessThanOrEqualToConstant: 130),
+                connectionStatus.widthAnchor.constraint(lessThanOrEqualToConstant: 170),
                 noticeLabel.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 16),
                 noticeLabel.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -16),
                 noticeLabel.topAnchor.constraint(equalTo: container.topAnchor, constant: 12),
@@ -452,13 +450,11 @@ final class LoginWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler {
                 self.typedAccountName = nil
                 self.finish(token)
             } else {
-                self.connectionStatus.stringValue = "Continue here or Retry"
+                self.connectionStatus.stringValue = ""
                 self.retryButton.isHidden = false
             }
         }
     }
-
-    @objc private func cancel() { finish(nil) }
 
     @objc private func retry() {
         guard let url = initialURL, let webView else { return }
@@ -490,14 +486,14 @@ final class LoginWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler {
         reveal()
         errorOverlay?.removeFromSuperview()
         webView.isHidden = true
-        connectionStatus.stringValue = "Connection interrupted"
+        connectionStatus.stringValue = ""
         connectionSpinner.stopAnimation(nil)
         retryButton.isHidden = false
         let title = NSTextField(labelWithString: statusCode == 429 ? "Battle.net is busy" : "Couldn’t connect to Battle.net")
         title.font = .systemFont(ofSize: 18, weight: .semibold)
         let detail = NSTextField(wrappingLabelWithString: statusCode == 429
-            ? "Wait a moment, then try again. Your saved login and account choices are unchanged."
-            : "Check your internet connection, then try again. Your saved login and account choices are unchanged.")
+            ? "Wait a moment, then try again."
+            : "Check your internet connection, then try again.")
         detail.textColor = .secondaryLabelColor
         detail.alignment = .center
         let stack = NSStackView(views: [title, detail])
@@ -598,6 +594,19 @@ final class LoginWindow: NSObject, NSWindowDelegate, WKScriptMessageHandler {
     func windowWillClose(_ notification: Notification) {
         finish(nil)
     }
+}
+
+/// The login window has no Cancel button: its close button, or Esc, cancels.
+/// Esc is taken before the page sees it, as a Cancel button's would be.
+private final class LoginWindowFrame: NSWindow {
+    override func performKeyEquivalent(with event: NSEvent) -> Bool {
+        let modifiers = event.modifierFlags.intersection(.deviceIndependentFlagsMask)
+        guard event.keyCode == 53, modifiers.isEmpty, attachedSheet == nil else { return super.performKeyEquivalent(with: event) }
+        performClose(nil)
+        return true
+    }
+
+    override func cancelOperation(_ sender: Any?) { performClose(sender) }
 }
 
 /// WKUserContentController keeps its message handlers strongly; this keeps

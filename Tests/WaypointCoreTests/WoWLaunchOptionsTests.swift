@@ -20,7 +20,7 @@ private func withOptions(_ gameKey: String = "WoW", _ body: (LaunchOptions, User
     #expect(!LaunchOptions(gameKey: "WoW").gameAccountOwnerKey.hasPrefix("Launch Options/"))
 }
 
-@Test func selectedLicenceIsWrittenWithItsToken() throws {
+@Test func selectedLicenseIsWrittenWithItsToken() throws {
     try withOptions { options, defaults in
         try options.write(token: tokenA, region: .us, locale: "enUS", gameAccount: "WoW1")
         #expect(try options.storedToken() == tokenA)
@@ -36,7 +36,7 @@ private func withOptions(_ gameKey: String = "WoW", _ body: (LaunchOptions, User
     }
 }
 
-@Test func automaticHandoffClearsALicenceFromAnotherRegion() throws {
+@Test func automaticHandoffClearsALicenseFromAnotherRegion() throws {
     try withOptions { options, _ in
         try options.write(token: tokenA, region: .us, locale: "enUS", gameAccount: "WoW2")
         try options.write(token: tokenA, region: .eu, locale: nil, gameAccount: nil)
@@ -47,7 +47,7 @@ private func withOptions(_ gameKey: String = "WoW", _ body: (LaunchOptions, User
     }
 }
 
-@Test func automaticHandoffClearsALicenceFromAnotherAccount() throws {
+@Test func automaticHandoffClearsALicenseFromAnotherAccount() throws {
     try withOptions { options, _ in
         var store = WoWAccountStore()
         store.select(WoWGameAccount(id: "1", name: "WoW2"), owner: "111", uid: "wow", region: .us)
@@ -63,7 +63,7 @@ private func withOptions(_ gameKey: String = "WoW", _ body: (LaunchOptions, User
     }
 }
 
-@Test func automaticHandoffClearsALicenceBattleNetLeftBehind() throws {
+@Test func automaticHandoffClearsALicenseBattleNetLeftBehind() throws {
     try withOptions { options, defaults in
         defaults.set("WoW3", forKey: options.gameAccountKey)
         try options.write(token: tokenA, region: .us, locale: nil)
@@ -71,31 +71,81 @@ private func withOptions(_ gameKey: String = "WoW", _ body: (LaunchOptions, User
     }
 }
 
-@Test func cliReplayKeepsOnlyTheSameRegionsValidatedLicence() throws {
+@Test func keptHandoffLeavesBattleNetsLicenseForTheSameAccountAndRegion() throws {
     try withOptions { options, defaults in
         let a = try #require(LoginToken(tokenA))
-        try options.write(token: tokenA, region: .us, locale: nil, gameAccount: "WoW2")
-        #expect(options.storedGameAccount(for: .us, token: a) == "WoW2")
-        #expect(options.storedGameAccount(for: .eu, token: a) == nil)
-        defaults.set("WoW2\n", forKey: options.gameAccountKey)
-        #expect(options.storedGameAccount(for: .us, token: a) == nil)
+        // Battle.net launched account A in the Americas with WoW3.
+        try options.write(token: tokenA, region: .us, locale: nil)
+        defaults.set("WoW3", forKey: options.gameAccountKey)
+        #expect(options.canKeepStoredGameAccount(for: .us, token: a))
+        #expect(try options.write(token: tokenA, region: .us, locale: nil, keepingStoredGameAccount: true))
+        #expect(options.storedGameAccount() == "WoW3")
+        // Battle.net never wrote an owner note, and Waypoint doesn't add one.
+        #expect(defaults.string(forKey: options.gameAccountOwnerKey) == nil)
+        // Without the keep flag (Ask in WoW, or a choice gone from the
+        // account) it's cleared as before.
+        #expect(try !options.write(token: tokenA, region: .us, locale: nil))
+        #expect(options.storedGameAccount() == nil)
     }
 }
 
-@Test func cliReplayKeepsOnlyTheTokenOwnersLicence() throws {
+@Test func keptHandoffClearsALicenseOfAnotherAccountRegionOrNote() throws {
     try withOptions { options, defaults in
         let a = try #require(LoginToken(tokenA)), b = try #require(LoginToken(tokenB))
+        func battleNetLeft(_ token: String, _ region: Region, _ name: String = "WoW3") throws {
+            try options.write(token: token, region: region, locale: nil)
+            defaults.set(name, forKey: options.gameAccountKey)
+        }
+        // Another account's ticket went out with it.
+        try battleNetLeft(tokenB, .us)
+        #expect(!options.canKeepStoredGameAccount(for: .us, token: a))
+        #expect(try !options.write(token: tokenA, region: .us, locale: nil, keepingStoredGameAccount: true))
+        #expect(options.storedGameAccount() == nil)
+        // Another region.
+        try battleNetLeft(tokenA, .eu)
+        #expect(try !options.write(token: tokenA, region: .us, locale: nil, keepingStoredGameAccount: true))
+        #expect(options.storedGameAccount() == nil)
+        // A name WoW could never match.
+        try battleNetLeft(tokenA, .us, "WoW3\n")
+        #expect(try !options.write(token: tokenA, region: .us, locale: nil, keepingStoredGameAccount: true))
+        #expect(options.storedGameAccount() == nil)
+        // Waypoint chose WoW2 for A; Battle.net then signed B in and left it.
+        try options.write(token: tokenA, region: .us, locale: nil, gameAccount: "WoW2")
+        try options.write(token: tokenB, region: .us, locale: nil)
+        defaults.set("WoW2", forKey: options.gameAccountKey)
+        defaults.set("111", forKey: options.gameAccountOwnerKey)
+        #expect(!options.canKeepStoredGameAccount(for: .us, token: b))
+        #expect(try !options.write(token: tokenB, region: .us, locale: nil, keepingStoredGameAccount: true))
+        #expect(options.storedGameAccount() == nil)
+        #expect(defaults.string(forKey: options.gameAccountOwnerKey) == nil)
+        // No stored license: nothing to keep.
+        #expect(try !options.write(token: tokenA, region: .us, locale: nil, keepingStoredGameAccount: true))
+    }
+}
+
+@Test func keptHandoffNeverOverridesAChoice() throws {
+    try withOptions { options, defaults in
+        try options.write(token: tokenA, region: .us, locale: nil)
+        defaults.set("WoW3", forKey: options.gameAccountKey)
+        #expect(try !options.write(token: tokenA, region: .us, locale: nil, gameAccount: "WoW1", keepingStoredGameAccount: true))
+        #expect(options.storedGameAccount() == "WoW1")
+        #expect(defaults.string(forKey: options.gameAccountOwnerKey) == "111")
+    }
+}
+
+/// The CLI replays the stored handoff with the keep flag: Waypoint's own
+/// license for that token, and Battle.net's, go out again in the same region.
+@Test func cliReplayKeepsTheTokensLicense() throws {
+    try withOptions { options, defaults in
+        let a = try #require(LoginToken(tokenA))
         try options.write(token: tokenA, region: .us, locale: nil, gameAccount: "WoW2")
         #expect(defaults.string(forKey: options.gameAccountOwnerKey) == "111")
-        #expect(options.storedGameAccount(for: .us, token: a) == "WoW2")
-        // Battle.net signed another account in and left Waypoint's licence.
-        #expect(options.storedGameAccount(for: .us, token: b) == nil)
-        // A licence without Waypoint's owner note (Battle.net's, or an
-        // older Waypoint's) isn't replayed either.
-        defaults.removeObject(forKey: options.gameAccountOwnerKey)
-        #expect(options.storedGameAccount(for: .us, token: a) == nil)
-        // An automatic launch and Sign Out clear the note with the licence.
-        try options.write(token: tokenA, region: .us, locale: nil, gameAccount: "WoW2")
+        #expect(options.canKeepStoredGameAccount(for: .us, token: a))
+        #expect(!options.canKeepStoredGameAccount(for: .eu, token: a))
+        #expect(try options.write(token: tokenA, region: .us, locale: nil, keepingStoredGameAccount: true))
+        #expect(options.storedGameAccount() == "WoW2")
+        #expect(defaults.string(forKey: options.gameAccountOwnerKey) == "111")
+        // An automatic launch and Sign Out clear the note with the license.
         try options.write(token: tokenA, region: .us, locale: nil, gameAccount: nil)
         #expect(defaults.string(forKey: options.gameAccountOwnerKey) == nil)
         try options.write(token: tokenA, region: .us, locale: nil, gameAccount: "WoW2")
@@ -104,7 +154,17 @@ private func withOptions(_ gameKey: String = "WoW", _ body: (LaunchOptions, User
     }
 }
 
-@Test func malformedLicenceNameWritesNothing() throws {
+@Test func otherGamesNeverKeepAGameAccount() throws {
+    try withOptions("WTCG") { options, defaults in
+        try options.write(token: tokenA, region: .us, locale: nil)
+        defaults.set("kept", forKey: options.gameAccountKey)
+        #expect(!options.canKeepStoredGameAccount(for: .us, token: try #require(LoginToken(tokenA))))
+        #expect(try !options.write(token: tokenA, region: .us, locale: nil, keepingStoredGameAccount: true))
+        #expect(options.storedGameAccount() == "kept")
+    }
+}
+
+@Test func malformedLicenseNameWritesNothing() throws {
     try withOptions { options, _ in
         try options.write(token: tokenA, region: .us, locale: "enUS", gameAccount: "WoW1")
         for name in ["", " WoW1", "WoW1\nX", "WoW\u{0}1", tokenB, "ST=\(tokenB)"] {
@@ -119,7 +179,7 @@ private func withOptions(_ gameKey: String = "WoW", _ body: (LaunchOptions, User
     }
 }
 
-@Test func clearingTheTokenAlsoClearsTheLicence() throws {
+@Test func clearingTheTokenAlsoClearsTheLicense() throws {
     try withOptions { options, _ in
         try options.write(token: tokenA, region: .us, locale: "enUS", gameAccount: "WoW1")
         options.clearToken()
@@ -145,4 +205,5 @@ private func withOptions(_ gameKey: String = "WoW", _ body: (LaunchOptions, User
     let plan = LaunchPlan(executable: URL(fileURLWithPath: "/x"), arguments: [], workingDirectory: URL(fileURLWithPath: "/"),
                           codename: "WoW", region: .us, locale: nil)
     #expect(plan.gameAccount == nil)
+    #expect(!plan.keepsStoredGameAccount)
 }

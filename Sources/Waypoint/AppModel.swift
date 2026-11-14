@@ -1141,6 +1141,8 @@ final class AppModel {
             }
             if plan.codename == "WoW", !plan.isWindows {
                 plan.gameAccount = wowAccountStore.launchAccount(for: token, uid: game.id, region: plan.region)
+                plan.keepsStoredGameAccount = plan.gameAccount == nil
+                    && wowAccountStore.defersToBattleNet(for: token, uid: game.id, region: plan.region)
                 if plan.gameAccount == nil, wowAccountStore.selected(owner: token.accountID, uid: game.id, region: plan.region) != nil {
                     // Gone from the account at the last lookup: WoW chooses.
                     Log.notice(.launch, "wow_account_unavailable", nil, ["uid": game.id])
@@ -1264,7 +1266,7 @@ final class AppModel {
     }
 
     static let wowGameBusy = NSError(domain: "Waypoint", code: 4, userInfo: [
-        NSLocalizedDescriptionKey: "Finish the current game action, then try again.",
+        NSLocalizedDescriptionKey: "Wait for the game to finish, then try again.",
     ])
     /// Retrying can't help: the sheet or menu shows another account's or
     /// region's choices.
@@ -1522,17 +1524,15 @@ final class AppModel {
         // login instead of a sign-in of their own. Whatever stops that, the
         // usual sign-in below follows, without a word about it. Not while WoW
         // accounts are being found: that's a game-service sign-in already.
+        // At most 5 s for the build and 5 s for the sign-in, as Play waits.
+        // The ticket isn't kept: how long it lasts is unknown, and a dead one
+        // in the keychain would fail every later Play. A fresh one is cheap.
         if !forceSignIn, !isFindingWoWAccounts, let account, let game = SharedSignIn(codename: plan.codename),
-           let issued = await WoWAccountDiscovery(timeout: .seconds(15))
+           let issued = await WoWAccountDiscovery(timeout: .seconds(5))
                .sharedTicket(for: game, from: tokenVault.token(account: account.id, codename: "WoW"),
                              account: account.id, region: plan.region),
            accountList[account.id] != nil {
             Log.info(.auth, "token", nil, ["source": "shared_sign_in", "codename": plan.codename])
-            do {
-                try tokenVault.save(issued, codename: plan.codename)
-            } catch {
-                Log.warning(.auth, "token_save_failed", nil, ["error": error])
-            }
             return issued
         }
         // Cancelled meanwhile: nobody is waiting for a login window.

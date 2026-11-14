@@ -32,8 +32,8 @@ extension WoWAccountDiscovery {
     public nonisolated static func isWoWRunning() -> Bool { isWoWRunning(in: RunningProcesses.executables()) }
 
     /// The live WoW build in `region`, to sign in with where no WoW is
-    /// installed. One short attempt of at most `timeout` seconds: callers
-    /// have another way to go.
+    /// installed. One attempt of at most `timeout` seconds, never retried:
+    /// someone is waiting, and callers have another way to go.
     public nonisolated static func liveBuild(region: Region, timeout: TimeInterval = 20) async throws -> UInt64 {
         let configuration = URLSessionConfiguration.ephemeral
         configuration.waitsForConnectivity = false
@@ -41,7 +41,9 @@ extension WoWAccountDiscovery {
         configuration.timeoutIntervalForResource = timeout
         let session = URLSession(configuration: configuration)
         defer { session.invalidateAndCancel() }
-        let version = try await VersionService(session: session).latest(product: "wowf", region: region)
+        var service = VersionService(session: session)
+        service.retry = NetworkRetry(delays: [])
+        let version = try await service.latest(product: "wowf", region: region)
         guard version.region == region.rawValue, version.buildID > 0 else { throw Failure.unavailable }
         return UInt64(version.buildID)
     }
