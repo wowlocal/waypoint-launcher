@@ -86,7 +86,8 @@ final class UninstallAlert: NSObject {
             views += [removesUserFiles, keptNote]
         }
         let stack = NSStackView.column(views, spacing: 8)
-        stack.setCustomSpacing(4, after: removesUserFiles)
+        // The checkbox is only arranged when this game has user files.
+        if plan.hasUserFiles { stack.setCustomSpacing(4, after: removesUserFiles) }
         stack.widthAnchor.constraint(equalToConstant: width).isActive = true
         // The alert doesn't grow later: sized for the longest texts.
         sizeText.stringValue = sizeDescription(999_900_000_000)
