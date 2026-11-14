@@ -54,6 +54,14 @@ public enum LocatedGames {
             refreshIdentity(at: url)
         }
 
+        /// The folder of a game Waypoint installed there: what it holds,
+        /// and `install` even before its records are read back. Reads the
+        /// disk: off the main thread.
+        public init(installedAt url: URL, install: ProductInstall) {
+            let found = LocatedGames.installs(at: url)
+            self.init(at: url, installs: found.contains { $0.key == install.key } ? found : found + [install])
+        }
+
         mutating func refreshIdentity(at url: URL) {
             path = url.standardizedFileURL.path
             // Not security-scoped: Waypoint isn't sandboxed.
@@ -103,6 +111,45 @@ public enum LocatedGames {
         public func add(_ new: [Location]) {
             let paths = Set(new.map(\.path))
             save(new + locations().filter { !paths.contains($0.path) })
+        }
+
+        /// Remembers the folder of a game Waypoint installed (see
+        /// `Location(installedAt:install:)`), whose key is `installed`. One
+        /// already remembered there keeps its id and the other games found
+        /// there, and lists that game again; others removed from the library
+        /// stay removed.
+        public func record(_ new: Location, installed: String?) {
+            var all = locations()
+            guard let index = all.firstIndex(where: { $0.path == new.path }) else {
+                save([new] + all)
+                return
+            }
+            var merged = new
+            merged.id = all[index].id
+            let keys = Set(new.installs.map(\.key))
+            merged.installs = new.installs + all[index].installs.filter { !keys.contains($0.key) }
+            merged.removedKeys = all[index].removedKeys.filter { $0 != installed }
+            all[index] = merged
+            save(all)
+        }
+
+        /// Forgets a game that was uninstalled from `path`, and the folder
+        /// it was in once nothing else was found there. Returns whether
+        /// anything was forgotten.
+        @discardableResult
+        public func forget(key: String, at path: String) -> Bool {
+            let path = URL(fileURLWithPath: path).standardizedFileURL.path
+            let all = locations()
+            let kept: [Location] = all.compactMap { location in
+                guard location.contains(path) else { return location }
+                var location = location
+                location.installs.removeAll { $0.key == key && URL(fileURLWithPath: $0.installPath).standardizedFileURL.path == path }
+                location.removedKeys.removeAll { $0 == key }
+                return location.path == path && location.installs.isEmpty ? nil : location
+            }
+            guard kept != all else { return false }
+            save(kept)
+            return true
         }
 
         /// Forgets the whole location.
@@ -197,7 +244,14 @@ public enum LocatedGames {
             // A bookmark follows a folder into the Trash (uninstalled, or
             // dragged there): it's gone all the same.
             if sameVolume, !isInTrash(url), fm.fileExists(atPath: url.path, isDirectory: &isDirectory), isDirectory.boolValue {
-                location.installs = installs(at: url, fileManager: fm)
+                var found = installs(at: url, fileManager: fm)
+                // A game known here whose files are still here stays, though
+                // its records aren't (Battle.net's isn't written while it runs).
+                let rebased = location.installs.filter { known in !found.contains { $0.key == known.key } }.map { known in
+                    var known = known; known.installPath = url.standardizedFileURL.path; return known
+                }
+                found += rebased.filter { GameCatalog.game(for: $0, fileManager: fm).isInstalled }
+                location.installs = found
                 if resolved == nil || stale || location.volumeUUID == nil || url.standardizedFileURL.path != location.path {
                     location.refreshIdentity(at: url)
                 }
@@ -210,6 +264,25 @@ public enum LocatedGames {
             scan.locations.append(location)
         }
         return scan
+    }
+
+    /// The folders of `installs` (Waypoint's own records) that are outside
+    /// the built-in ones, on a connected drive, and not remembered yet: an
+    /// earlier version installed them there without remembering them. Only
+    /// what is on disk now, so a stale record never shows up as a game on
+    /// a drive that isn't connected. Reads the disk: off the main thread.
+    public static func unremembered(_ installs: [ProductInstall], known: [Location],
+                                    chosen: InstallLocations, fileManager fm: FileManager = .default) -> [Location] {
+        var found: [Location] = []
+        for install in installs where chosen.isChosen(installPath: install.installPath) {
+            let url = URL(fileURLWithPath: install.installPath, isDirectory: true).standardizedFileURL
+            guard !(known + found).contains(where: { $0.contains(url.path) }),
+                  InstallVolume.missingDrive(for: url.path, fileManager: fm) == nil,
+                  !isInTrash(url),
+                  GameCatalog.game(for: install, fileManager: fm).isInstalled else { continue }
+            found.append(Location(installedAt: url, install: install))
+        }
+        return found
     }
 
     static func isInTrash(_ url: URL) -> Bool {

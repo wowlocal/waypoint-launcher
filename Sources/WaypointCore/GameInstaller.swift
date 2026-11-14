@@ -61,6 +61,7 @@ public struct GameInstaller: Sendable {
         guard product.supportedPlatforms.contains(platform),
               platform != .windows || WindowsTitle(rawValue: product.productCode)?.isEnabled == true
         else { throw UpdateError.unsupported(product.displayName) }
+        try InstallVolume.ensureConnected(folder.path)
         let target = try await versions.latest(product: product.productCode, region: region)
         let config = try await versions.productConfig(product: product.productCode, region: region, version: target, platform: platform)
         let install = product.install(at: folder, region: region, languages: languages,
@@ -83,6 +84,7 @@ public struct GameInstaller: Sendable {
               URL(fileURLWithPath: plan.install.installPath).resolvingSymlinksInPath().standardizedFileURL.path == folder.resolvingSymlinksInPath().standardizedFileURL.path
         else { throw TACTError.malformed("Install plan belongs to another installation") }
         try platform.validate(install: plan.install)
+        try InstallVolume.ensureConnected(folder.path)
         try FileManager.default.createDirectory(at: folder, withIntermediateDirectories: true)
         switch plan {
         case .loose(let p):
@@ -172,6 +174,7 @@ public struct GameUpdate: Sendable {
     public func plan(target requested: ProductVersion? = nil, verify: Bool = false, languages: GameLanguages? = nil,
                      log: @Sendable (String) -> Void = { _ in }) async throws -> GameUpdatePlan {
         guard Self.canUpdate(install) else { throw UpdateError.unsupported(install.productCode) }
+        try InstallVolume.ensureConnected(install.installPath)
         let loose = GameUpdater(install: install, versions: versions, store: store)
         if GameCatalog.family(for: install.productCode) == .hearthstone {
             return .loose(try await loose.plan(target: requested, verify: verify, languages: languages, log: log))

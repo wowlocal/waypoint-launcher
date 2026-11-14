@@ -102,7 +102,7 @@ public struct CASCInstaller: Sendable {
     public var versions: VersionService
     public var store: InstallStateStore
     public var concurrency = 8
-    var availableCapacity: @Sendable (URL) -> UInt64 = GameUpdater.volumeCapacity
+    var availableCapacity: @Sendable (URL) throws -> UInt64 = InstallVolume.availableCapacity
     /// Biggest single range request when merging neighbouring blobs.
     public var maxBatchBytes: UInt64 = 32 << 20
     /// Merge blobs separated by at most this much unneeded data.
@@ -344,7 +344,7 @@ public struct CASCInstaller: Sendable {
         let remainingStorage = storageBytes - min(plan.storedBytes, storageBytes)
         let remainingLoose = try GameUpdater(install: plan.loose.install).remainingStagingBytes(for: plan.loose.files)
         let needed = remainingStorage + remainingLoose
-        let available = availableCapacity(root.deletingLastPathComponent())
+        let available = try availableCapacity(root)
         guard available > needed + (1 << 30) else { throw UpdateError.notEnoughSpace(needed: needed, available: available) }
         // Fail an unrepaired index before writing configs, loose files, or
         // build records. A pending writer will rewrite the indexes itself.
