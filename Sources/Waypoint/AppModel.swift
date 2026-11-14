@@ -1266,7 +1266,7 @@ final class AppModel {
     }
 
     static let wowGameBusy = NSError(domain: "Waypoint", code: 4, userInfo: [
-        NSLocalizedDescriptionKey: "Finish the current game action, then try again.",
+        NSLocalizedDescriptionKey: "Wait for the game to finish, then try again.",
     ])
     /// Retrying can't help: the sheet or menu shows another account's or
     /// region's choices.

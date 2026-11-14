@@ -374,8 +374,9 @@ final class GameCell: NSView {
                         use: { try model.useWoWAccount($0, for: game, in: scope) }))
                 }
                 let accounts = model.knownWoWAccounts(for: game)
-                if accounts.isEmpty {
-                    menu.addItem(choose)
+                // With one license there's nothing to choose.
+                if accounts.count < 2 {
+                    if model.canRefreshWoWAccounts(game) { menu.addItem(choose) }
                 } else {
                     let selected = model.selectedWoWAccount(for: game)
                     let item = NSMenuItem(title: "WoW Account", action: nil, keyEquivalent: "")
@@ -383,7 +384,7 @@ final class GameCell: NSView {
                     choices.autoenablesItems = false
                     // No GAME_ACCOUNT: WoW shows its own picker at login
                     // when there are several licenses.
-                    let automatic = ActionItem("Choose When WoW Starts", enabled: model.canPlay(game)) {
+                    let automatic = ActionItem("Ask in WoW", enabled: model.canPlay(game)) {
                         try? model.useWoWAccount(nil, for: game, in: scope)
                     }
                     automatic.state = selected == nil ? .on : .off
@@ -403,7 +404,6 @@ final class GameCell: NSView {
                     }
                     if model.canRefreshWoWAccounts(game) {
                         choices.addItem(.separator())
-                        choose.title = "Refresh Accounts…"
                         choices.addItem(choose)
                     }
                     item.submenu = choices

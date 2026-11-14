@@ -1,14 +1,14 @@
 import Foundation
 import Network
 
-/// Asks the game service which WoW accounts (licences) a Battle.net account
+/// Asks the game service which WoW accounts (licenses) a Battle.net account
 /// has, by signing in the way the game does with the web login's ticket.
 /// The same sign-in also tells whose ticket it is (`profile`) and can issue
 /// a ticket for another game (`ticket(for:…)`).
 ///
-/// Listing accounts is only for the explicit "refresh accounts" action.
-/// Playing never needs it: a launch without a chosen account lets the game
-/// pick as it always has.
+/// Listing accounts is only for the explicit Find WoW Accounts action.
+/// Playing WoW never needs it: a launch without a chosen account lets the
+/// game pick as it always has.
 ///
 /// The sign-in is a game session of its own, so it isn't made while a WoW
 /// client runs. Each call is one bounded attempt on a fresh connection, and
@@ -39,13 +39,13 @@ public final class WoWAccountDiscovery {
 
         public var errorDescription: String? {
             switch self {
-            case .unsupported: "Retrieving WoW accounts isn’t available for this region yet."
-            case .gameRunning: "Close World of Warcraft before retrieving your WoW accounts, then try again."
-            case .busy: "Waypoint is already retrieving your WoW accounts."
-            case .unavailable: "Couldn’t reach Blizzard to retrieve your WoW accounts. Check your connection and try again."
+            case .unsupported: "Finding WoW accounts isn’t available for this region yet."
+            case .gameRunning: "Close World of Warcraft, then try again."
+            case .busy: "Waypoint is busy with Blizzard. Try again in a moment."
+            case .unavailable: "Couldn’t reach Blizzard. Check your connection and try again."
             case .timedOut: "Blizzard took too long to return your WoW accounts. Try again."
             case .malformed: "Blizzard returned WoW account information Waypoint doesn’t understand."
-            case .rejected: "Blizzard didn’t allow Waypoint to retrieve your WoW accounts."
+            case .rejected: "Blizzard didn’t let Waypoint find your WoW accounts."
             case .identityMismatch: "Blizzard returned WoW accounts for a different Battle.net account."
             }
         }

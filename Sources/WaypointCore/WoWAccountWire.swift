@@ -166,7 +166,7 @@ enum WoWAccountWire {
 
     // MARK: Replies
 
-    /// A licence as the account list names it: an id, the game it is for
+    /// A license as the account list names it: an id, the game it is for
     /// and the region it plays in. `raw` is sent back as is to ask for details.
     struct Handle {
         var id: UInt64
