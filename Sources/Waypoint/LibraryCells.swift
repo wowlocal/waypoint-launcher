@@ -132,7 +132,8 @@ final class GameCell: NSView {
         showPicture(state.banner, on: &banner, in: self, below: row)
         let game = state.game
         let app = game.appURL ?? (game.install.productCode == "hero" ? model.heroesEdition(.macOS)?.appURL : nil)
-        let windows = WindowsTitle.forInstall(game.install).map {
+        // A drive that isn't connected isn't asked for an icon.
+        let windows = game.isOffline ? nil : WindowsTitle.forInstall(game.install).map {
             URL(fileURLWithPath: game.install.installPath).appendingPathComponent($0.executablePath)
         }
         let path = app?.path ?? windows?.path
@@ -186,13 +187,15 @@ final class GameCell: NSView {
             downloadTooltip = { downloadDetails(update, bytesPerSecond: nil, status: pausing ? "Pausing…" : "Paused") }
         case .uninstalling(let step):
             detail.stringValue = step
-        case .failed(let message):
+        case .failed(let message) where !game.isOffline:
             detail.stringValue = message
             detailTooltip = message
             detail.textColor = .systemRed
             showsError = true
         default:
-            if state.update != nil, !state.isRunning {
+            if game.isOffline {
+                detail.stringValue = "Drive not connected"
+            } else if state.update != nil, !state.isRunning {
                 detail.stringValue = GameUpdate.canUpdate(game.install) ? "Update available" : "Update available in Battle.net"
                 detail.textColor = .systemOrange
             } else {
@@ -224,7 +227,7 @@ final class GameCell: NSView {
             show(status: "Needs attention")
         } else if state.isRunning, !hasDownloadControls {
             showRunning()
-        } else if !game.isSupported, !hasDownloadControls {
+        } else if !game.isSupported, !game.isOffline, !hasDownloadControls {
             show(status: !game.isInstalled ? "Not installed" : (game.install.platform == .windows ? "Windows support unavailable" : (game.runsNatively ? "Unsupported" : "Needs Rosetta")))
         } else {
             switch state.phase {
@@ -239,7 +242,7 @@ final class GameCell: NSView {
             case .uninstalling(let step):
                 showSpinner(step)
             case .idle, .failed:
-                let updates = state.update != nil && GameUpdate.canUpdate(game.install)
+                let updates = state.update != nil && GameUpdate.canUpdate(game.install) && !game.isOffline
                 let retry = state.download.canResume
                 let title = retry ? "Resume" : (updates ? "Update" : "Play")
                 if button.title != title { button.title = title }
@@ -345,7 +348,7 @@ final class GameCell: NSView {
         guard let state else { return false }
         switch state.phase {
         // A running game still has its folders to show.
-        case .idle, .failed: return state.game.isInstalled || (state.game.isSupported && !state.isRunning)
+        case .idle, .failed: return state.game.isInstalled || (state.game.isSupported && !state.isRunning) || state.game.locationID != nil
         default: return false
         }
     }
@@ -398,6 +401,12 @@ final class GameCell: NSView {
                 uninstall.toolTip = "Another game in “\(folder)” is running or has a download in progress."
             }
             menu.addItem(uninstall)
+        }
+        // A located game (or one on a drive that isn't connected) can be
+        // forgotten without touching its files.
+        if game.locationID != nil, !state.isRunning {
+            if !menu.items.isEmpty, !game.isInstalled { menu.addItem(.separator()) }
+            menu.addItem(ActionItem("Remove from Library", enabled: model.canRemoveFromLibrary(game)) { model.removeFromLibrary(game) })
         }
         return menu.items.isEmpty ? nil : menu
     }

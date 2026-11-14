@@ -114,8 +114,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         appUpdater.restartToUpdate()
     }
 
+    /// Asks in a sheet on the library window, which comes forward for it.
     @objc func locateInstalledGames(_ sender: Any?) {
-        Task { await model.locateInstalledGames() }
+        showLibrary(nil)
+        guard let window = libraryWindow else { return }
+        Task { await model.locateInstalledGames(in: window) }
     }
 
     @objc func rescan(_ sender: Any?) {
@@ -184,6 +187,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         switch item.action {
         case #selector(checkForUpdates(_:)): appUpdater.canCheck
         case #selector(addAccount(_:)), #selector(signInAgain(_:)), #selector(signOut(_:)): !model.isSigningIn
+        case #selector(locateInstalledGames(_:)): !model.isLocatingGames
         default: true
         }
     }

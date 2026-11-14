@@ -94,6 +94,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
     <key>LSApplicationCategoryType</key><string>public.app-category.games</string>
     <key>NSHighResolutionCapable</key><true/>
     <key>NSMicrophoneUsageDescription</key><string>Windows games use the microphone for in-game voice chat.</string>
+    <key>NSRemovableVolumesUsageDescription</key><string>Waypoint finds and plays games on external drives.</string>
     <!-- Installs and updates allocate big buffers; malloc's large cache would
          keep them dirty after they're freed (80 MB vs 6 MB idle afterwards). -->
     <key>LSEnvironment</key><dict><key>MallocLargeCache</key><string>0</string></dict>
