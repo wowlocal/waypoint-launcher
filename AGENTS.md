@@ -103,7 +103,12 @@ turn it off. Keep it that way.
   an add-on's updates.
 - **Never touch `WTF`,** and change only folders an add-on owns. A replaced
   copy Waypoint didn't install, or one someone changed, goes to the Trash.
-- **Automatic updates only for add-ons Waypoint installed or updated** (an
-  Update click is the say-so): with the game's own update, the background
-  check, and when the game quits. Never while the game is open or starting,
-  never on Play, never a changed add-on.
+- **Automatic updates after one say-so per game:** the first Update, Update
+  All or Install in a game's sheet. Then every add-on Waypoint recognizes by
+  an ID in its TOC (or installed itself) updates on its own: with the game's
+  update, the background check, and when the game quits. One recognized by
+  folder name alone waits for its own first update. Never while the game is
+  open or starting, never on Play, never an add-on someone edited, never to
+  a lower version or a release for another patch line.
+- **The sheet says only what's known:** `AddOnListing` decides every line
+  and is tested; change it there, not in the view.
