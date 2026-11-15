@@ -80,8 +80,10 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
     private var rows: [Row] = []
     /// Whether the drag in progress ended with a drop in the list.
     private var landed = false
+    /// The drag in progress, if a game is being dragged.
+    private var session: NSDraggingSession?
 
-    private let table = NSTableView()
+    private let table = LibraryTable()
     private let scrollView = NSScrollView()
     private let updateBanner = NSView()
     private let updateIcon = NSImageView()
@@ -128,6 +130,7 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
         table.delegate = self
         // Installed games can be dragged into another order.
         table.registerForDraggedTypes([.libraryGame])
+        table.canDragRow = { [weak self] row in self?.gameRowCount ?? 0 > row }
         table.setDraggingSourceOperationMask(.move, forLocal: true)
         // Out of Waypoint, a game is its folder, as a link only: Terminal
         // pastes the path, Finder makes an alias rather than copying a game.
@@ -430,6 +433,7 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
     /// rather than the row's rectangle with a square edge on the left.
     func tableView(_ tableView: NSTableView, draggingSession session: NSDraggingSession, willBeginAt screenPoint: NSPoint,
                    forRowIndexes rowIndexes: IndexSet) {
+        self.session = session
         guard let row = rowIndexes.first, let rowView = tableView.rowView(atRow: row, makeIfNecessary: false),
               let cell = rowView.view(atColumn: 0) as? NSView else { return }
         // As the picture sits in the cell: 3 points in at the top and
@@ -455,10 +459,21 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
 
     func tableView(_ tableView: NSTableView, draggingSession session: NSDraggingSession, endedAt screenPoint: NSPoint,
                    operation: NSDragOperation) {
+        // The table hides the dragged row's view during the drag and shows
+        // the one at its old index again after; once the rows have moved,
+        // that's another view, and the hidden one could be reused for any
+        // row (Available Games, say) and stay invisible. Show them all.
+        tableView.enumerateAvailableRowViews { rowView, _ in rowView.isHidden = false }
         // Let go outside the list, or handed to Terminal: every row comes
         // back as it was, the dragged one included.
         if !landed { tableView.reloadData() }
         landed = false
+        self.session = nil
+    }
+
+    /// A reused row view is never one left hidden by a drag.
+    func tableView(_ tableView: NSTableView, didAdd rowView: NSTableRowView, forRow row: Int) {
+        if session == nil { rowView.isHidden = false }
     }
 
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool { false }
@@ -506,5 +521,18 @@ private final class GameDragWriter: NSObject, NSPasteboardWriting {
 
     func pasteboardPropertyList(forType type: NSPasteboard.PasteboardType) -> Any? {
         type == .libraryGame ? uid : folder?.pasteboardPropertyList(forType: type)
+    }
+}
+
+/// The library's table: only installed games can be picked up. Asked before a
+/// drag starts, so another row (an available game, Available Games) is never
+/// lifted and hidden with nothing to drop.
+@MainActor
+private final class LibraryTable: NSTableView {
+    var canDragRow: ((Int) -> Bool)?
+
+    override func canDragRows(with rowIndexes: IndexSet, at mouseDownPoint: NSPoint) -> Bool {
+        !rowIndexes.isEmpty && rowIndexes.allSatisfy { canDragRow?($0) ?? false }
+            && super.canDragRows(with: rowIndexes, at: mouseDownPoint)
     }
 }
