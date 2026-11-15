@@ -1,28 +1,31 @@
-# Optional background mode
+# Background mode
 
-The menu bar remains opt-in. A normal icon click toggles the library window;
-right-click or Control-click opens the quick-action menu. Closing the library
-(including its red close button) keeps Waypoint and downloads running. Quit
-Waypoint exits as before. Minimized or hidden windows are restored on a click.
+Everything here is opt-in, in Settings ▸ Background. Without it, Waypoint
+behaves as before: a Dock icon, the library window on launch, no status item
+and no notifications.
 
-Hide Dock Icon opts into the status item. Disabling or removing the status item
-restores the Dock icon so Waypoint remains reachable. Start at Login uses
-SMAppService.mainApp and reflects the system approval state. A login or menu-only
-start does not open the library automatically.
+- **Menu bar.** "Show Waypoint in the menu bar" adds the status item. A click
+  opens its menu: Open Waypoint, Settings…, Play/Update/Pause per game, and
+  Quit. "Hide Dock icon" is available only while the status item is on. If
+  the status item goes away (unchecked, or ⌘-dragged out of the menu bar), the
+  Dock icon comes back, so Waypoint is never unreachable.
+- **Login.** "Open Waypoint at login" registers `SMAppService.mainApp`. A login
+  launch starts without the library window (detected with
+  `keyAELaunchedAsLogInItem`, best effort: if macOS doesn't mark it, the window
+  opens). Opening Waypoint by hand always shows the window. When macOS wants
+  approval, Settings says so and offers Login Items Settings….
+- **Notifications.** "Notify me about game updates" asks macOS for permission.
+  Each new build of a game, and a downloaded Waypoint update, is announced
+  once (`UpdateAlertLedger`); clicking it opens the library. Only people who
+  turn this on connect to Notification Center.
 
-While running, game checks refresh the existing off-main installation scan and
-check version metadata every 30 minutes and after wake, with the existing
-15-minute throttle. Manual/post-download checks remain available and concurrent
-forced requests receive a fresh follow-up pass. No game files or account
-credentials are changed by polling. Disconnected-drive listing is preserved.
+Waypoint checks installed games for updates at launch, when it comes back to
+the front, every 30 minutes and after wake (throttled to every 15 minutes
+unless forced). The 30-minute and wake checks use the installs as last read,
+so external drives aren't woken; a build not seen before has the installs read
+again and checked once more before it is announced.
 
-Update notifications require explicit opt-in and macOS approval. Alerts are
-remembered per game build after successful scheduling. Clicking an alert opens
-the library. Send Test Notification distinguishes scheduling acceptance from
-confirmed Notification Center delivery; Focus or screen sharing can hide banners.
-Existing Sparkle checks and installation behavior are unchanged; feed-enabled
-builds can also announce an update once it is ready.
+Closing the library window keeps Waypoint, its downloads and these checks
+running; Quit ends them.
 
-Unbundled development launches disable notification and login-item controls.
-No first-launch prompts or new dependencies are added. Actual startup after a
-logout/reboot is not exercised by automated tests.
+Not covered by automated tests: a real login launch after logout or reboot.
