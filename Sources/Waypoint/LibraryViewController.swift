@@ -78,6 +78,8 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
     private let model: AppModel
     private let appUpdater: AppUpdater
     private var rows: [Row] = []
+    /// Whether the drag in progress ended with a drop in the list.
+    private var landed = false
 
     private let table = NSTableView()
     private let scrollView = NSScrollView()
@@ -127,7 +129,9 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
         // Installed games can be dragged into another order.
         table.registerForDraggedTypes([.libraryGame])
         table.setDraggingSourceOperationMask(.move, forLocal: true)
-        table.setDraggingSourceOperationMask([], forLocal: false)
+        // Out of Waypoint, a game is its folder, as a link only: Terminal
+        // pastes the path, Finder makes an alias rather than copying a game.
+        table.setDraggingSourceOperationMask(.link, forLocal: false)
         table.draggingDestinationFeedbackStyle = .gap
         scrollView.documentView = table
         scrollView.hasVerticalScroller = true
@@ -397,9 +401,9 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
 
     func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> (any NSPasteboardWriting)? {
         guard row < gameRowCount, case .game(let state) = rows[row] else { return nil }
-        let item = NSPasteboardItem()
-        item.setString(state.game.install.uid, forType: .libraryGame)
-        return item
+        // A game on a drive that's away has no folder to hand out.
+        let folder = state.game.isOffline ? nil : URL(fileURLWithPath: state.game.install.installPath, isDirectory: true)
+        return GameDragWriter(uid: state.game.install.uid, folder: folder)
     }
 
     func tableView(_ tableView: NSTableView, validateDrop info: any NSDraggingInfo, proposedRow row: Int,
@@ -415,10 +419,46 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
         guard let id = info.draggingPasteboard.string(forType: .libraryGame) else { return false }
         let target: String? = if row < gameRowCount, case .game(let state) = rows[row] { state.game.install.uid } else { nil }
         model.moveGame(id, before: target)
-        // Within the drop, so the row settles into the gap rather than
-        // sliding there after it closes.
+        // Within the drop: the table moves the row with its own animation,
+        // and the dragged picture glides into the row's new place.
         render()
+        landed = true
         return true
+    }
+
+    /// The row's picture as a whole card, rounded as the game's picture is,
+    /// rather than the row's rectangle with a square edge on the left.
+    func tableView(_ tableView: NSTableView, draggingSession session: NSDraggingSession, willBeginAt screenPoint: NSPoint,
+                   forRowIndexes rowIndexes: IndexSet) {
+        guard let row = rowIndexes.first, let rowView = tableView.rowView(atRow: row, makeIfNecessary: false),
+              let cell = rowView.view(atColumn: 0) as? NSView else { return }
+        // As the picture sits in the cell: 3 points in at the top and
+        // bottom, 8 out at the trailing edge, and the same at the leading.
+        let card = NSRect(x: cell.frame.minX - 8, y: 3, width: cell.frame.width + 16, height: rowView.bounds.height - 6)
+        session.enumerateDraggingItems(options: [], for: tableView, classes: [NSPasteboardItem.self], searchOptions: [:]) { item, _, _ in
+            let components = item.imageComponents ?? []
+            let frame = item.draggingFrame
+            let image = NSImage(size: frame.size, flipped: false) { _ in
+                NSBezierPath(roundedRect: card, xRadius: 12, yRadius: 12).addClip()
+                for component in components {
+                    if let picture = component.contents as? NSImage {
+                        picture.draw(in: component.frame)
+                    } else if let contents = component.contents, CFGetTypeID(contents as CFTypeRef) == CGImage.typeID {
+                        NSImage(cgImage: contents as! CGImage, size: component.frame.size).draw(in: component.frame)
+                    }
+                }
+                return true
+            }
+            item.setDraggingFrame(frame, contents: image)
+        }
+    }
+
+    func tableView(_ tableView: NSTableView, draggingSession session: NSDraggingSession, endedAt screenPoint: NSPoint,
+                   operation: NSDragOperation) {
+        // Let go outside the list, or handed to Terminal: every row comes
+        // back as it was, the dragged one included.
+        if !landed { tableView.reloadData() }
+        landed = false
     }
 
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool { false }
@@ -447,4 +487,24 @@ extension NSMenuItem {
 private extension NSPasteboard.PasteboardType {
     /// A library game being dragged to another place; within Waypoint only.
     static let libraryGame = NSPasteboard.PasteboardType("dev.waypoint.library-game")
+}
+
+/// A dragged game: its uid, for reordering within Waypoint, and its folder as
+/// a file, exactly as a URL from Finder offers it, for other apps.
+private final class GameDragWriter: NSObject, NSPasteboardWriting {
+    let uid: String
+    let folder: NSURL?
+
+    init(uid: String, folder: URL?) {
+        self.uid = uid
+        self.folder = folder as NSURL?
+    }
+
+    func writableTypes(for pasteboard: NSPasteboard) -> [NSPasteboard.PasteboardType] {
+        [.libraryGame] + (folder?.writableTypes(for: pasteboard) ?? [])
+    }
+
+    func pasteboardPropertyList(forType type: NSPasteboard.PasteboardType) -> Any? {
+        type == .libraryGame ? uid : folder?.pasteboardPropertyList(forType: type)
+    }
 }
