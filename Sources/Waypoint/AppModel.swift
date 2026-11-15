@@ -360,7 +360,7 @@ final class AppModel {
         })
         Task {
             await refreshCatalog()
-            await checkForUpdatesInBackground()
+            await checkForUpdates()
         }
         Task { await setUpAccounts() }
     }
@@ -585,13 +585,17 @@ final class AppModel {
     }
 
     /// The check every 30 minutes and after wake. It goes by the installs as
-    /// last read, so a sleeping external drive stays asleep. Only a build it
-    /// hasn't seen before has the installs read again (another launcher may
-    /// have installed it meanwhile) and checked once more before it's
-    /// announced.
+    /// last read, so a sleeping external drive stays asleep. With
+    /// notifications on, a build not seen before has the installs read again
+    /// (another launcher may have installed it meanwhile) and checked once
+    /// more before it's announced.
     func checkForUpdatesInBackground() async {
         guard !isPreparingToQuit else { return }
-        await checkForUpdates(announces: false)
+        guard UserDefaults.standard.bool(forKey: BackgroundPreferences.notificationsKey) else {
+            await checkForUpdates()
+            return
+        }
+        guard await checkForUpdates(announces: false) else { return }
         let new = discoveredGames.compactMap { game -> (String, String)? in
             guard let latest = availableUpdate(for: game)?.latest.buildConfig,
                   confirmedUpdates[game.id] != latest else { return nil }
@@ -600,19 +604,25 @@ final class AppModel {
         guard !new.isEmpty, !isPreparingToQuit else { return }
         scanOffMainThreadOnce()
         await scansFinished()
-        await checkForUpdates(force: true)
+        // Refused only while another check runs; this one's turn comes next
+        // time, so nothing is marked confirmed.
+        guard await checkForUpdates(force: true) else { return }
         for (uid, build) in new { confirmedUpdates[uid] = build }
     }
 
     /// Asks Blizzard's version service which build is live. Cheap (one small
     /// request per game), throttled to every 15 minutes unless forced.
-    /// `announces`: tell `updateChecked` what was found.
-    func checkForUpdates(force: Bool = false, announces: Bool = true) async {
+    /// `announces`: tell `updateChecked` what was found. Returns whether this
+    /// call ran the check; a forced one that waits for a running check runs
+    /// as that check's follow-up pass instead.
+    @discardableResult
+    func checkForUpdates(force: Bool = false, announces: Bool = true) async -> Bool {
         // Do not consume the throttle on startup before external drives are read.
         while let scan = scanOffMainThread { await scan.value }
         guard !isPreparingToQuit,
-              updateCheckSchedule.request(force: force) else { return }
+              updateCheckSchedule.request(force: force, announces: announces) else { return false }
         defer { updateCheckSchedule.cancel() }
+        var announces = announces
         repeat {
             for game in discoveredGames where (game.family != .other || GameUpdate.canUpdate(game.install)) && game.isInstalled {
                 do {
@@ -629,7 +639,10 @@ final class AppModel {
                     Log.warning(.gameUpdate, "check_failed", nil, ["uid": game.id, "error": error])
                 }
             }
-        } while updateCheckSchedule.complete() && !isPreparingToQuit
+            guard updateCheckSchedule.complete(), !isPreparingToQuit else { break }
+            announces = announces || updateCheckSchedule.followUpAnnounces
+        } while true
+        return true
     }
 
     /// Downloads and installs the latest build; with `verify`, re-checks

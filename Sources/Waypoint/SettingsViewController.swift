@@ -229,7 +229,7 @@ private final class BackgroundSettings: SettingsPane {
     private let loginCheckbox = NSButton(checkboxWithTitle: "Open Waypoint at login", target: nil, action: nil)
     private lazy var loginNote = note()
     private let loginItemsButton = NSButton(title: "Login Items Settings…", target: nil, action: nil)
-    private let notificationsCheckbox = NSButton(checkboxWithTitle: "Notify me about game updates", target: nil, action: nil)
+    private let notificationsCheckbox = NSButton(checkboxWithTitle: "Notify me about updates", target: nil, action: nil)
     private lazy var notificationsNote = note()
     private var changing = false
     private var defaultsObserver: NSObjectProtocol?
@@ -283,7 +283,7 @@ private final class BackgroundSettings: SettingsPane {
         let defaults = UserDefaults.standard
         let menuBar = defaults.bool(forKey: MenuBarItem.defaultsKey)
         menuBarCheckbox.state = menuBar ? .on : .off
-        hideDockCheckbox.state = defaults.bool(forKey: UpdatePreferences.hideDockKey) ? .on : .off
+        hideDockCheckbox.state = defaults.bool(forKey: BackgroundPreferences.hideDockKey) ? .on : .off
         hideDockCheckbox.isEnabled = menuBar
 
         let integrated = services.supportsSystemIntegration
@@ -294,7 +294,7 @@ private final class BackgroundSettings: SettingsPane {
         loginItemsButton.isHidden = !needsApproval
         show(loginNote, needsApproval ? "Allow Waypoint in Login Items to finish." : services.loginError)
 
-        let notifications = defaults.bool(forKey: UpdatePreferences.notificationsKey)
+        let notifications = defaults.bool(forKey: BackgroundPreferences.notificationsKey)
         notificationsCheckbox.state = notifications ? .on : .off
         notificationsCheckbox.isEnabled = integrated && !changing
         show(notificationsNote, notifications && services.notificationStatus == .denied

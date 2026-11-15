@@ -17,10 +17,14 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let delegate = AppDelegate()
         app.delegate = delegate
         // Also makes `swift run` builds, which have no bundle, a regular app.
-        let menuOnly = UserDefaults.standard.bool(forKey: UpdatePreferences.hideDockKey) &&
+        let menuOnly = UserDefaults.standard.bool(forKey: BackgroundPreferences.hideDockKey) &&
             UserDefaults.standard.bool(forKey: MenuBarItem.defaultsKey)
         app.setActivationPolicy(menuOnly ? .accessory : .regular)
         withExtendedLifetime(delegate) { app.run() }
+    }
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        backgroundServices.prepare()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -28,7 +32,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         NSApp.mainMenu = MainMenu.make(for: self)
         menuBarItem = MenuBarItem(model: model, appUpdater: appUpdater)
         backgroundServices.openLibrary = { [weak self] in self?.showLibrary(nil) }
-        backgroundServices.openAppUpdate = { [weak self] in self?.showLibrary(nil) }
         backgroundServices.start(model: model, updater: appUpdater)
         // Opened by hand, Waypoint shows its window even with the Dock icon
         // hidden; started at login, it waits in the background.
@@ -43,8 +46,6 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let event = NSAppleEventManager.shared().currentAppleEvent
         return event?.paramDescriptor(forKeyword: keyAEPropData)?.enumCodeValue == keyAELaunchedAsLogInItem
     }
-
-    func applicationWillTerminate(_ notification: Notification) { backgroundServices.stop() }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
         guard model.hasActiveDownloads || isTerminating else { return .terminateNow }

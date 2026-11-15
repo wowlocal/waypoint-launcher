@@ -29,10 +29,6 @@ final class AppUpdater: NSObject {
     @ObservationIgnored private var clearTask: Task<Void, Never>?
     @ObservationIgnored private var isRestarting = false
 
-    var isEnabled: Bool { controller != nil }
-
-    var canCheck: Bool { controller?.updater.canCheckForUpdates ?? false }
-
     override init() {
         super.init()
         guard let feed = Bundle.main.object(forInfoDictionaryKey: "SUFeedURL") as? String else {

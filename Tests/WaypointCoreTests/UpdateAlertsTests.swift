@@ -2,14 +2,6 @@ import Foundation
 import Testing
 @testable import WaypointCore
 
-@Test func backgroundPreferencesAreOffByDefault() throws {
-    let suite = "WaypointCoreTests.updatePreferences.\(UUID())"
-    let defaults = try #require(UserDefaults(suiteName: suite))
-    defer { defaults.removePersistentDomain(forName: suite) }
-    #expect(!defaults.bool(forKey: UpdatePreferences.notificationsKey))
-    #expect(!defaults.bool(forKey: UpdatePreferences.hideDockKey))
-}
-
 @Test func updateAlertsRetryUntilRecordedAndPersistAcrossLaunches() throws {
     let suite = "WaypointCoreTests.updateAlerts.\(UUID())"
     let defaults = try #require(UserDefaults(suiteName: suite))
@@ -47,4 +39,22 @@ import Testing
     schedule.cancel()
     let retry = schedule.request(force: true)
     #expect(first && retry)
+}
+
+@Test func aForcedRequestThatWaitsKeepsItsAnnouncementForTheFollowUpPass() {
+    var schedule = UpdateCheckSchedule()
+    // A silent background pass is running when a check that announces
+    // (after a download, or notifications just turned on) is asked for.
+    let silent = schedule.request(force: false, announces: false)
+    let waiting = schedule.request(force: true, announces: true)
+    let followUp = schedule.complete()
+    let announces = schedule.followUpAnnounces
+    let done = schedule.complete()
+    #expect(silent && !waiting && followUp && announces && !done)
+    #expect(!schedule.followUpAnnounces)
+    // A silent request that waits doesn't make the follow-up announce.
+    _ = schedule.request(force: true, announces: true)
+    _ = schedule.request(force: true, announces: false)
+    _ = schedule.complete()
+    #expect(!schedule.followUpAnnounces)
 }

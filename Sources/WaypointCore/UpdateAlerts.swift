@@ -1,7 +1,7 @@
 import Foundation
 
 /// The opt-in background preferences. All are off by default.
-public enum UpdatePreferences {
+public enum BackgroundPreferences {
     public static let notificationsKey = "updateNotifications"
     public static let hideDockKey = "hideDockIcon"
 }
@@ -26,11 +26,16 @@ public struct UpdateAlertLedger {
 public struct UpdateCheckSchedule {
     private var running = false
     private var forcedAgain = false
+    /// Whether a forced request that waited wants what it finds announced.
+    public private(set) var followUpAnnounces = false
     private var lastCheck: Date?
     public init() {}
-    public mutating func request(force: Bool, now: Date = Date()) -> Bool {
+    public mutating func request(force: Bool, announces: Bool = true, now: Date = Date()) -> Bool {
         if running {
-            if force { forcedAgain = true }
+            if force {
+                forcedAgain = true
+                followUpAnnounces = followUpAnnounces || announces
+            }
             return false
         }
         if !force, let lastCheck, now.timeIntervalSince(lastCheck) < 15 * 60 { return false }
@@ -44,7 +49,8 @@ public struct UpdateCheckSchedule {
             return true
         }
         running = false
+        followUpAnnounces = false
         return false
     }
-    public mutating func cancel() { running = false; forcedAgain = false }
+    public mutating func cancel() { running = false; forcedAgain = false; followUpAnnounces = false }
 }
