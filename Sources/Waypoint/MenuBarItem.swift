@@ -57,6 +57,9 @@ final class MenuBarItem: NSObject, NSMenuDelegate {
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
+        menu.addItem(NSMenuItem(title: "Open Waypoint", action: #selector(AppDelegate.showLibrary(_:)), keyEquivalent: ""))
+        menu.addItem(NSMenuItem(title: "Settings…", action: #selector(AppDelegate.showSettings(_:)), keyEquivalent: ","))
+        menu.addItem(.separator())
         for game in model.games where game.isSupported {
             if let item = downloadItem(uid: game.id, name: game.displayName, phase: model.phase(of: game)) {
                 menu.addItem(item)

@@ -6,6 +6,7 @@ import WaypointCore
 final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMenuDelegate, NSMenuItemValidation {
     let model = AppModel()
     let appUpdater = AppUpdater()
+    let backgroundServices = BackgroundServices()
     private var libraryWindow: NSWindow?
     private var settingsWindow: NSWindow?
     private var menuBarItem: MenuBarItem?
@@ -16,17 +17,34 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         let delegate = AppDelegate()
         app.delegate = delegate
         // Also makes `swift run` builds, which have no bundle, a regular app.
-        app.setActivationPolicy(.regular)
+        let menuOnly = UserDefaults.standard.bool(forKey: BackgroundPreferences.hideDockKey) &&
+            UserDefaults.standard.bool(forKey: MenuBarItem.defaultsKey)
+        app.setActivationPolicy(menuOnly ? .accessory : .regular)
         withExtendedLifetime(delegate) { app.run() }
+    }
+
+    func applicationWillFinishLaunching(_ notification: Notification) {
+        backgroundServices.prepare()
     }
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         appUpdater.prepareForRestart = { [weak model] in await model?.prepareToQuit() ?? true }
         NSApp.mainMenu = MainMenu.make(for: self)
         menuBarItem = MenuBarItem(model: model, appUpdater: appUpdater)
-        showLibrary(nil)
+        backgroundServices.openLibrary = { [weak self] in self?.showLibrary(nil) }
+        backgroundServices.start(model: model, updater: appUpdater)
+        // Opened by hand, Waypoint shows its window even with the Dock icon
+        // hidden; started at login, it waits in the background.
+        if !Self.launchedAtLogin { showLibrary(nil) }
         // How long the launch took, to compare versions and Macs by the logs.
-        Log.info(.app, "library_shown", nil, ["launch_ms": ProcessStart.millisecondsAgo ?? -1, "games": model.games.count])
+        Log.info(.app, "interface_ready", nil, ["launch_ms": ProcessStart.millisecondsAgo ?? -1, "games": model.games.count])
+    }
+
+    /// Best effort: if macOS doesn't mark a login launch, the window opens,
+    /// which is harmless.
+    private static var launchedAtLogin: Bool {
+        let event = NSAppleEventManager.shared().currentAppleEvent
+        return event?.paramDescriptor(forKeyword: keyAEPropData)?.enumCodeValue == keyAELaunchedAsLogInItem
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -55,6 +73,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     @objc func showLibrary(_ sender: Any?) {
         let window = libraryWindow ?? makeLibraryWindow()
         libraryWindow = window
+        NSApp.bringToFront()
+        if window.isMiniaturized { window.deminiaturize(nil) }
         window.makeKeyAndOrderFront(nil)
     }
 
@@ -88,11 +108,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     @objc func showSettings(_ sender: Any?) {
-        let window = settingsWindow ?? NSWindow(contentViewController: SettingsViewController(model: model))
+        let window = settingsWindow ?? NSWindow(contentViewController: SettingsViewController(model: model, backgroundServices: backgroundServices))
         window.styleMask = [.titled, .closable]
+        window.toolbarStyle = .preference
         window.isReleasedWhenClosed = false
         if settingsWindow == nil { window.center() }
         settingsWindow = window
+        NSApp.bringToFront()
         window.makeKeyAndOrderFront(nil)
     }
 
@@ -165,7 +187,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         for item in menu.items {
             switch item.action {
             case #selector(checkForUpdates(_:)):
-                item.isHidden = ready != nil || !appUpdater.isEnabled
+                item.isHidden = ready != nil
             case #selector(restartToUpdate(_:)):
                 item.isHidden = ready == nil
                 item.title = "Restart to Update Waypoint \(ready ?? "")"
@@ -185,10 +207,19 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         switch item.action {
-        case #selector(checkForUpdates(_:)): appUpdater.canCheck
+        case #selector(checkForUpdates(_:)): true
         case #selector(addAccount(_:)), #selector(signInAgain(_:)), #selector(signOut(_:)): !model.isSigningIn
         case #selector(locateInstalledGames(_:)): !model.isLocatingGames
         default: true
         }
     }
+}
+
+extension NSApplication {
+    /// Brings Waypoint in front of the active app. `activate()` only asks,
+    /// and macOS refuses when the request comes from the menu bar item's menu
+    /// with no Dock icon, or right after hiding the Dock icon: the window
+    /// would open behind. The deprecated form is still honored; checked on
+    /// macOS 27.
+    func bringToFront() { activate(ignoringOtherApps: true) }
 }
