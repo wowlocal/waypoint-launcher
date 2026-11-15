@@ -527,16 +527,29 @@ final class AppModel {
         let selected = heroes.first { $0.id == pendingHeroesInstall?.key }
             ?? heroes.first { $0.install.platform == preferred } ?? heroes.first
         var addedHeroes = false
-        games = all.filter { game in
+        games = LibraryOrder.sorted(all.filter { game in
             guard game.install.uid == "heroes" else { return true }
             guard !addedHeroes, game.id == selected?.id else { return false }
             addedHeroes = true
             return true
-        }
+        }, by: libraryOrder, id: \.install.uid)
         refreshRunning(processes: processes)
         Log.info(.library, "scanned", nil, ["games": games.map { "\($0.install.uid)@\($0.install.version ?? "?")" }.joined(separator: ","),
                                             "missing": found.filter { !$0.isInstalled && !$0.isOffline }.map(\.id).joined(separator: ","),
                                             "offline": found.filter(\.isOffline).map(\.id).joined(separator: ",")])
+    }
+
+    /// The order the library's games were dragged into, by uid.
+    private var libraryOrder = UserDefaults.standard.stringArray(forKey: "libraryOrder") ?? [] {
+        didSet { UserDefaults.standard.set(libraryOrder, forKey: "libraryOrder") }
+    }
+
+    /// Drops the game with uid `uid` before the one with `target`, or last
+    /// with nil, and remembers the order.
+    func moveGame(_ uid: String, before target: String?) {
+        libraryOrder = LibraryOrder.moving(uid, before: target, in: games.map(\.install.uid), remembered: libraryOrder)
+        games = LibraryOrder.sorted(games, by: libraryOrder, id: \.install.uid)
+        Log.info(.library, "reordered", nil, ["uid": uid])
     }
 
     func heroesEdition(_ platform: InstallPlatform) -> Game? {
@@ -1157,6 +1170,11 @@ final class AppModel {
         }
         phases.removeValue(forKey: game.id)
         updates.removeValue(forKey: game.id)
+        // Its place in the library goes with it: installed again, it comes
+        // last like any new game. HotS keeps it while its other edition stays.
+        if !discoveredGames.contains(where: { $0.install.uid == game.install.uid && $0.id != game.id }) {
+            libraryOrder.removeAll { $0 == game.install.uid }
+        }
         // Forgotten where it was remembered (installed on another drive, or
         // located there), before its drive can be ejected and the game
         // kept as offline.

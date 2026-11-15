@@ -124,6 +124,11 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
         table.selectionHighlightStyle = .none
         table.dataSource = self
         table.delegate = self
+        // Installed games can be dragged into another order.
+        table.registerForDraggedTypes([.libraryGame])
+        table.setDraggingSourceOperationMask(.move, forLocal: true)
+        table.setDraggingSourceOperationMask([], forLocal: false)
+        table.draggingDestinationFeedbackStyle = .gap
         scrollView.documentView = table
         scrollView.hasVerticalScroller = true
         scrollView.autohidesScrollers = true
@@ -383,6 +388,39 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
 
     func numberOfRows(in tableView: NSTableView) -> Int { rows.count }
 
+    // MARK: Reordering
+
+    /// Installed games lead the list; drags start and land among them only.
+    private var gameRowCount: Int {
+        rows.prefix { if case .game = $0 { true } else { false } }.count
+    }
+
+    func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> (any NSPasteboardWriting)? {
+        guard row < gameRowCount, case .game(let state) = rows[row] else { return nil }
+        let item = NSPasteboardItem()
+        item.setString(state.game.install.uid, forType: .libraryGame)
+        return item
+    }
+
+    func tableView(_ tableView: NSTableView, validateDrop info: any NSDraggingInfo, proposedRow row: Int,
+                   proposedDropOperation dropOperation: NSTableView.DropOperation) -> NSDragOperation {
+        guard info.draggingSource as? NSTableView === table else { return [] }
+        // Between two games, or after the last one; never on a row.
+        tableView.setDropRow(min(row, gameRowCount), dropOperation: .above)
+        return .move
+    }
+
+    func tableView(_ tableView: NSTableView, acceptDrop info: any NSDraggingInfo, row: Int,
+                   dropOperation: NSTableView.DropOperation) -> Bool {
+        guard let id = info.draggingPasteboard.string(forType: .libraryGame) else { return false }
+        let target: String? = if row < gameRowCount, case .game(let state) = rows[row] { state.game.install.uid } else { nil }
+        model.moveGame(id, before: target)
+        // Within the drop, so the row settles into the gap rather than
+        // sliding there after it closes.
+        render()
+        return true
+    }
+
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool { false }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
@@ -404,4 +442,9 @@ private extension NSToolbarItem.Identifier {
 extension NSMenuItem {
     /// The hidden first item a pull-down menu (NSMenuToolbarItem's) needs.
     static func pullDownPlaceholder() -> NSMenuItem { NSMenuItem(title: "", action: nil, keyEquivalent: "") }
+}
+
+private extension NSPasteboard.PasteboardType {
+    /// A library game being dragged to another place; within Waypoint only.
+    static let libraryGame = NSPasteboard.PasteboardType("dev.waypoint.library-game")
 }
