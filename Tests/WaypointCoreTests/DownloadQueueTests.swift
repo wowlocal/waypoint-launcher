@@ -194,3 +194,18 @@ private func queuedRequest(_ directory: URL, uid: String = "hs_beta", platform: 
     #expect(queue.jobs.isEmpty)
     #expect(reads == 0)
 }
+
+@Test @MainActor func theInstallSheetsKeepAwakeChoiceStartsTheJobAndSurvivesARestart() throws {
+    let directory = try queueDirectory()
+    defer { try? FileManager.default.removeItem(at: directory) }
+    let store = DownloadStore(directory: directory.appendingPathComponent("queue"))
+    let awake = queuedRequest(directory, uid: "awake"), asleep = queuedRequest(directory, uid: "asleep")
+    var first: DownloadQueue? = DownloadQueue(store: store)
+    #expect(try first!.enqueue(awake, keepsMacAwake: true).keepsMacAwake)
+    #expect(try !first!.enqueue(asleep).keepsMacAwake)
+    #expect(try store.read(store.file(for: awake.key)).keepsMacAwake)
+    first = nil
+    let second = DownloadQueue(store: store)
+    #expect(second.jobs[awake.key]?.keepsMacAwake == true)
+    #expect(second.jobs[asleep.key]?.keepsMacAwake == false)
+}

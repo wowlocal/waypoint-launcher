@@ -823,7 +823,8 @@ final class AppModel {
     /// `remembersFolder`: the folder was chosen in the install sheet, and is
     /// offered there first from now on, once the download starts.
     func install(_ product: InstallableProduct, folder: URL, region: Region, languages: GameLanguages,
-                 platform requestedPlatform: InstallPlatform? = nil, remembersFolder: Bool = false) async {
+                 platform requestedPlatform: InstallPlatform? = nil, remembersFolder: Bool = false,
+                 keepsMacAwake: Bool = false) async {
         let volume = await Self.volumeUUID(folder.path)
         let platform = requestedPlatform ?? defaultPlatform(for: product)
         defer { ProcessMemory.releaseFreed() }
@@ -839,7 +840,8 @@ final class AppModel {
         if remembersFolder { rememberInstallFolder(folder.deletingLastPathComponent(), for: platform) }
         let install = product.install(at: folder, region: region, languages: languages,
             tagString: "\(platform.manifestTag) \(region.launchOptionValue) \(languages.text) text \(languages.speech) speech", platform: platform)
-        await startDownload(DownloadRequest(kind: .install, install: install, product: product), volumeUUID: volume)
+        await startDownload(DownloadRequest(kind: .install, install: install, product: product), volumeUUID: volume,
+                            keepsMacAwake: keepsMacAwake)
     }
 
     /// The drive a download goes to, read off the main thread. Callers
@@ -850,11 +852,11 @@ final class AppModel {
         return await Task.detached(priority: .userInitiated) { InstallVolume.volumeUUID(at: folder) }.value
     }
 
-    private func startDownload(_ request: DownloadRequest, volumeUUID: String?) async {
+    private func startDownload(_ request: DownloadRequest, volumeUUID: String?, keepsMacAwake: Bool = false) async {
         var request = request
         request.volumeUUID = volumeUUID
         do {
-            try downloadQueue.enqueue(request)
+            try downloadQueue.enqueue(request, keepsMacAwake: keepsMacAwake)
             phases.removeValue(forKey: request.key)
             if request.kind == .install, request.install.productCode == "hero" { selectHeroesEdition(request.install.platform) }
             await runDownload(uid: request.key)

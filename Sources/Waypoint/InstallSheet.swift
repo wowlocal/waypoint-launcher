@@ -29,6 +29,13 @@ final class InstallSheet: NSViewController {
     /// one line either way, so nothing moves when it arrives.
     private let sizeText = NSTextField.label(.body)
     private let installButton = NSButton(title: "Install", target: nil, action: nil)
+    /// Checked for big downloads, where sleep would stall the install for
+    /// longest; until the size is known it assumes one, as most are.
+    private let keepAwakeCheckbox = NSButton(checkboxWithTitle: "Keep Mac awake until the download finishes",
+                                             target: nil, action: nil)
+    /// Set once the user clicks the checkbox: the size no longer changes it.
+    private var keepAwakeChosen = false
+    static let keepAwakeFromBytes: UInt64 = 10_000_000_000
 
     private var folderName: String { product.folderName + (platform == .windows ? " (Windows)" : "") }
     private var folder: URL { parentFolder.appendingPathComponent(folderName, isDirectory: true) }
@@ -78,12 +85,16 @@ final class InstallSheet: NSViewController {
         let grid = NSGridView(views: platformRows + [[Self.formLabel("Location:"), locationRow], [NSGridCell.emptyContentView, volumeText]] + languagePicker.rows + [
             [Self.formLabel("Region:"), regionPopup],
             [Self.formLabel("Download:"), sizeText],
+            [NSGridCell.emptyContentView, keepAwakeCheckbox],
         ])
         grid.column(at: 0).xPlacement = .trailing
         grid.rowAlignment = .firstBaseline
         grid.rowSpacing = 10
         grid.columnSpacing = 8
         grid.cell(for: volumeText)?.row?.topPadding = -4
+        keepAwakeCheckbox.state = .on
+        keepAwakeCheckbox.target = self
+        keepAwakeCheckbox.action = #selector(keepAwakeClicked)
 
         let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancel))
         cancel.keyEquivalent = "\u{1b}"
@@ -210,6 +221,7 @@ final class InstallSheet: NSViewController {
             sizeText.textColor = .secondaryLabelColor
             sizeText.toolTip = nil
         case .success(let bytes):
+            if !keepAwakeChosen { keepAwakeCheckbox.state = bytes.download >= Self.keepAwakeFromBytes ? .on : .off }
             let download = ByteCountFormatter.string(fromByteCount: Int64(bytes.download), countStyle: .file)
             sizeText.stringValue = bytes.stored == 0 ? download
                 : "\(download) left (\(ByteCountFormatter.string(fromByteCount: Int64(bytes.stored), countStyle: .file)) already downloaded)"
@@ -242,6 +254,8 @@ final class InstallSheet: NSViewController {
         }
     }
 
+    @objc private func keepAwakeClicked() { keepAwakeChosen = true }
+
     @objc private func cancel() {
         dismiss(nil)
     }
@@ -263,9 +277,9 @@ final class InstallSheet: NSViewController {
         let (product, model, folder, region, platform) = (product, model, folder, region, platform)
         guard let languages, installButton.isEnabled else { return }
         // Chosen with Change…: offered first from now on.
-        let remembers = hasCustomParent
+        let remembers = hasCustomParent, keepsAwake = keepAwakeCheckbox.state == .on
         Task { await model.install(product, folder: folder, region: region, languages: languages, platform: platform,
-                                   remembersFolder: remembers) }
+                                   remembersFolder: remembers, keepsMacAwake: keepsAwake) }
         dismiss(nil)
     }
 
