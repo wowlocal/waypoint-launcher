@@ -30,13 +30,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         backgroundServices.openLibrary = { [weak self] in self?.showLibrary(nil) }
         backgroundServices.openAppUpdate = { [weak self] in self?.showLibrary(nil) }
         backgroundServices.start(model: model, updater: appUpdater)
-        if !UserDefaults.standard.bool(forKey: UpdatePreferences.hideDockKey), !Self.launchedAtLogin {
-            showLibrary(nil)
-        }
+        // Opened by hand, Waypoint shows its window even with the Dock icon
+        // hidden; started at login, it waits in the background.
+        if !Self.launchedAtLogin { showLibrary(nil) }
         // How long the launch took, to compare versions and Macs by the logs.
         Log.info(.app, "interface_ready", nil, ["launch_ms": ProcessStart.millisecondsAgo ?? -1, "games": model.games.count])
     }
 
+    /// Best effort: if macOS doesn't mark a login launch, the window opens,
+    /// which is harmless.
     private static var launchedAtLogin: Bool {
         let event = NSAppleEventManager.shared().currentAppleEvent
         return event?.paramDescriptor(forKeyword: keyAEPropData)?.enumCodeValue == keyAELaunchedAsLogInItem
@@ -67,20 +69,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
 
     // MARK: Library window
 
-    /// The status icon toggles only the library window, never the application.
-    /// The red close button uses the same window-close path; background work lives on.
-    @objc func toggleLibrary(_ sender: Any?) {
-        if let window = libraryWindow, window.isVisible, !window.isMiniaturized, !NSApp.isHidden {
-            window.performClose(sender)
-        } else {
-            showLibrary(sender)
-        }
-    }
-
     @objc func showLibrary(_ sender: Any?) {
         let window = libraryWindow ?? makeLibraryWindow()
         libraryWindow = window
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
         if window.isMiniaturized { window.deminiaturize(nil) }
         window.makeKeyAndOrderFront(nil)
     }
@@ -121,7 +113,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         window.isReleasedWhenClosed = false
         if settingsWindow == nil { window.center() }
         settingsWindow = window
-        NSApp.activate(ignoringOtherApps: true)
+        NSApp.activate()
         window.makeKeyAndOrderFront(nil)
     }
 
