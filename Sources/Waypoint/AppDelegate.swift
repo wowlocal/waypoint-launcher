@@ -39,8 +39,40 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         // Opened by hand, Waypoint shows its window even with the Dock icon
         // hidden; started at login, it waits in the background.
         if !Self.launchedAtLogin { showLibrary(nil) }
+        openAddOnsFromArguments()
         // How long the launch took, to compare versions and Macs by the logs.
         Log.info(.app, "interface_ready", nil, ["launch_ms": ProcessStart.millisecondsAgo ?? -1, "games": model.games.count])
+    }
+
+    /// `-WaypointOpenAddOns <uid>` (plus `-WaypointAddOnsSearch <text>`,
+    /// `-WaypointAddOnsExpand YES`) opens that game's Add-Ons sheet once the
+    /// library is read: for screenshots of the sheet without clicking.
+    /// Launch arguments only, never a saved setting.
+    private func openAddOnsFromArguments() {
+        let arguments = UserDefaults.standard.volatileDomain(forName: UserDefaults.argumentDomain)
+        guard let uid = arguments["WaypointOpenAddOns"] as? String else { return }
+        let search = arguments["WaypointAddOnsSearch"] as? String ?? ""
+        let expand = (arguments["WaypointAddOnsExpand"] as? String).map { ["YES", "1", "true"].contains($0) } ?? false
+        Task { [weak self] in
+            for _ in 0..<100 {
+                guard let self else { return }
+                if let game = self.model.games.first(where: { $0.install.uid == uid }), self.model.canManageAddOns(game),
+                   let library = self.libraryWindow?.contentViewController {
+                    let sheet = AddOnsSheet(game: game, model: self.model, search: search, othersExpanded: expand)
+                    library.presentAsSheet(sheet)
+                    // `-WaypointAddOnsSnapshot <file.png>`: the sheet as an
+                    // image once it has settled, drawn in-process (works with
+                    // the screen locked), then quit.
+                    if let file = arguments["WaypointAddOnsSnapshot"] as? String {
+                        try? await Task.sleep(for: .seconds((arguments["WaypointAddOnsSnapshotDelay"] as? String).flatMap(Double.init) ?? 6))
+                        sheet.snapshot(to: URL(fileURLWithPath: file))
+                        NSApp.terminate(nil)
+                    }
+                    return
+                }
+                try? await Task.sleep(for: .milliseconds(100))
+            }
+        }
     }
 
     /// Best effort: if macOS doesn't mark a login launch, the window opens,

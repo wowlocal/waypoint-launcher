@@ -28,6 +28,9 @@ public struct InstalledAddOn: Identifiable, Equatable, Sendable {
     public var record: AddOnRecord?
     /// When the main TOC last changed.
     public var modified: Date?
+    /// Recognized by folder name alone (its TOC has no ID to confirm it):
+    /// updated by hand, and on its own only after Waypoint has once.
+    public var isMatchedByName = false
 
     public var isManaged: Bool { ref != nil }
 }
@@ -63,11 +66,13 @@ public struct AddOnMatcher: Sendable {
         }
 
         // 2–5. IDs in the TOC, then the index's folder names.
+        var byID: Set<String> = []
         for folder in folders where folder.kind == .addOn && owner[folder.name.lowercased()] == nil {
-            guard let (ref, entry) = identify(folder) else { continue }
+            guard let (ref, entry, confirmed) = identify(folder) else { continue }
             add(folder, to: ref.description) {
                 InstalledAddOn(id: ref.description, name: entry?.name ?? folder.toc?.title ?? folder.name, folders: [], ref: ref)
             }
+            if confirmed { byID.insert(ref.description) }
         }
 
         // Folders left over join an add-on when the TOC says they belong to
@@ -126,6 +131,7 @@ public struct AddOnMatcher: Sendable {
             row.modified = folder?.tocModified
             if row.ref != nil, row.record == nil { row.name = entry?.name ?? folder?.toc?.title ?? row.name }
             else if row.ref == nil { row.name = folder?.toc?.title ?? main }
+            row.isMatchedByName = row.ref != nil && row.record == nil && !byID.contains(id)
             return row
         }
         .sorted { $0.name.localizedStandardCompare($1.name) == .orderedAscending }
@@ -133,15 +139,21 @@ public struct AddOnMatcher: Sendable {
 
     /// Steps 2–5 of the order: Tukui, the index by ID, WoWInterface by ID,
     /// the index by folder name.
-    func identify(_ folder: InstalledFolder) -> (AddOnRef, AddOnIndex.Entry?)? {
+    /// The add-on a folder is, and whether its TOC confirmed it with an ID
+    /// (rather than the folder name alone).
+    func identify(_ folder: InstalledFolder) -> (AddOnRef, AddOnIndex.Entry?, Bool)? {
         let toc = folder.toc
-        if let tukui = toc?.tukuiID.flatMap({ ["-1": "tukui", "-2": "elvui"][$0] }) ?? ["elvui": "elvui", "tukui": "tukui"][folder.name.lowercased()] {
+        if let tukui = toc?.tukuiID.flatMap({ ["-1": "tukui", "-2": "elvui"][$0] }) {
             let ref = AddOnRef(.tukui, tukui)
-            return (ref, index.entry(for: ref))
+            return (ref, index.entry(for: ref), true)
         }
-        if let toc, let entry = index.entry(curse: toc.curseID, wago: toc.wagoID, wowi: toc.wowiID) { return (entry.source, entry) }
-        if let wowi = toc?.wowiID, toc?.isLoadOnDemand != true { return (AddOnRef(.wowInterface, wowi), nil) }
-        if let entry = index.entry(folder: folder.name, toc: toc) { return (entry.source, entry) }
+        if let tukui = ["elvui": "elvui", "tukui": "tukui"][folder.name.lowercased()] {
+            let ref = AddOnRef(.tukui, tukui)
+            return (ref, index.entry(for: ref), false)
+        }
+        if let toc, let entry = index.entry(curse: toc.curseID, wago: toc.wagoID, wowi: toc.wowiID) { return (entry.source, entry, true) }
+        if let wowi = toc?.wowiID, toc?.isLoadOnDemand != true { return (AddOnRef(.wowInterface, wowi), nil, true) }
+        if let entry = index.entry(folder: folder.name, toc: toc) { return (entry.source, entry, false) }
         return nil
     }
 

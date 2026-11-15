@@ -106,6 +106,49 @@ public actor AddOnLibrary {
         return kept
     }
 
+    /// Whether the person said so (an Update or Install in the sheet): then
+    /// every add-on Waypoint recognizes here updates on its own.
+    public func keepsCurrent() -> Bool { store.keepsCurrent(for: addOns) }
+
+    public func setKeepsCurrent() throws {
+        guard !store.keepsCurrent(for: addOns) else { return }
+        try store.setKeepsCurrent(true, for: addOns)
+        Log.info(.addOns, "keeps_current", nil, ["flavor": flavor?.rawValue ?? "-"])
+    }
+
+    /// Notes how each recognized add-on Waypoint didn't install looks now,
+    /// unless already noted at this version: later edits by hand show up as
+    /// the same version with other files. A new version (another app
+    /// updated it) is noted afresh.
+    public func recordBaselines(for installed: [InstalledAddOn]) throws {
+        var baselines = store.baselines(for: addOns)
+        var changed = false
+        // Forget add-ons that are gone or now Waypoint's own.
+        let current = Set(installed.filter { $0.isManaged && $0.record == nil }.map(\.id))
+        for id in baselines.keys where !current.contains(id) { baselines[id] = nil; changed = true }
+        for addOn in installed where addOn.isManaged && addOn.record == nil {
+            if let known = baselines[addOn.id], known.tocVersion == addOn.version { continue }
+            baselines[addOn.id] = AddOnBaseline(tocVersion: addOn.version, folderHashes: AddOnContentHash.of(addOn.folders, in: addOns))
+            changed = true
+        }
+        if changed { try store.setBaselines(baselines, for: addOns) }
+    }
+
+    /// Someone edited the add-on's files: Waypoint's install of it, or,
+    /// for one it didn't install, since it was first noted.
+    public func hasLocalChanges(_ addOn: InstalledAddOn) -> Bool {
+        if let record = addOn.record { return AddOnContentHash.changed(record, in: addOns) }
+        guard let baseline = store.baselines(for: addOns)[addOn.id], baseline.tocVersion == addOn.version else { return false }
+        let now = AddOnContentHash.of(addOn.folders, in: addOns)
+        return now.contains { baseline.folderHashes[$0.key] != nil && baseline.folderHashes[$0.key] != $0.value }
+    }
+
+    public func failedRelease(for addOn: InstalledAddOn) -> String? { store.failedReleases(for: addOns)[addOn.id] }
+
+    public func setFailedRelease(_ release: String?, for addOn: InstalledAddOn) {
+        try? store.setFailedRelease(release, for: addOn.id, in: addOns)
+    }
+
     // MARK: Check
 
     /// The update state of each managed add-on, by id.
@@ -145,8 +188,26 @@ public actor AddOnLibrary {
             return true
         }
         if let version = addOn.version, normalized(version) == normalized(latest.version) { return false }
+        // Never "update" to a lower version, however late it was uploaded.
+        if let version = addOn.version, let order = compare(latest.version, version), order != .orderedDescending { return false }
         guard let released = latest.date, let installed = addOn.modified else { return false }
         return released > installed.addingTimeInterval(3600)
+    }
+
+    /// Versions made only of numbers and dots ("v12.1.23"), compared as
+    /// numbers; nil when either isn't one.
+    static func compare(_ a: String, _ b: String) -> ComparisonResult? {
+        func parts(_ text: String) -> [Int]? {
+            let numbers = normalized(text).split(separator: ".").map { Int($0) }
+            guard !numbers.isEmpty, numbers.allSatisfy({ $0 != nil }) else { return nil }
+            return numbers.map { $0! }
+        }
+        guard let x = parts(a), let y = parts(b) else { return nil }
+        for i in 0..<max(x.count, y.count) {
+            let (p, q) = (i < x.count ? x[i] : 0, i < y.count ? y[i] : 0)
+            if p != q { return p < q ? .orderedAscending : .orderedDescending }
+        }
+        return .orderedSame
     }
 
     static func normalized(_ version: String) -> String {
@@ -170,8 +231,9 @@ public actor AddOnLibrary {
         // The game's folder must be there: Waypoint never makes one up.
         guard FileManager.default.fileExists(atPath: gameFolder.path) else { throw CocoaError(.fileNoSuchFile) }
         if holds?() == true { throw AddOnError.gameRunning }
-        // Checked before downloading, and again at the swap.
-        if let record = replacing?.record, !evenIfChanged, AddOnContentHash.changed(record, in: addOns) {
+        // Checked before downloading, and again at the swap: Waypoint's own
+        // install against its record, any other against how it first looked.
+        if let replacing, !evenIfChanged, hasLocalChanges(replacing) {
             throw AddOnError.changedLocally
         }
         let zip = try await http.download(release.download, 1 << 30, progress)
@@ -203,6 +265,8 @@ public actor AddOnLibrary {
         if let record = target?.record {
             untouched = !AddOnContentHash.changed(record, in: addOns)
             if !untouched && !evenIfChanged { throw AddOnError.changedLocally }
+        } else if let target, !evenIfChanged, hasLocalChanges(target) {
+            throw AddOnError.changedLocally
         }
         let plan = try AddOnInstaller.plan(package: package.folders, target: target,
                                            others: rows.filter { $0.id != target?.id }, onDisk: folders,
@@ -228,9 +292,19 @@ public actor AddOnLibrary {
                                               "folders": package.folders.count, "replaced": plan.remove.count])
     }
 
-    /// The latest release for this game, then `install`.
+    /// The latest release for this game, then `install`; first what it
+    /// needs (BigWigs for LittleWigs), when that isn't installed.
     public func install(_ ref: AddOnRef, name: String, progress: @escaping @Sendable (Double) -> Void = { _ in }) async throws {
         guard FileManager.default.fileExists(atPath: gameFolder.path) else { throw CocoaError(.fileNoSuchFile) }
+        if let entry = matcher.index.entry(for: ref) {
+            let installed = Set(try scan().compactMap(\.ref))
+            // A copy put there by hand (a link, a checkout) counts as there.
+            let folders = Set(((try? FileManager.default.contentsOfDirectory(atPath: addOns.path)) ?? []).map { $0.lowercased() })
+            for required in entry.requires where !installed.contains(required) {
+                if let main = matcher.index.entry(for: required)?.folders.first, folders.contains(main.lowercased()) { continue }
+                try await install(required, name: matcher.index.entry(for: required)?.name ?? required.id)
+            }
+        }
         guard let flavor else { throw AddOnError.unknownGame }
         guard let source = sources[ref.source] else { throw AddOnSourceError.unavailable }
         switch await source.latest([ref], flavor: flavor, interface: interface)[ref] {
@@ -265,27 +339,37 @@ public actor AddOnLibrary {
 
     // MARK: Search
 
-    /// The index's matches first, then WoWInterface's, without duplicates;
-    /// at most 30.
-    public func search(_ text: String) async throws -> [AddOnSearchResult] {
+    /// The index's matches for this game: no network, so they show at once.
+    public func searchIndex(_ text: String) -> [AddOnSearchResult] {
+        guard let flavor else { return [] }
+        return matcher.index.search(text, flavor: flavor).map { AddOnSearchResult(ref: $0.source, name: $0.name, author: $0.author) }
+    }
+
+    /// WoWInterface's matches: only add-ons updated in the last year (most
+    /// of its list is years old), none the index already has (by ID or by
+    /// folder), best match first; at most 30.
+    public func searchWoWInterface(_ text: String) async throws -> [AddOnSearchResult] {
         let words = text.lowercased().split(separator: " ").map(String.init)
-        guard !words.isEmpty else { return [] }
-        var results = matcher.index.search(text).map { AddOnSearchResult(ref: $0.source, name: $0.name, author: $0.author) }
+        guard !words.isEmpty, flavor != nil else { return [] }
         let known = Set(matcher.index.entries.compactMap(\.wowi))
-        if let flavor {
-            let list = try await wowInterfaceEntries()
-            let date = now()
-            let matches = list.filter { entry in
-                !known.contains(entry.UID) && entry.suits(flavor, now: date) &&
-                    words.allSatisfy { "\(entry.UIName) \(entry.UIAuthorName ?? "")".lowercased().contains($0) }
-            }
-            .sorted { a, b in
-                let (ra, rb) = (AddOnIndex.rank(a.UIName, words), AddOnIndex.rank(b.UIName, words))
-                return ra != rb ? ra < rb : a.downloads > b.downloads
-            }
-            results += matches.prefix(30).map { AddOnSearchResult(ref: AddOnRef(.wowInterface, $0.UID), name: $0.UIName, author: $0.UIAuthorName) }
+        let knownFolders = Set(matcher.index.entries.flatMap(\.folders).map { $0.lowercased() })
+        let list = try await wowInterfaceEntries()
+        let date = now()
+        let matches = list.filter { entry in
+            guard !known.contains(entry.UID), entry.isRecent(now: date), entry.fits(flavor!),
+                  !(entry.UIDir ?? []).contains(where: { knownFolders.contains($0.lowercased()) }) else { return false }
+            return words.allSatisfy { "\(entry.name) \(entry.author ?? "")".lowercased().contains($0) }
         }
-        return Array(results.prefix(30))
+        .sorted { a, b in
+            let (ra, rb) = (AddOnIndex.rank(a.name, words), AddOnIndex.rank(b.name, words))
+            return ra != rb ? ra < rb : a.downloads > b.downloads
+        }
+        return matches.prefix(30).map { AddOnSearchResult(ref: AddOnRef(.wowInterface, $0.UID), name: $0.name, author: $0.author) }
+    }
+
+    /// Both, the index first.
+    public func search(_ text: String) async throws -> [AddOnSearchResult] {
+        searchIndex(text) + (try await searchWoWInterface(text))
     }
 
     /// WoWInterface's whole list, from a day-old cache or the network. Kept

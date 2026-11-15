@@ -31,6 +31,12 @@ public final class AddOnsModel {
         public var isChecking = false
         public var lastChecked: Date?
         public var scanFailure: String?
+        /// The folder has been read at least once.
+        public var hasScanned = false
+        /// The person said so once: every recognized add-on updates on its own.
+        public var keepsCurrent = false
+        /// An update happened while the game was open: it needs a restart.
+        public var changedWhileRunning = false
 
         public func update(for addOn: InstalledAddOn) -> AddOnRelease? {
             if case .available(let release) = updates[addOn.id] { return release }
@@ -53,10 +59,9 @@ public final class AddOnsModel {
     /// Games whose automatic updates were due while they ran: they run when
     /// the game quits. Kept apart from `states`, which a closed sheet drops.
     @ObservationIgnored private var waitingForQuit: Set<String> = []
-    /// "game|add-on" → the release an automatic update of it failed for in
-    /// a way that would fail again: not tried on its own until there's
-    /// another release.
-    @ObservationIgnored private var failedAutomatically: [String: String] = [:]
+    /// What automatic updates couldn't do, by game and add-on: shown when
+    /// the sheet opens, though the pass ran while it was closed.
+    @ObservationIgnored private var automaticFailures: [String: [String: String]] = [:]
     /// Games being started (signing in, launching): automatic swaps hold off.
     @ObservationIgnored public let launching = LaunchingGames()
     /// The sheet sets this while it's open, so what it shows stays.
@@ -111,12 +116,17 @@ public final class AddOnsModel {
         states[game.id, default: State()].isScanning = true
         do {
             states[game.id, default: State()].addOns = try await library.scan()
+            states[game.id, default: State()].keepsCurrent = await library.keepsCurrent()
             states[game.id, default: State()].scanFailure = nil
+            for (id, message) in automaticFailures[game.id] ?? [:] where states[game.id]?.failures[id] == nil {
+                states[game.id, default: State()].failures[id] = message
+            }
         } catch {
             Log.warning(.addOns, "scan_failed", nil, ["uid": game.id, "error": error])
             states[game.id, default: State()].scanFailure = errorMessage(error)
         }
         states[game.id, default: State()].isScanning = false
+        states[game.id, default: State()].hasScanned = true
         let state = state(for: game)
         guard force || state.lastChecked.map({ Date().timeIntervalSince($0) > 300 }) ?? true, !state.isChecking else { return }
         await check(game, library: library)
@@ -143,7 +153,23 @@ public final class AddOnsModel {
     public func update(_ game: Game, _ addOn: InstalledAddOn, evenIfChanged: Bool = false) {
         guard let release = state(for: game).update(for: addOn) else { return }
         track(game) { [weak self] in
+            await self?.consent(game)
             await self?.install(game, release: release, name: addOn.name, replacing: addOn, evenIfChanged: evenIfChanged)
+            await self?.noteBaselines(game)
+        }
+    }
+
+    /// The person's Update or Install is the say-so for this game: from now
+    /// on its recognized add-ons update on their own. Quick: how each one
+    /// looks (to tell later edits by hand) is noted after the change, by
+    /// `noteBaselines`.
+    private func consent(_ game: Game) async {
+        guard let library = library(for: game), !state(for: game).keepsCurrent else { return }
+        do {
+            try await library.setKeepsCurrent()
+            states[game.id]?.keepsCurrent = true
+        } catch {
+            Log.warning(.addOns, "keeps_current_failed", nil, ["uid": game.id, "error": error])
         }
     }
 
@@ -152,10 +178,12 @@ public final class AddOnsModel {
     public func updateAll(_ game: Game) {
         let due = state(for: game).available
         track(game) { [weak self] in
+            await self?.consent(game)
             for addOn in due {
                 guard let self, !self.isQuitting, let release = self.state(for: game).update(for: addOn) else { continue }
                 await self.install(game, release: release, name: addOn.name, replacing: addOn)
             }
+            await self?.noteBaselines(game)
         }
     }
 
@@ -165,13 +193,16 @@ public final class AddOnsModel {
         states[game.id, default: State()].activity[result.id] = .downloading(0)
         track(game) { [weak self] in
             guard let self else { return }
+            await self.consent(game)
             do {
                 try await library.install(result.ref, name: result.name, progress: self.progress(game, result.id))
+                self.noteChange(game)
             } catch {
                 self.fail(game, result.id, error)
             }
             self.states[game.id, default: State()].activity[result.id] = nil
             await self.rescan(game)
+            await self.noteBaselines(game)
         }
     }
 
@@ -195,6 +226,16 @@ public final class AddOnsModel {
         return try await library.search(text)
     }
 
+    public func searchIndex(_ game: Game, _ text: String) async -> [AddOnSearchResult] {
+        guard let library = library(for: game) else { return [] }
+        return await library.searchIndex(text)
+    }
+
+    public func searchWoWInterface(_ game: Game, _ text: String) async throws -> [AddOnSearchResult] {
+        guard let library = library(for: game) else { return [] }
+        return try await library.searchWoWInterface(text)
+    }
+
     /// `holds`: for automatic updates, true while the game is open or
     /// starting; the library asks it again right before the swap.
     @discardableResult
@@ -208,6 +249,8 @@ public final class AddOnsModel {
             try await library.install(release, name: name, replacing: replacing, evenIfChanged: evenIfChanged,
                                       holds: holds, progress: progress(game, replacing.id))
             states[game.id, default: State()].updates[replacing.id] = .current(release)
+            automaticFailures[game.id]?[replacing.id] = nil
+            if holds == nil { noteChange(game) }
             // The record makes it `ref`'s row from now on.
             if let ref = replacing.ref { states[game.id, default: State()].updates[ref.description] = .current(release) }
         } catch AddOnError.gameRunning {
@@ -219,6 +262,24 @@ public final class AddOnsModel {
         states[game.id, default: State()].activity[replacing.id] = nil
         await rescan(game)
         return failure
+    }
+
+    /// A change made by hand while the game runs needs a restart of it.
+    /// The process list is read off the main thread.
+    private func noteChange(_ game: Game) {
+        let running = customHoldCheck?(game) ?? holdCheck(for: game)
+        Task { [weak self] in
+            guard await Task.detached(operation: { running() }).value else { return }
+            // Only while the game's state is kept (its sheet open or work on).
+            self?.states[game.id]?.changedWhileRunning = true
+        }
+    }
+
+    /// After a change by hand: how the other recognized add-ons look now.
+    private func noteBaselines(_ game: Game) async {
+        guard let library = library(for: game), await library.keepsCurrent(),
+              let addOns = try? await library.scan() else { return }
+        try? await library.recordBaselines(for: addOns)
     }
 
     private func rescan(_ game: Game) async {
@@ -268,27 +329,47 @@ public final class AddOnsModel {
     }
 
     private func runAutomatic(_ game: Game) async {
-        guard let library = library(for: game), let addOns = try? await library.scan() else { return }
-        // Only what Waypoint installed or updated; nothing to ask the
-        // sources for someone who never did.
-        let recorded = addOns.filter { $0.record != nil }
-        guard !recorded.isEmpty else { return }
-        states[game.id, default: State()].addOns = addOns
-        let updates = await library.check(recorded)
-        states[game.id, default: State()].updates.merge(updates) { _, new in new }
-        let due = recorded.filter { addOn in
-            state(for: game).activity[addOn.id] == nil &&
-                failedAutomatically["\(game.id)|\(addOn.id)"] != state(for: game).update(for: addOn)?.id &&
-                state(for: game).update(for: addOn) != nil
+        // Only once the person said so for this game; nothing is asked of
+        // the sources before that.
+        guard let library = library(for: game) else { return }
+        guard await library.keepsCurrent() else {
+            Log.info(.addOns, "automatic_off", nil, ["uid": game.id])
+            return
         }
-        guard !due.isEmpty else { return }
+        guard let addOns = try? await library.scan() else { return }
+        let managed = addOns.filter(\.isManaged)
+        guard !managed.isEmpty else { return }
+        states[game.id, default: State()].addOns = addOns
+        states[game.id, default: State()].keepsCurrent = true
+        let updates = await library.check(managed)
+        states[game.id, default: State()].updates.merge(updates) { _, new in new }
+        states[game.id, default: State()].lastChecked = Date()
+        // Failures that no longer apply (fixed elsewhere, or no update now).
+        automaticFailures[game.id] = automaticFailures[game.id]?.filter { id, _ in state(for: game).available.contains { $0.id == id } }
+        try? await library.recordBaselines(for: managed)
+        var due: [InstalledAddOn] = []
+        for addOn in managed {
+            guard let release = state(for: game).update(for: addOn), state(for: game).activity[addOn.id] == nil else { continue }
+            // Recognized by name alone: only once Waypoint has updated it by hand.
+            guard !addOn.isMatchedByName else { continue }
+            guard await library.failedRelease(for: addOn) != release.id else { continue }
+            if await library.hasLocalChanges(addOn) {
+                automaticFailures[game.id, default: [:]][addOn.id] = AddOnError.changedLocally.errorDescription
+                continue
+            }
+            due.append(addOn)
+        }
+        guard !due.isEmpty else {
+            Log.info(.addOns, "automatic_nothing_due", nil, ["uid": game.id, "managed": managed.count])
+            return
+        }
         let holds = customHoldCheck?(game) ?? holdCheck(for: game)
         Log.info(.addOns, "automatic_update", nil, ["uid": game.id, "updates": due.count])
         for addOn in due {
             guard !isQuitting, !Task.isCancelled else { return }
             guard let release = state(for: game).update(for: addOn) else { continue }
             switch await install(game, release: release, name: addOn.name, replacing: addOn, holds: holds) {
-            case nil: failedAutomatically["\(game.id)|\(addOn.id)"] = nil
+            case nil: await library.setFailedRelease(nil, for: addOn)
             case AddOnError.gameRunning?:
                 waitingForQuit.insert(game.id)
                 Log.info(.addOns, "automatic_waits_for_game", nil, ["uid": game.id])
@@ -296,7 +377,8 @@ public final class AddOnsModel {
             case let error?:
                 // A dropped connection tries again next time; a zip that
                 // can't be installed would only fail again.
-                if Self.repeats(error) { failedAutomatically["\(game.id)|\(addOn.id)"] = release.id }
+                if Self.repeats(error) { await library.setFailedRelease(release.id, for: addOn) }
+                automaticFailures[game.id, default: [:]][addOn.id] = errorMessage(error)
             }
         }
     }

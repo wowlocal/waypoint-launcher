@@ -97,15 +97,53 @@ public struct WoWInterfaceAddOnSource: AddOnSource {
 
         public var date: Date? { UIDate.map { Date(timeIntervalSince1970: $0 / 1000) } }
         public var downloads: Int { UIDownloadTotal.flatMap { Int($0) } ?? 0 }
+        /// Names come HTML-escaped, sometimes twice (`&amp;#54392;`).
+        public var name: String { Self.unescaped(UIName) }
+        public var author: String? { UIAuthorName.map(Self.unescaped) }
 
-        /// Whether it's worth showing for `flavor`: it lists a version of
-        /// that game, or was updated in the last year (the list is often
-        /// behind). Its zip's TOCs decide in the end.
-        func suits(_ flavor: WoWFlavor, now: Date) -> Bool {
-            if let date, now.timeIntervalSince(date) < 365 * 86400 { return true }
-            return (UICompatibility ?? []).contains {
-                WoWFlavor.interface(version: $0.version).flatMap(WoWFlavor.init(interface:)) == flavor
+        /// Updated in the last year: older entries are mostly abandoned
+        /// copies, and their zips' TOCs decide the game anyway.
+        func isRecent(now: Date) -> Bool {
+            guard let date else { return false }
+            return now.timeIntervalSince(date) < 365 * 86400
+        }
+
+        /// Whether it's for this kind of game: an entry that lists versions
+        /// only of the other kind (retail 6 and up, the classic games 1 to 5)
+        /// would download and then fail. Forever isn't listed there at all.
+        func fits(_ flavor: WoWFlavor) -> Bool {
+            let majors = (UICompatibility ?? []).compactMap { Int($0.version.split(separator: ".").first ?? "") }
+            guard !majors.isEmpty, flavor != .forever else { return true }
+            return flavor == .mainline ? majors.contains { $0 >= 6 } : majors.contains { $0 <= 5 }
+        }
+
+        static func unescaped(_ text: String) -> String {
+            var result = text
+            for _ in 0..<2 where result.contains("&") {
+                var out = ""
+                var rest = Substring(result)
+                while let amp = rest.firstIndex(of: "&") {
+                    out += rest[..<amp]
+                    let tail = rest[amp...]
+                    guard let semi = tail.firstIndex(of: ";"), tail.distance(from: amp, to: semi) <= 10 else {
+                        out += "&"; rest = rest[rest.index(after: amp)...]; continue
+                    }
+                    let entity = String(tail[tail.index(after: amp)..<semi])
+                    let named = ["amp": "&", "lt": "<", "gt": ">", "quot": "\"", "apos": "'", "#39": "'"]
+                    if let value = named[entity] {
+                        out += value
+                    } else if entity.hasPrefix("#x"), let code = UInt32(entity.dropFirst(2), radix: 16), let scalar = Unicode.Scalar(code) {
+                        out.unicodeScalars.append(scalar)
+                    } else if entity.hasPrefix("#"), let code = UInt32(entity.dropFirst()), let scalar = Unicode.Scalar(code) {
+                        out.unicodeScalars.append(scalar)
+                    } else {
+                        out += "&\(entity);"
+                    }
+                    rest = rest[rest.index(after: semi)...]
+                }
+                result = out + rest
             }
+            return result
         }
     }
 

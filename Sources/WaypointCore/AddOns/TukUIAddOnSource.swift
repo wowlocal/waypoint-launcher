@@ -33,14 +33,14 @@ public struct TukUIAddOnSource: AddOnSource {
         var results: [AddOnRef: Result<AddOnRelease, AddOnSourceError>] = [:]
         for ref in refs {
             guard let entry = entries.first(where: { $0.slug == ref.id }) else { results[ref] = .failure(.noRelease); continue }
-            results[ref] = Self.release(entry, ref: ref, flavor: flavor)
+            results[ref] = Self.release(entry, ref: ref, flavor: flavor, interface: interface)
         }
         return results
     }
 
-    static func release(_ entry: Entry, ref: AddOnRef, flavor: WoWFlavor) -> Result<AddOnRelease, AddOnSourceError> {
-        let flavors = (entry.patch ?? []).compactMap { WoWFlavor.interface(version: $0).flatMap(WoWFlavor.init(interface:)) }
-        guard flavors.contains(flavor) else { return .failure(.notForThisVersion) }
+    static func release(_ entry: Entry, ref: AddOnRef, flavor: WoWFlavor, interface: Int? = nil) -> Result<AddOnRelease, AddOnSourceError> {
+        let current = (entry.patch ?? []).compactMap { WoWFlavor.interface(version: $0) }.contains { flavor.isCurrent($0, game: interface) }
+        guard current else { return .failure(.notForThisVersion) }
         guard let download = URL(string: entry.url), download.scheme == "https", download.host == "api.tukui.org" else {
             return .failure(.unavailable)
         }

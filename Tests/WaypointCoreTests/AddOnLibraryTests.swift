@@ -373,6 +373,15 @@ private final class Counter: @unchecked Sendable {
     #expect(wow.store.load(for: wow.root.appendingPathComponent("_classic_/Interface/AddOns")).isEmpty)
     try Data("{".utf8).write(to: wow.store.file(for: wow.addOns))
     #expect(wow.store.load(for: wow.addOns).isEmpty)
+
+    // A record from another version of Waypoint doesn't cost the rest.
+    try wow.store.save([record], for: wow.addOns)
+    try wow.store.setKeepsCurrent(true, for: wow.addOns)
+    var file = try JSONSerialization.jsonObject(with: Data(contentsOf: wow.store.file(for: wow.addOns))) as! [String: Any]
+    file["records"] = (file["records"] as! [Any]) + [["ref": ["source": "github", "id": "x/y"], "contentHash": "old"]]
+    try JSONSerialization.data(withJSONObject: file).write(to: wow.store.file(for: wow.addOns))
+    #expect(wow.store.load(for: wow.addOns) == [record])
+    #expect(wow.store.keepsCurrent(for: wow.addOns))
 }
 
 @Test func searchFindsTheIndexThenWoWInterfaceAndCachesTheList() async throws {
@@ -389,9 +398,35 @@ private final class Counter: @unchecked Sendable {
                            index: indexForTests, cache: wow.root.appendingPathComponent("Cache"),
                            staging: wow.stagingFunction, trash: wow.trashFunction, now: { now })
     let results = try await lib.search("omni")
-    #expect(results.map(\.name) == ["OmniCC", "OmniBar", "Old Omni Thing"])
+    // "Old Omni Thing" is from 2001: years-old copies aren't offered.
+    #expect(results.map(\.name) == ["OmniCC", "OmniBar"])
     _ = try await lib.search("bar")
     #expect(http.requests.filter { $0.contains("filelist") }.count == 1)
+}
+
+@Test func searchNeverOffersAStaleDuplicateOrWrongGameCopy() async throws {
+    let wow = try FakeWoW()
+    defer { wow.remove() }
+    let http = FakeHTTP()
+    let now = Date(timeIntervalSince1970: 1_795_000_000)
+    http.route(WoWInterfaceAddOnSource.listURL.absoluteString, Data(#"""
+    [{"UID":"8814","UIName":"Deadly Boss Mods","UIDate":1794000000000,"UIDir":["DBM-Core","DBM-GUI"]},
+     {"UID":"9","UIName":"DBM Copy","UIDate":1794000000000,"UIDir":["DBM-Core"]},
+     {"UID":"7","UIName":"Deadly &amp;amp; Fun &amp;#54392;","UIAuthorName":"A &amp;amp; B","UIDate":1794000000000,"UIDir":["Fun"]},
+     {"UID":"23056","UIName":"Details! Damage Meter","UIDate":1578325974000,"UIDir":["Details"]}]
+    """#.utf8))
+    let index = AddOnIndex(entries: indexForTests.entries + [
+        AddOnIndex.Entry(name: "Questie", author: "Aero", folders: ["Questie"], source: AddOnRef(.github, "Questie/Questie"), flavors: [.vanilla]),
+    ])
+    let lib = AddOnLibrary(addOns: wow.addOns, flavor: .mainline, interface: 120105, store: wow.store, http: http.http, index: index,
+                           cache: wow.root.appendingPathComponent("Cache"), staging: wow.stagingFunction, trash: wow.trashFunction,
+                           now: { now })
+    let deadly = try await lib.search("deadly")
+    #expect(deadly.map(\.name) == ["Deadly Boss Mods", "Deadly & Fun \u{D478}"], "the index's DBM once; names unescaped")
+    #expect(deadly.last?.author == "A & B")
+    #expect(try await lib.search("details").isEmpty, "a 2020 copy isn't offered")
+    #expect(await lib.searchIndex("questie").isEmpty, "no release for this game")
+    #expect(await lib.searchIndex("deadly").map(\.name) == ["Deadly Boss Mods"], "the index needs no network")
 }
 
 @Test func recordsOutliveAnAddOnsFolderThatIsAwayForAWhile() async throws {
@@ -544,25 +579,33 @@ private final class Flag: @unchecked Sendable {
 }
 
 @MainActor
-@Test func automaticUpdatesTouchOnlyWhatWaypointInstalledAndWaitForTheGame() async throws {
+@Test func afterOneSaySoEveryRecognizedAddOnIsKeptCurrentButNeverWhileTheGameRuns() async throws {
     let wow = try FakeWoW()
     defer { wow.remove() }
     let http = FakeHTTP()
     http.github("tullamods/OmniCC", tag: "1", zip: omniZip(version: "1"), filename: "OmniCC-1.zip", metadata: [("mainline", 120105)])
     try await library(wow, http).install(AddOnRef(.github, "tullamods/OmniCC"), name: "OmniCC")
-    // DBM came from somewhere else; Waypoint recognizes it but never asked.
+    // DBM came from somewhere else; Waypoint recognizes it.
     try wow.addOn("DBM-Core", ["DBM-Core.toc": "## Interface: 120105\n## Version: 1\n## X-Curse-Project-ID: 3358\n"])
     try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_700_000_000)],
                                           ofItemAtPath: wow.addOns.appendingPathComponent("DBM-Core/DBM-Core.toc").path)
-    http.github("DeadlyBossMods/DeadlyBossMods", tag: "2", zip: TestZip.make(TestZip.addOn("DBM-Core")), filename: "DBM-2.zip",
-                metadata: [("mainline", 120105)], version: "2")
+    http.github("DeadlyBossMods/DeadlyBossMods", tag: "2", zip: TestZip.make(TestZip.addOn("DBM-Core", lua: "-- 2")),
+                filename: "DBM-2.zip", metadata: [("mainline", 120105)], version: "2")
     http.github("tullamods/OmniCC", tag: "2", zip: omniZip(version: "2"), filename: "OmniCC-2.zip",
                 metadata: [("mainline", 120105)], released: Date(timeIntervalSince1970: 1_790_100_000))
-    let running = Flag(true)
+    let running = Flag(false)
     let model = AddOnsModel(makeLibrary: { _ in library(wow, http) }, holdCheck: { _ in { running.isSet } })
     let game = wowGame(wow)
-    let before = try TreeSnapshot(wow.addOns)
+    let before = try TreeSnapshot(wow.addOns), asked = http.requests.count
 
+    // No say-so yet: nothing is asked, nothing moves.
+    model.updateAutomatically(game)
+    try await waitUntilIdle(model)
+    #expect(try TreeSnapshot(wow.addOns) == before)
+    #expect(http.requests.count == asked)
+
+    try wow.store.setKeepsCurrent(true, for: wow.addOns)
+    running.set(true)
     model.updateAutomatically(game)
     try await waitUntilIdle(model)
     #expect(try TreeSnapshot(wow.addOns) == before, "the game is open: nothing moves")
@@ -571,8 +614,29 @@ private final class Flag: @unchecked Sendable {
     model.gameQuit(game)
     try await waitUntilIdle(model)
     #expect(try String(contentsOf: wow.addOns.appendingPathComponent("OmniCC/Core.lua"), encoding: .utf8) == "-- 2")
-    #expect(try String(contentsOf: wow.addOns.appendingPathComponent("DBM-Core/DBM-Core.toc"), encoding: .utf8).contains("## Version: 1"))
-    #expect(!http.requests.contains { $0.contains("DBM-2.zip") })
+    #expect(try String(contentsOf: wow.addOns.appendingPathComponent("DBM-Core/Core.lua"), encoding: .utf8) == "-- 2",
+            "recognized but never installed by Waypoint: kept current too")
+}
+
+@MainActor
+@Test func theFirstUpdateInTheSheetIsTheSaySo() async throws {
+    let wow = try FakeWoW()
+    defer { wow.remove() }
+    try wow.addOn("OmniCC", ["OmniCC.toc": "## Interface: 120105\n## Version: 1\n"])
+    try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_700_000_000)],
+                                          ofItemAtPath: wow.addOns.appendingPathComponent("OmniCC/OmniCC.toc").path)
+    let http = FakeHTTP()
+    http.github("tullamods/OmniCC", tag: "2", zip: omniZip(version: "2"), filename: "OmniCC-2.zip", metadata: [("mainline", 120105)])
+    let model = AddOnsModel(makeLibrary: { _ in library(wow, http) }, holdCheck: { _ in { false } })
+    let game = wowGame(wow)
+    model.shown.insert(game.id)   // the sheet is open
+    await model.refresh(game)
+    #expect(!model.state(for: game).keepsCurrent)
+    let omni = try #require(model.state(for: game).addOns.first { $0.name == "OmniCC" })
+    model.update(game, omni)
+    try await waitUntilIdle(model)
+    #expect(wow.store.keepsCurrent(for: wow.addOns))
+    #expect(model.state(for: game).keepsCurrent)
 }
 
 @MainActor
@@ -597,6 +661,7 @@ private final class Flag: @unchecked Sendable {
     // Release 2's zip has a loose file: refused, every time.
     http.github("tullamods/OmniCC", tag: "2", zip: omniZip(version: "2", extra: [.file("README.txt", Data("x".utf8))]),
                 filename: "OmniCC-2.zip", metadata: [("mainline", 120105)], released: Date(timeIntervalSince1970: 1_790_100_000))
+    try wow.store.setKeepsCurrent(true, for: wow.addOns)
     let model = AddOnsModel(makeLibrary: { _ in library(wow, http) }, holdCheck: { _ in { false } })
     let game = wowGame(wow)
     for _ in 0..<3 {
@@ -635,4 +700,125 @@ private final class Versions: @unchecked Sendable {
     private var list: [String?] = []
     func add(_ version: String?) { lock.withLock { list.append(version) } }
     var all: [String?] { lock.withLock { list } }
+}
+
+// MARK: Round 2
+
+@Test func onlyReleasesForTheGamesCurrentPatchLineCount() {
+    #expect(WoWFlavor.mainline.isCurrent(120107, game: 120105))
+    #expect(!WoWFlavor.mainline.isCurrent(110207, game: 120105), "last expansion's build")
+    #expect(WoWFlavor.vanilla.isCurrent(11508, game: 11509))
+    #expect(!WoWFlavor.vanilla.isCurrent(11404, game: 11509))
+    #expect(WoWFlavor.mainline.isCurrent(110207, game: nil), "without the game's number, any")
+    let manifest = ReleaseManifest(releases: [
+        .init(name: "Old", version: "11", filename: "old.zip", nolib: false, metadata: [meta("mainline", 110207)]),
+    ])
+    #expect(manifest.choose(flavor: .mainline, interface: 120105) == nil)
+    #expect(manifest.choose(flavor: .mainline, interface: nil)?.filename == "old.zip")
+}
+
+private func meta(_ flavor: String, _ interface: Int) -> ReleaseManifest.Metadata {
+    try! JSONDecoder().decode(ReleaseManifest.Metadata.self, from: Data(#"{"flavor":"\#(flavor)","interface":\#(interface)}"#.utf8))
+}
+
+@Test func aLowerVersionIsNeverAnUpdateHoweverLateItCame() {
+    let installed = InstalledAddOn(id: "x", name: "X", folders: ["X"], version: "v2.1.0", ref: AddOnRef(.wowInterface, "1"),
+                                   modified: Date(timeIntervalSince1970: 1_700_000_000))
+    let late = AddOnRelease(ref: AddOnRef(.wowInterface, "1"), id: "2.0.9|1", version: "2.0.9", date: Date(timeIntervalSince1970: 1_790_000_000),
+                            download: URL(string: "https://cdn.wowinterface.com/x")!)
+    #expect(!AddOnLibrary.decide(installed, latest: late))
+    var newer = late
+    newer.version = "2.10"
+    #expect(AddOnLibrary.decide(installed, latest: newer))
+    #expect(AddOnLibrary.compare("v12.1.23", "12.1.9") == .orderedDescending)
+    #expect(AddOnLibrary.compare("r274-release", "1") == nil)
+}
+
+@Test func wowInterfaceEntriesForTheOtherKindOfGameArentOffered() throws {
+    func entry(_ versions: [String]) throws -> WoWInterfaceAddOnSource.ListEntry {
+        let compat = versions.map { #"{"version":"\#($0)"}"# }.joined(separator: ",")
+        return try JSONDecoder().decode(WoWInterfaceAddOnSource.ListEntry.self,
+                                        from: Data(#"{"UID":"1","UIName":"X","UICompatibility":[\#(compat)]}"#.utf8))
+    }
+    #expect(try !entry(["1.15.7"]).fits(.mainline))
+    #expect(try !entry(["12.1.0"]).fits(.vanilla))
+    #expect(try entry(["12.1.0", "1.15.7"]).fits(.mists))
+    #expect(try entry([]).fits(.mainline))
+}
+
+@MainActor
+@Test func handEditsAndNameOnlyMatchesAreLeftAloneAutomatically() async throws {
+    let wow = try FakeWoW()
+    defer { wow.remove() }
+    // OmniCC is recognized by its folder name alone; DBM by its ID.
+    try wow.addOn("OmniCC", ["OmniCC.toc": "## Interface: 120105\n## Version: 1\n"])
+    try wow.addOn("DBM-Core", ["DBM-Core.toc": "## Interface: 120105\n## Version: 1\n## X-Curse-Project-ID: 3358\n", "Core.lua": "-- 1"])
+    for path in ["OmniCC/OmniCC.toc", "DBM-Core/DBM-Core.toc"] {
+        try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_700_000_000)],
+                                              ofItemAtPath: wow.addOns.appendingPathComponent(path).path)
+    }
+    let http = FakeHTTP()
+    http.github("tullamods/OmniCC", tag: "2", zip: omniZip(version: "2"), filename: "OmniCC-2.zip", metadata: [("mainline", 120105)])
+    http.github("DeadlyBossMods/DeadlyBossMods", tag: "2", zip: TestZip.make(TestZip.addOn("DBM-Core", lua: "-- 2")),
+                filename: "DBM-2.zip", metadata: [("mainline", 120105)], version: "2")
+    let model = AddOnsModel(makeLibrary: { _ in library(wow, http) }, holdCheck: { _ in { false } })
+    let game = wowGame(wow)
+    // The say-so notes how DBM looks; then someone edits it by hand.
+    try wow.store.setKeepsCurrent(true, for: wow.addOns)
+    let lib = library(wow, http)
+    try await lib.recordBaselines(for: try await lib.scan())
+    try Data("-- my edit".utf8).write(to: wow.addOns.appendingPathComponent("DBM-Core/Core.lua"))
+    model.updateAutomatically(game)
+    try await waitUntilIdle(model)
+    #expect(try String(contentsOf: wow.addOns.appendingPathComponent("DBM-Core/Core.lua"), encoding: .utf8) == "-- my edit")
+    #expect(!FileManager.default.fileExists(atPath: wow.addOns.appendingPathComponent("OmniCC/Core.lua").path),
+            "matched by name only: not replaced on its own")
+}
+
+@Test func aFailedReleaseIsRememberedAcrossLaunches() throws {
+    let wow = try FakeWoW()
+    defer { wow.remove() }
+    try wow.store.setFailedRelease("v2", for: "github:a/b", in: wow.addOns)
+    #expect(AddOnStore(directory: wow.store.directory).failedReleases(for: wow.addOns) == ["github:a/b": "v2"])
+    try wow.store.setFailedRelease(nil, for: "github:a/b", in: wow.addOns)
+    #expect(wow.store.failedReleases(for: wow.addOns).isEmpty)
+    #expect(!FileManager.default.fileExists(atPath: wow.store.file(for: wow.addOns).path), "an empty file is removed")
+}
+
+@Test func installingAnAddOnBringsWhatItNeeds() async throws {
+    let wow = try FakeWoW()
+    defer { wow.remove() }
+    let http = FakeHTTP()
+    http.github("BigWigsMods/BigWigs", tag: "1", zip: TestZip.make(TestZip.addOn("BigWigs")), filename: "BigWigs-1.zip", metadata: [("mainline", 120105)])
+    http.github("BigWigsMods/LittleWigs", tag: "1", zip: TestZip.make(TestZip.addOn("LittleWigs")), filename: "LittleWigs-1.zip", metadata: [("mainline", 120105)])
+    let index = AddOnIndex(entries: [
+        AddOnIndex.Entry(name: "BigWigs", author: "Funkeh", folders: ["BigWigs"], source: AddOnRef(.github, "BigWigsMods/BigWigs")),
+        AddOnIndex.Entry(name: "LittleWigs", author: "Funkeh", folders: ["LittleWigs"], source: AddOnRef(.github, "BigWigsMods/LittleWigs"),
+                         requires: [AddOnRef(.github, "BigWigsMods/BigWigs")]),
+    ])
+    let lib = AddOnLibrary(addOns: wow.addOns, flavor: .mainline, interface: 120105, store: wow.store, http: http.http, index: index,
+                           cache: wow.root.appendingPathComponent("Cache"), staging: wow.stagingFunction, trash: wow.trashFunction)
+    try await lib.install(AddOnRef(.github, "BigWigsMods/LittleWigs"), name: "LittleWigs")
+    #expect(try FileManager.default.contentsOfDirectory(atPath: wow.addOns.path).sorted() == ["BigWigs", "LittleWigs"])
+}
+
+@Test func anUpdateByHandAsksBeforeReplacingAnEditedCopy() async throws {
+    let wow = try FakeWoW()
+    defer { wow.remove() }
+    try wow.addOn("DBM-Core", ["DBM-Core.toc": "## Interface: 120105\n## Version: 1\n## X-Curse-Project-ID: 3358\n", "Core.lua": "-- 1"])
+    try FileManager.default.setAttributes([.modificationDate: Date(timeIntervalSince1970: 1_700_000_000)],
+                                          ofItemAtPath: wow.addOns.appendingPathComponent("DBM-Core/DBM-Core.toc").path)
+    let http = FakeHTTP()
+    http.github("DeadlyBossMods/DeadlyBossMods", tag: "2", zip: TestZip.make(TestZip.addOn("DBM-Core", lua: "-- 2")),
+                filename: "DBM-2.zip", metadata: [("mainline", 120105)], version: "2")
+    let lib = library(wow, http)
+    try await lib.recordBaselines(for: try await lib.scan())
+    try Data("-- mine".utf8).write(to: wow.addOns.appendingPathComponent("DBM-Core/Core.lua"))
+    let rows = try await lib.scan()
+    let dbm = try #require(rows.first { $0.name == "Deadly Boss Mods" })
+    guard case .available(let release) = await lib.check(rows)[dbm.id] else { Issue.record("no update"); return }
+    await #expect(throws: AddOnError.changedLocally) { try await lib.install(release, name: dbm.name, replacing: dbm) }
+    try await lib.install(release, name: dbm.name, replacing: dbm, evenIfChanged: true)
+    #expect(try String(contentsOf: wow.addOns.appendingPathComponent("DBM-Core/Core.lua"), encoding: .utf8) == "-- 2")
+    #expect(wow.trashed() == ["DBM-Core"], "the edited copy is kept in the Trash")
 }

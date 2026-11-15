@@ -1,48 +1,36 @@
 import AppKit
 import WaypointCore
 
-/// One WoW version's add-ons: what needs an update, what's current, what
-/// Waypoint can't update; and search to add more. Opened from the game's
-/// ••• menu. Updates also happen on their own (`AddOnsModel`); this is
-/// where to see them, or do one now.
+/// One WoW version's add-ons: what needs an update, what's kept up to date,
+/// and one quiet row for what Waypoint can't update; search adds more.
+/// Opened from the game's ••• menu. What it says comes from
+/// `AddOnListing`, which says only what's known.
 @MainActor
 final class AddOnsSheet: NSViewController, NSTableViewDataSource, NSTableViewDelegate, NSMenuDelegate, NSSearchFieldDelegate {
     private let game: Game
     private let model: AppModel
     private var addOns: AddOnsModel { model.addOns }
 
-    private enum Item: Equatable {
-        case header(String, help: Bool)
-        case addOn(InstalledAddOn)
-        case result(AddOnSearchResult)
-        case note(String)
-
-        var key: String {
-            switch self {
-            case .header(let title, _): "h:\(title)"
-            case .addOn(let addOn): "a:\(addOn.id)"
-            case .result(let result): "r:\(result.id)"
-            case .note(let text): "n:\(text)"
-            }
-        }
-    }
-
-    private var items: [Item] = []
+    private var items: [AddOnListing.Item] = []
     private var searchText = ""
     private var results: [AddOnSearchResult] = []
     private var searchFailure: String?
     private var isSearching = false
     private var searchTask: Task<Void, Never>?
+    private var othersExpanded = false
+    private var keyMonitor: Any?
 
     private let table = NSTableView()
     private let searchField = NSSearchField()
     private let note = NSTextField(wrappingLabelWithString: "")
     private let updateAllButton = NSButton(title: "Update All", target: nil, action: nil)
 
-    init(game: Game, model: AppModel) {
+    init(game: Game, model: AppModel, search: String = "", othersExpanded: Bool = false) {
         self.game = game
         self.model = model
+        self.othersExpanded = othersExpanded
         super.init(nibName: nil, bundle: nil)
+        searchField.stringValue = search
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
@@ -62,12 +50,12 @@ final class AddOnsSheet: NSViewController, NSTableViewDataSource, NSTableViewDel
         table.addTableColumn(column)
         table.headerView = nil
         table.style = .plain
-        table.rowHeight = 40
         table.intercellSpacing = NSSize(width: 0, height: 0)
         table.selectionHighlightStyle = .none
         table.dataSource = self
         table.delegate = self
         table.floatsGroupRows = false
+        table.usesAutomaticRowHeights = false
         let menu = NSMenu()
         menu.delegate = self
         table.menu = menu
@@ -109,11 +97,22 @@ final class AddOnsSheet: NSViewController, NSTableViewDataSource, NSTableViewDel
         let (game, addOns) = (game, addOns)
         Task { await addOns.refresh(game) }
         view.window?.makeFirstResponder(table)
+        // ⌘F: search.
+        keyMonitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
+            guard let self, event.window === self.view.window,
+                  event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command,
+                  event.charactersIgnoringModifiers == "f" else { return event }
+            self.view.window?.makeFirstResponder(self.searchField)
+            return nil
+        }
+        if !searchField.stringValue.isEmpty { searchChanged() }
     }
 
     override func viewWillDisappear() {
         super.viewWillDisappear()
         searchTask?.cancel()
+        if let keyMonitor { NSEvent.removeMonitor(keyMonitor) }
+        keyMonitor = nil
         addOns.shown.remove(game.id)
         addOns.forget(game)
     }
@@ -124,57 +123,21 @@ final class AddOnsSheet: NSViewController, NSTableViewDataSource, NSTableViewDel
 
     private func render() {
         let state = state
-        let running = model.isRunning(game)
-        var newItems: [Item] = []
-        let lower = searchText.lowercased()
-        let shown = lower.isEmpty ? state.addOns : state.addOns.filter {
-            $0.name.lowercased().contains(lower) || $0.folders.contains { $0.lowercased().contains(lower) }
-        }
-        if !lower.isEmpty {
-            if !shown.isEmpty { newItems.append(.header("Installed", help: false)) }
-            newItems += shown.map(Item.addOn)
-            let installed = Set(state.addOns.compactMap(\.ref))
-            let available = results.filter { !installed.contains($0.ref) }
-            newItems.append(.header("Available", help: false))
-            if let searchFailure { newItems.append(.note(searchFailure)) }
-            else if isSearching && available.isEmpty { newItems.append(.note("Searching…")) }
-            else if available.isEmpty { newItems.append(.note("No add-ons found.")) }
-            newItems += available.map(Item.result)
-        } else if shown.isEmpty {
-            newItems.append(.note(state.isScanning ? "" : "No add-ons yet. Search to add one."))
-        } else {
-            let updates = shown.filter { state.update(for: $0) != nil || state.activity[$0.id] != nil }
-            let current = shown.filter { $0.isManaged && !updates.contains($0) }
-            let others = shown.filter { !$0.isManaged }
-            if !updates.isEmpty { newItems.append(.header("Updates", help: false)); newItems += updates.map(Item.addOn) }
-            if !current.isEmpty { newItems.append(.header("Up to Date", help: false)); newItems += current.map(Item.addOn) }
-            if !others.isEmpty { newItems.append(.header("Not Updated by Waypoint", help: true)); newItems += others.map(Item.addOn) }
-        }
-
+        let flavorKnown = WoWFlavor.of(game.install) != nil
+        let newItems = AddOnListing.items(state, othersExpanded: othersExpanded, search: searchText, results: results,
+                                          isSearching: isSearching, searchFailure: searchFailure, flavorKnown: flavorKnown)
         let sameRows = newItems.map(\.key) == items.map(\.key)
         items = newItems
         if sameRows {
-            for row in 0..<items.count {
-                (table.view(atColumn: 0, row: row, makeIfNecessary: false) as? AddOnRowView)?.show(content(of: items[row]))
-            }
+            for row in 0..<items.count { configure(table.view(atColumn: 0, row: row, makeIfNecessary: false), with: items[row]) }
         } else {
             table.reloadData()
         }
-
-        updateAllButton.isHidden = state.available.count < 2 || !lower.isEmpty
+        updateAllButton.isHidden = state.available.count < 2 || !searchText.isEmpty
         updateAllButton.isEnabled = state.activity.isEmpty
-        if WoWFlavor.of(game.install) == nil {
-            note.stringValue = AddOnError.unknownGame.errorDescription!
-        } else if let failure = state.scanFailure {
-            note.stringValue = failure
-        } else if running {
-            note.stringValue = "\(game.displayName) is open. Type /reload in the game to load updated add-ons."
-        } else if state.isChecking {
-            note.stringValue = "Checking for updates…"
-        } else {
-            note.stringValue = ""
-        }
-        note.isHidden = note.stringValue.isEmpty
+        // The line stays even when empty, so the buttons never move.
+        note.stringValue = AddOnListing.footer(state, gameName: game.displayName, flavorKnown: flavorKnown,
+                                               isRunning: model.isRunning(game), isSearching: !searchText.isEmpty) ?? " "
     }
 
     // MARK: Table
@@ -187,99 +150,59 @@ final class AddOnsSheet: NSViewController, NSTableViewDataSource, NSTableViewDel
     }
 
     func tableView(_ tableView: NSTableView, heightOfRow row: Int) -> CGFloat {
-        if case .header = items[row] { return 28 }
-        return 40
+        switch items[row] {
+        case .header: 28
+        case .note: 32
+        case .others: 36
+        case .row: 40
+        }
     }
 
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool { false }
 
     func tableView(_ tableView: NSTableView, viewFor tableColumn: NSTableColumn?, row: Int) -> NSView? {
-        switch items[row] {
-        case .header(let title, let help):
-            let id = NSUserInterfaceItemIdentifier("header")
-            let view = tableView.makeView(withIdentifier: id, owner: self) as? AddOnHeaderView ?? AddOnHeaderView(identifier: id)
-            view.show(title, help: help ? Self.notUpdatedHelp : nil)
-            return view
-        case .note(let text):
-            let id = NSUserInterfaceItemIdentifier("note")
-            let label = tableView.makeView(withIdentifier: id, owner: self) as? NSTextField ?? {
-                let label = NSTextField.label(.body, color: .secondaryLabelColor)
-                label.identifier = id
-                return label
-            }()
-            label.stringValue = text
-            return label
-        case .addOn, .result:
-            let id = NSUserInterfaceItemIdentifier("row")
-            let view = tableView.makeView(withIdentifier: id, owner: self) as? AddOnRowView ?? AddOnRowView(identifier: id)
-            view.show(content(of: items[row]))
-            return view
-        }
-    }
-
-    static let notUpdatedHelp = "Waypoint updates add-ons published on GitHub, WoWInterface and Tukui. These come from somewhere else, such as CurseForge, which doesn’t let other apps download from it. Keep updating them where you got them."
-
-    // MARK: Rows
-
-    /// What a row shows.
-    struct Row {
-        var name: String
-        var detail: String
-        var isFailure: Bool
-        var tooltip: String?
-        var button: String?
-        var progress: Double?
-        var action: (() -> Void)?
-    }
-
-    private static let changedMessage = AddOnError.changedLocally.errorDescription!
-
-    private func content(of item: Item) -> Row {
-        let state = state
+        let item = items[row]
+        let view: NSView
         switch item {
-        case .addOn(let addOn):
-            var row = Row(name: addOn.name, detail: addOn.version ?? "", isFailure: false, tooltip: tooltip(addOn))
-            switch addOn.unmanaged {
-            case .notForThisVersion: row.detail = "Not for this version of the game"
-            case .link, .developmentCopy: row.detail = "Added by hand"
-            default: break
-            }
-            if let release = state.update(for: addOn) {
-                row.detail = "\(addOn.version ?? "") → \(release.version)"
-                let changed = state.failures[addOn.id] == Self.changedMessage
-                row.button = changed ? "Replace" : "Update"
-                row.action = { [weak self] in self?.update(addOn, evenIfChanged: changed) }
-            }
-            if let failure = state.failures[addOn.id] { row.detail = failure; row.isFailure = true }
-            if case .downloading(let fraction) = state.activity[addOn.id] { row.progress = fraction; row.button = nil }
-            if state.activity[addOn.id] == .removing { row.detail = "Moving to the Trash…"; row.button = nil }
-            return row
-        case .result(let result):
-            var row = Row(name: result.name, detail: result.author.map { "by \($0)" } ?? "", isFailure: false,
-                          tooltip: "From \(result.ref.source.displayName)", button: "Install")
-            row.action = { [weak self] in self?.install(result) }
-            if let failure = state.failures[result.id] { row.detail = failure; row.isFailure = true }
-            if case .downloading(let fraction) = state.activity[result.id] { row.progress = fraction; row.button = nil }
-            return row
-        case .header, .note:
-            return Row(name: "", detail: "", isFailure: false)
+        case .header:
+            view = tableView.makeView(withIdentifier: AddOnHeaderView.id, owner: self) ?? AddOnHeaderView()
+        case .note:
+            view = tableView.makeView(withIdentifier: AddOnNoteView.id, owner: self) ?? AddOnNoteView()
+        case .others:
+            view = tableView.makeView(withIdentifier: AddOnOthersView.id, owner: self) ?? AddOnOthersView()
+        case .row:
+            view = tableView.makeView(withIdentifier: AddOnRowView.id, owner: self) ?? AddOnRowView()
         }
+        configure(view, with: item)
+        return view
     }
 
-    private func tooltip(_ addOn: InstalledAddOn) -> String {
-        let folders = addOn.folders.count > 1 ? "Folders: \(addOn.folders.joined(separator: ", "))" : "Folder: \(addOn.folders[0])"
-        guard let ref = addOn.ref else { return folders }
-        return "From \(ref.source.displayName)\n\(folders)"
+    private func configure(_ view: NSView?, with item: AddOnListing.Item) {
+        switch item {
+        case .header(let title): (view as? AddOnHeaderView)?.show(title)
+        case .note(let text): (view as? AddOnNoteView)?.show(text)
+        case .others(let count, let open):
+            (view as? AddOnOthersView)?.show(count: count, isExpanded: open) { [weak self] in
+                self?.othersExpanded.toggle()
+                self?.render()
+            }
+        case .row(let row):
+            (view as? AddOnRowView)?.show(row) { [weak self] in self?.perform(row) }
+        }
     }
 
     // MARK: Actions
 
-    private func update(_ addOn: InstalledAddOn, evenIfChanged: Bool) {
-        addOns.update(game, addOn, evenIfChanged: evenIfChanged)
-    }
-
-    private func install(_ result: AddOnSearchResult) {
-        addOns.install(game, result)
+    private func perform(_ row: AddOnListing.Row) {
+        switch row.action {
+        case .update(let evenIfChanged)?:
+            guard let addOn = state.addOns.first(where: { $0.id == row.id }) else { return }
+            addOns.update(game, addOn, evenIfChanged: evenIfChanged)
+        case .install?:
+            guard let result = results.first(where: { $0.id == row.id }) else { return }
+            addOns.install(game, result)
+        case nil: break
+        }
     }
 
     @objc private func updateAll() {
@@ -303,35 +226,69 @@ final class AddOnsSheet: NSViewController, NSTableViewDataSource, NSTableViewDel
         dismiss(nil)
     }
 
+    /// The sheet drawn into a PNG (for screenshots without the screen).
+    func snapshot(to file: URL) {
+        view.layoutSubtreeIfNeeded()
+        guard let rep = view.bitmapImageRepForCachingDisplay(in: view.bounds) else { return }
+        // The sheet's own background isn't part of its view: paint it first.
+        NSGraphicsContext.saveGraphicsState()
+        NSGraphicsContext.current = NSGraphicsContext(bitmapImageRep: rep)
+        view.effectiveAppearance.performAsCurrentDrawingAppearance {
+            NSColor.windowBackgroundColor.setFill()
+            view.bounds.fill()
+        }
+        NSGraphicsContext.restoreGraphicsState()
+        view.cacheDisplay(in: view.bounds, to: rep)
+        try? rep.representation(using: .png, properties: [:])?.write(to: file)
+    }
+
     // MARK: Search
 
     func controlTextDidChange(_ obj: Notification) {
         searchChanged()
     }
 
+    /// Return in the search field searches; it doesn't close the sheet.
+    func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
+        guard control === searchField, selector == #selector(NSResponder.insertNewline(_:)) else { return false }
+        searchChanged()
+        return true
+    }
+
     func searchFieldDidEndSearching(_ sender: NSSearchField) {
         searchChanged()
     }
 
+    /// The index's matches at once; WoWInterface's after a pause in typing.
+    /// What's shown stays until something newer replaces it: no blinking.
     private func searchChanged() {
+        let text = searchField.stringValue.trimmingCharacters(in: .whitespaces)
+        guard text != searchText || searchTask == nil else { return }
         searchTask?.cancel()
-        searchText = searchField.stringValue.trimmingCharacters(in: .whitespaces)
-        results = []
+        searchText = text
         searchFailure = nil
-        isSearching = !searchText.isEmpty
+        isSearching = !text.isEmpty
+        if text.isEmpty { results = [] }
         render()
-        guard !searchText.isEmpty else { return }
-        let (game, addOns, text) = (game, addOns, searchText)
+        guard !text.isEmpty else { return }
+        let (game, addOns) = (game, addOns)
         searchTask = Task { [weak self] in
+            let index = await addOns.searchIndex(game, text)
+            guard !Task.isCancelled, let self else { return }
+            self.results = index + self.results.filter { $0.ref.source == .wowInterface && $0.name.lowercased().contains(text.lowercased()) }
+            self.render()
             try? await Task.sleep(for: .milliseconds(250))
             guard !Task.isCancelled else { return }
-            let found: [AddOnSearchResult]
+            var more: [AddOnSearchResult] = []
             var failure: String?
-            do { found = try await addOns.search(game, text) } catch { found = []; failure = errorMessage(error) }
-            guard !Task.isCancelled, let self else { return }
-            self.results = found
+            do { more = try await addOns.searchWoWInterface(game, text) } catch {
+                failure = index.isEmpty ? errorMessage(error) : nil
+            }
+            guard !Task.isCancelled else { return }
+            self.results = index + more
             self.searchFailure = failure
             self.isSearching = false
+            self.searchTask = nil
             self.render()
         }
     }
@@ -340,13 +297,14 @@ final class AddOnsSheet: NSViewController, NSTableViewDataSource, NSTableViewDel
 
     func menuNeedsUpdate(_ menu: NSMenu) {
         menu.removeAllItems()
-        let row = table.clickedRow
-        guard row >= 0, row < items.count, case .addOn(let addOn) = items[row] else { return }
-        let state = state
+        let index = table.clickedRow
+        guard index >= 0, index < items.count, case .row(let row) = items[index],
+              let addOn = state.addOns.first(where: { $0.id == row.id }) else { return }
         let idle = state.activity[addOn.id] == nil
-        if state.update(for: addOn) != nil {
-            menu.addItem(ActionItem("Update", enabled: idle) { [weak self] in
-                self?.update(addOn, evenIfChanged: state.failures[addOn.id] == Self.changedMessage)
+        if let action = row.action, let title = row.actionTitle {
+            menu.addItem(ActionItem(title, enabled: idle) { [weak self] in
+                guard case .update = action else { return }
+                self?.perform(row)
             })
         }
         if addOn.isManaged {
@@ -365,46 +323,109 @@ final class AddOnsSheet: NSViewController, NSTableViewDataSource, NSTableViewDel
     }
 }
 
-private extension Array where Element == InstalledAddOn {
-    func contains(_ addOn: InstalledAddOn) -> Bool { contains { $0.id == addOn.id } }
-}
-
-/// A section title, with a help button for "Not Updated by Waypoint".
+/// A section title.
 private final class AddOnHeaderView: NSTableCellView {
+    static let id = NSUserInterfaceItemIdentifier("header")
     private let title = NSTextField.label(.headline, color: .secondaryLabelColor)
-    private let help = NSButton(title: "", target: nil, action: nil)
-    private var helpText: String?
 
-    init(identifier: NSUserInterfaceItemIdentifier) {
+    init() {
         super.init(frame: .zero)
-        self.identifier = identifier
-        help.bezelStyle = .helpButton
-        help.controlSize = .small
-        help.target = self
-        help.action = #selector(showHelp)
-        help.setAccessibilityLabel("Why these aren’t updated")
-        let stack = NSStackView(views: [title, help])
-        stack.spacing = 6
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
+        identifier = Self.id
+        title.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(title)
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
-            stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -4),
-            stack.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4),
+            title.leadingAnchor.constraint(equalTo: leadingAnchor),
+            title.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -4),
+            title.bottomAnchor.constraint(equalTo: bottomAnchor, constant: -4),
         ])
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
-    func show(_ text: String, help helpText: String?) {
+    func show(_ text: String) {
         title.stringValue = text
-        self.helpText = helpText
-        help.isHidden = helpText == nil
+        setAccessibilityRole(.staticText)
+        setAccessibilityLabel(text)
+    }
+}
+
+/// A line of quiet text in the list.
+private final class AddOnNoteView: NSTableCellView {
+    static let id = NSUserInterfaceItemIdentifier("note")
+    private let label = NSTextField.label(.body, color: .secondaryLabelColor)
+
+    init() {
+        super.init(frame: .zero)
+        identifier = Self.id
+        label.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(label)
+        NSLayoutConstraint.activate([
+            label.leadingAnchor.constraint(equalTo: leadingAnchor),
+            label.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -4),
+            label.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
     }
 
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    func show(_ text: String) { label.stringValue = text }
+}
+
+/// "28 Other Add-Ons": opens the add-ons Waypoint doesn't update, with the
+/// reason one click away.
+private final class AddOnOthersView: NSTableCellView {
+    static let id = NSUserInterfaceItemIdentifier("others")
+    private let disclosure = NSButton(title: "", target: nil, action: nil)
+    private let title = NSButton(title: "", target: nil, action: nil)
+    private let help = NSButton(title: "", target: nil, action: nil)
+    private var toggle: (() -> Void)?
+
+    init() {
+        super.init(frame: .zero)
+        identifier = Self.id
+        disclosure.bezelStyle = .disclosure
+        disclosure.setButtonType(.pushOnPushOff)
+        disclosure.imagePosition = .imageLeading
+        disclosure.target = self
+        disclosure.action = #selector(pressed)
+        title.target = self
+        title.action = #selector(pressed)
+        title.isBordered = false
+        // VoiceOver: the disclosure is the control; the title repeats it.
+        title.setAccessibilityElement(false)
+        help.bezelStyle = .helpButton
+        help.controlSize = .small
+        help.target = self
+        help.action = #selector(showHelp)
+        help.setAccessibilityLabel("Why Waypoint doesn’t update these")
+        let stack = NSStackView(views: [disclosure, title, help])
+        stack.spacing = 4
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: -4),
+            stack.trailingAnchor.constraint(lessThanOrEqualTo: trailingAnchor, constant: -4),
+            stack.centerYAnchor.constraint(equalTo: centerYAnchor),
+        ])
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    func show(count: Int, isExpanded: Bool, toggle: @escaping () -> Void) {
+        self.toggle = toggle
+        disclosure.state = isExpanded ? .on : .off
+        let text = count == 1 ? "1 Other Add-On" : "\(count) Other Add-Ons"
+        title.attributedTitle = NSAttributedString(string: text, attributes: [
+            .font: NSFont.preferredFont(forTextStyle: .headline), .foregroundColor: NSColor.secondaryLabelColor,
+        ])
+        disclosure.setAccessibilityLabel(text)
+        disclosure.setAccessibilityHelp(AddOnListing.othersHelp)
+    }
+
+    @objc private func pressed() { toggle?() }
+
     @objc private func showHelp() {
-        guard let helpText else { return }
-        let label = NSTextField(wrappingLabelWithString: helpText)
+        let label = NSTextField(wrappingLabelWithString: AddOnListing.othersHelp)
         label.preferredMaxLayoutWidth = 280
         let content = NSViewController()
         let container = NSStackView(views: [label])
@@ -417,50 +438,66 @@ private final class AddOnHeaderView: NSTableCellView {
     }
 }
 
-/// An add-on: name, one quiet line, and at most one button or a progress bar.
+/// An add-on: name and one quiet line on the left; on the right, in a
+/// column of its own so rows line up, one button or a progress bar.
 private final class AddOnRowView: NSTableCellView {
+    static let id = NSUserInterfaceItemIdentifier("row")
     private let name = NSTextField.label(.body)
     private let detail = NSTextField.label(.callout, color: .secondaryLabelColor)
     private let button = NSButton(title: "", target: nil, action: nil)
     private let bar = NSProgressIndicator.bar()
     private var action: (() -> Void)?
 
-    init(identifier: NSUserInterfaceItemIdentifier) {
+    init() {
         super.init(frame: .zero)
-        self.identifier = identifier
+        identifier = Self.id
         button.bezelStyle = .push
         button.controlSize = .small
         button.target = self
         button.action = #selector(press)
-        button.setContentHuggingPriority(.required, for: .horizontal)
-        bar.widthAnchor.constraint(equalToConstant: 80).isActive = true
         let text = NSStackView.column([name, detail], spacing: 1)
-        let stack = NSStackView(views: [text, bar, button])
-        stack.spacing = 8
-        stack.translatesAutoresizingMaskIntoConstraints = false
-        addSubview(stack)
+        text.setContentHuggingPriority(.defaultLow, for: .horizontal)
+        let trailing = NSView()
+        for view in [button, bar] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            trailing.addSubview(view)
+        }
+        for view in [text, trailing] {
+            view.translatesAutoresizingMaskIntoConstraints = false
+            addSubview(view)
+        }
         NSLayoutConstraint.activate([
-            stack.leadingAnchor.constraint(equalTo: leadingAnchor, constant: 4),
-            stack.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
-            stack.centerYAnchor.constraint(equalTo: centerYAnchor),
+            text.leadingAnchor.constraint(equalTo: leadingAnchor),
+            text.centerYAnchor.constraint(equalTo: centerYAnchor),
+            text.trailingAnchor.constraint(lessThanOrEqualTo: trailing.leadingAnchor, constant: -12),
+            trailing.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -4),
+            trailing.centerYAnchor.constraint(equalTo: centerYAnchor),
+            trailing.widthAnchor.constraint(equalToConstant: 96),
+            trailing.heightAnchor.constraint(equalToConstant: 24),
+            button.trailingAnchor.constraint(equalTo: trailing.trailingAnchor),
+            button.centerYAnchor.constraint(equalTo: trailing.centerYAnchor),
+            bar.leadingAnchor.constraint(equalTo: trailing.leadingAnchor),
+            bar.trailingAnchor.constraint(equalTo: trailing.trailingAnchor),
+            bar.centerYAnchor.constraint(equalTo: trailing.centerYAnchor),
         ])
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
-    func show(_ row: AddOnsSheet.Row) {
+    func show(_ row: AddOnListing.Row, action: @escaping () -> Void) {
         name.stringValue = row.name
         name.toolTip = row.tooltip
         detail.stringValue = row.detail
         detail.textColor = row.isFailure ? .systemRed : .secondaryLabelColor
         detail.toolTip = row.isFailure ? row.detail : nil
         detail.isHidden = row.detail.isEmpty
-        button.title = row.button ?? ""
-        button.isHidden = row.button == nil
-        action = row.action
+        button.title = row.actionTitle ?? ""
+        button.isHidden = row.actionTitle == nil
+        self.action = action
         bar.isHidden = row.progress == nil
         bar.doubleValue = row.progress ?? 0
         setAccessibilityLabel([row.name, row.detail].filter { !$0.isEmpty }.joined(separator: ", "))
+        button.setAccessibilityLabel(row.actionTitle.map { "\($0) \(row.name)" })
     }
 
     @objc private func press() { action?() }

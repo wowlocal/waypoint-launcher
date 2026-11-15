@@ -36,6 +36,41 @@ public struct AddOnStore: Sendable {
         var formatVersion: Int
         var addOns: String
         var records: [AddOnRecord]
+        /// The person said so once (an Update or Install in the sheet):
+        /// every add-on Waypoint recognizes here updates on its own.
+        var keepsCurrent: Bool?
+        /// Add-ons Waypoint recognizes but didn't install, as they were when
+        /// first seen: the same version with other files means someone
+        /// edited them, and they're left alone.
+        var baselines: [String: AddOnBaseline]?
+        /// Add-on id → a release an automatic update couldn't install and
+        /// won't try again.
+        var failedReleases: [String: String]?
+
+        init(addOns: String) {
+            (formatVersion, self.addOns, records) = (AddOnStore.formatVersion, addOns, [])
+        }
+
+        /// A record this Waypoint can't read is skipped, not the whole
+        /// file: the rest, and the say-so, still count.
+        init(from decoder: Decoder) throws {
+            let c = try decoder.container(keyedBy: CodingKeys.self)
+            formatVersion = try c.decode(Int.self, forKey: .formatVersion)
+            addOns = try c.decode(String.self, forKey: .addOns)
+            keepsCurrent = try c.decodeIfPresent(Bool.self, forKey: .keepsCurrent)
+            records = (try c.decode([Lenient].self, forKey: .records)).compactMap(\.record)
+            baselines = try? c.decodeIfPresent([String: AddOnBaseline].self, forKey: .baselines)
+            failedReleases = try? c.decodeIfPresent([String: String].self, forKey: .failedReleases)
+        }
+
+        private struct Lenient: Decodable {
+            var record: AddOnRecord?
+            init(from decoder: Decoder) throws { record = try? AddOnRecord(from: decoder) }
+        }
+
+        var isEmpty: Bool {
+            records.isEmpty && keepsCurrent != true && (baselines ?? [:]).isEmpty && (failedReleases ?? [:]).isEmpty
+        }
     }
 
     static func key(for addOns: URL) -> String {
@@ -47,25 +82,61 @@ public struct AddOnStore: Sendable {
         directory.appendingPathComponent(Self.key(for: addOns)).appendingPathExtension("json")
     }
 
-    /// Empty when there's no file, or it's unreadable or from a newer Waypoint.
-    public func load(for addOns: URL) -> [AddOnRecord] {
+    private static func path(_ addOns: URL) -> String { addOns.resolvingSymlinksInPath().standardizedFileURL.path }
+
+    private func read(_ addOns: URL) -> File? {
         guard let data = try? Data(contentsOf: file(for: addOns)),
               let file = try? JSONDecoder().decode(File.self, from: data), file.formatVersion == Self.formatVersion,
-              file.addOns == addOns.resolvingSymlinksInPath().standardizedFileURL.path else { return [] }
-        return file.records
+              file.addOns == Self.path(addOns) else { return nil }
+        return file
     }
 
-    public func save(_ records: [AddOnRecord], for addOns: URL) throws {
+    /// Reads, changes and writes back the folder's file (removed when empty).
+    private func change(_ addOns: URL, _ body: (inout File) -> Void) throws {
+        var contents = read(addOns) ?? File(addOns: Self.path(addOns))
+        body(&contents)
         try FileManager.default.createDirectory(at: directory, withIntermediateDirectories: true, attributes: [.posixPermissions: 0o700])
         let file = file(for: addOns)
-        if records.isEmpty {
+        if contents.isEmpty {
             if FileManager.default.fileExists(atPath: file.path) { try FileManager.default.removeItem(at: file) }
             return
         }
         let encoder = JSONEncoder()
         encoder.outputFormatting = [.sortedKeys, .prettyPrinted]
-        let path = addOns.resolvingSymlinksInPath().standardizedFileURL.path
-        try encoder.encode(File(formatVersion: Self.formatVersion, addOns: path, records: records)).write(to: file, options: .atomic)
+        try encoder.encode(contents).write(to: file, options: .atomic)
+    }
+
+    /// Empty when there's no file, or it's unreadable or from a newer Waypoint.
+    public func load(for addOns: URL) -> [AddOnRecord] { read(addOns)?.records ?? [] }
+
+    public func save(_ records: [AddOnRecord], for addOns: URL) throws {
+        try change(addOns) { file in
+            file.records = records
+            // Waypoint's own install is the add-on's record now.
+            for record in records { file.baselines?[record.ref.description] = nil }
+        }
+    }
+
+    public func keepsCurrent(for addOns: URL) -> Bool { read(addOns)?.keepsCurrent == true }
+
+    public func setKeepsCurrent(_ on: Bool, for addOns: URL) throws {
+        try change(addOns) { $0.keepsCurrent = on ? true : nil }
+    }
+
+    public func baselines(for addOns: URL) -> [String: AddOnBaseline] { read(addOns)?.baselines ?? [:] }
+
+    public func setBaselines(_ baselines: [String: AddOnBaseline], for addOns: URL) throws {
+        try change(addOns) { $0.baselines = baselines.isEmpty ? nil : baselines }
+    }
+
+    public func failedReleases(for addOns: URL) -> [String: String] { read(addOns)?.failedReleases ?? [:] }
+
+    public func setFailedRelease(_ release: String?, for id: String, in addOns: URL) throws {
+        try change(addOns) { file in
+            var failed = file.failedReleases ?? [:]
+            failed[id] = release
+            file.failedReleases = failed.isEmpty ? nil : failed
+        }
     }
 
     /// Held while folders are swapped: another copy of Waypoint, or
@@ -78,6 +149,12 @@ public struct AddOnStore: Sendable {
             throw AddOnError.busy
         }
     }
+}
+
+/// How an add-on Waypoint didn't install looked when first seen.
+public struct AddOnBaseline: Codable, Equatable, Sendable {
+    public var tocVersion: String?
+    public var folderHashes: [String: String]
 }
 
 public enum AddOnError: Error, Equatable, LocalizedError {

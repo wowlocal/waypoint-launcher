@@ -23,6 +23,17 @@ public enum WoWFlavor: String, Codable, Sendable, CaseIterable {
         }
     }
 
+    /// Whether a release built for `interface` is for this game's current
+    /// patch line, as the game itself would see it: retail the same major
+    /// (12.x), the classic games the same major and minor (1.15). Without
+    /// the game's own number (or a game of another flavor) any is.
+    public func isCurrent(_ interface: Int, game: Int?) -> Bool {
+        guard WoWFlavor(interface: interface) == self else { return false }
+        guard let game, WoWFlavor(interface: game) == self else { return true }
+        let line = self == .mainline ? 10000 : 100
+        return interface / line == game / line
+    }
+
     /// "12.1.5.65432" → 120105.
     public static func interface(version: String?) -> Int? {
         guard let version else { return nil }

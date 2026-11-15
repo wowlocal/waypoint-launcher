@@ -97,10 +97,17 @@ struct ReleaseManifest: Decodable {
     var releases: [Release]
 
     /// The zip for this game: one listing its exact interface number if
-    /// there is one, else the first for the flavor. Never a `nolib` zip,
-    /// which leaves out libraries the add-on needs.
+    /// there is one, else the first built for the game's current patch line
+    /// (a retail release still on 11.x isn't for a 12.x game). Never a
+    /// `nolib` zip, which leaves out libraries the add-on needs.
     func choose(flavor: WoWFlavor, interface: Int?) -> Release? {
-        let candidates = releases.filter { $0.nolib != true && $0.metadata.contains { $0.gameFlavor == flavor } }
+        let candidates = releases.filter { release in
+            release.nolib != true && release.metadata.contains { meta in
+                guard meta.gameFlavor == flavor else { return false }
+                guard let number = meta.interface else { return true }
+                return flavor.isCurrent(number, game: interface)
+            }
+        }
         if let interface, let exact = candidates.first(where: { $0.metadata.contains { $0.interface == interface } }) { return exact }
         return candidates.first
     }
