@@ -1,59 +1,130 @@
 import AppKit
-import WaypointCore
 import ServiceManagement
+import WaypointCore
 
-/// Settings (⌘,): sign-in, download speed, game artwork and the opt-in menu
-/// bar item.
+/// Settings (⌘,): a toolbar of panes, each a short column of titled sections.
 @MainActor
-final class SettingsViewController: NSViewController {
-    private let model: AppModel
-    private let backgroundServices: BackgroundServices
-    private let hideDockCheckbox = NSButton(checkboxWithTitle: "Hide Dock icon (menu bar only)", target: nil, action: nil)
-    private let loginCheckbox = NSButton(checkboxWithTitle: "Start Waypoint at login", target: nil, action: nil)
-    private let notificationsCheckbox = NSButton(checkboxWithTitle: "Notify me when updates are available", target: nil, action: nil)
-    private let testNotificationButton = NSButton(title: "Send Test Notification", target: nil, action: nil)
-    private let notificationTestNote = NSTextField(wrappingLabelWithString: "")
-    private let backgroundNote = NSTextField(wrappingLabelWithString: "")
-    private let loginSettings = NSButton(title: "Login Items Settings…", target: nil, action: nil)
-    private var changingLogin = false
-    private var changingNotifications = false
-    private let regionPopup = NSPopUpButton()
-    private let menuBarCheckbox = NSButton(checkboxWithTitle: "Show Waypoint in the menu bar", target: nil, action: nil)
-    private let artworkCheckbox = NSButton(checkboxWithTitle: "Show game artwork", target: nil, action: nil)
-    private let speedSlider = NSSlider(value: Double(DownloadSpeedLimit.choices.count - 1), minValue: 0,
-                                       maxValue: Double(DownloadSpeedLimit.choices.count - 1), target: nil, action: nil)
-    private let speedValue = NSTextField.label(.body, monospacedDigits: true)
-    private let accountLabel = NSTextField(labelWithString: "")
-    private let savedLoginNote = NSTextField(wrappingLabelWithString: "")
-    private let saveLoginButton = NSButton(title: "Save Login…", target: nil, action: nil)
-    private let forgetLoginButton = NSButton(title: "Forget Saved Login", target: nil, action: nil)
-    private var defaultsObserver: NSObjectProtocol?
-
+final class SettingsViewController: NSTabViewController {
     init(model: AppModel, backgroundServices: BackgroundServices) {
-        self.model = model
-        self.backgroundServices = backgroundServices
         super.init(nibName: nil, bundle: nil)
-        title = "Settings"
+        tabStyle = .toolbar
+        add(GeneralSettings(model: model), "General", symbol: "gearshape")
+        add(AccountSettings(model: model), "Account", symbol: "person.crop.circle")
+        add(BackgroundSettings(services: backgroundServices), "Background", symbol: "menubar.rectangle")
     }
 
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
+    private func add(_ pane: NSViewController, _ title: String, symbol: String) {
+        pane.title = title
+        let item = NSTabViewItem(viewController: pane)
+        item.label = title
+        item.image = NSImage(systemSymbolName: symbol, accessibilityDescription: title)
+        addTabViewItem(item)
+    }
+
+    override func viewDidAppear() {
+        super.viewDidAppear()
+        guard let toolbar = view.window?.toolbar else { return }
+        toolbar.displayMode = .iconAndLabel
+        toolbar.allowsUserCustomization = false
+    }
+}
+
+/// One pane: titled sections stacked top to bottom, sized to fit what they show.
+@MainActor
+class SettingsPane: NSViewController {
+    static let width: CGFloat = 420
+    let stack = NSStackView()
+
     override func loadView() {
+        stack.orientation = .vertical
+        stack.alignment = .leading
+        stack.spacing = 20
+        stack.translatesAutoresizingMaskIntoConstraints = false
+        let root = NSView()
+        root.addSubview(stack)
+        NSLayoutConstraint.activate([
+            stack.leadingAnchor.constraint(equalTo: root.leadingAnchor, constant: 24),
+            stack.trailingAnchor.constraint(equalTo: root.trailingAnchor, constant: -24),
+            stack.topAnchor.constraint(equalTo: root.topAnchor, constant: 20),
+            stack.bottomAnchor.constraint(equalTo: root.bottomAnchor, constant: -24),
+            stack.widthAnchor.constraint(equalToConstant: Self.width - 48),
+        ])
+        view = root
+        build()
+    }
+
+    /// Adds the pane's sections to `stack`.
+    func build() {}
+
+    override func viewWillAppear() {
+        super.viewWillAppear()
+        fit()
+    }
+
+    /// The tab view controller sizes the window to this when the pane shows.
+    func fit() {
+        view.layoutSubtreeIfNeeded()
+        preferredContentSize = NSSize(width: Self.width, height: view.fittingSize.height)
+    }
+
+    /// A titled group. Its own stack, so the gap between sections holds when
+    /// a section's last view is hidden.
+    @discardableResult
+    func section(_ title: String, _ views: [NSView]) -> NSStackView {
+        let label = NSTextField(labelWithString: title)
+        label.font = .systemFont(ofSize: NSFont.systemFontSize + 1, weight: .semibold)
+        let section = NSStackView(views: [label] + views)
+        section.orientation = .vertical
+        section.alignment = .leading
+        section.spacing = 6
+        section.setCustomSpacing(10, after: label)
+        stack.addArrangedSubview(section)
+        return section
+    }
+
+    func note(_ text: String = "") -> NSTextField {
+        let note = NSTextField(wrappingLabelWithString: text)
+        note.font = .preferredFont(forTextStyle: .subheadline)
+        note.textColor = .secondaryLabelColor
+        note.preferredMaxLayoutWidth = Self.width - 48
+        note.setContentCompressionResistancePriority(.required, for: .vertical)
+        return note
+    }
+}
+
+// MARK: General
+
+@MainActor
+private final class GeneralSettings: SettingsPane {
+    private let model: AppModel
+    private let regionPopup = NSPopUpButton()
+    private let artworkCheckbox = NSButton(checkboxWithTitle: "Show game artwork", target: nil, action: nil)
+    private let speedSlider = NSSlider(value: Double(DownloadSpeedLimit.choices.count - 1), minValue: 0,
+                                       maxValue: Double(DownloadSpeedLimit.choices.count - 1), target: nil, action: nil)
+    private let speedValue = NSTextField.label(.body, monospacedDigits: true)
+    private var defaultsObserver: NSObjectProtocol?
+
+    init(model: AppModel) {
+        self.model = model
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    override func build() {
         regionPopup.addItem(withTitle: "As Installed")
         regionPopup.addItems(withTitles: Region.allCases.map(\.displayName))
         regionPopup.target = self
         regionPopup.action = #selector(regionChanged)
-        let regionNote = NSTextField.label(.subheadline, color: .secondaryLabelColor)
-        regionNote.stringValue = "The Battle.net region games sign in to."
-        menuBarCheckbox.target = self
-        menuBarCheckbox.action = #selector(menuBarChanged)
+        regionPopup.setAccessibilityLabel("Region")
+        section("Region", [regionPopup, note("The Battle.net region games sign in to.")])
+
         artworkCheckbox.target = self
         artworkCheckbox.action = #selector(artworkChanged)
-        let artworkNote = NSTextField(wrappingLabelWithString: "A picture behind each game, and icons for games that aren’t installed. Downloaded from Blizzard’s catalog (about 7 MB); turning this off deletes the downloaded files.")
-        artworkNote.font = .preferredFont(forTextStyle: .subheadline)
-        artworkNote.textColor = .secondaryLabelColor
-        artworkNote.preferredMaxLayoutWidth = 320
-        artworkNote.widthAnchor.constraint(equalToConstant: 320).isActive = true
+        section("Artwork", [artworkCheckbox, note("A picture behind each game, and icons for games that aren’t installed. Downloaded from Blizzard’s catalog (about 7 MB); turning this off deletes the downloaded files.")])
+
         speedSlider.numberOfTickMarks = DownloadSpeedLimit.choices.count
         speedSlider.allowsTickMarkValuesOnly = true
         speedSlider.isContinuous = true
@@ -62,159 +133,23 @@ final class SettingsViewController: NSViewController {
         speedSlider.setAccessibilityLabel("Download speed limit")
         speedValue.alignment = .right
         speedValue.widthAnchor.constraint(equalToConstant: 90).isActive = true
-        speedSlider.widthAnchor.constraint(equalToConstant: 220).isActive = true
+        speedSlider.widthAnchor.constraint(equalToConstant: 260).isActive = true
         let speedRow = NSStackView(views: [speedSlider, speedValue])
         speedRow.spacing = 10
-        let speedNote = NSTextField(wrappingLabelWithString: "Total for all game downloads. Changes apply immediately.")
-        speedNote.font = .preferredFont(forTextStyle: .subheadline)
-        speedNote.textColor = .secondaryLabelColor
-        speedNote.preferredMaxLayoutWidth = 320
-        speedNote.widthAnchor.constraint(equalToConstant: 320).isActive = true
-        saveLoginButton.target = self
-        saveLoginButton.action = #selector(saveLogin)
-        forgetLoginButton.target = self
-        forgetLoginButton.action = #selector(forgetLogin)
-        savedLoginNote.textColor = .secondaryLabelColor
-        savedLoginNote.font = .preferredFont(forTextStyle: .subheadline)
-        savedLoginNote.preferredMaxLayoutWidth = 320
-        savedLoginNote.widthAnchor.constraint(equalToConstant: 320).isActive = true
-        savedLoginNote.setContentCompressionResistancePriority(.required, for: .vertical)
-        let loginButtons = NSStackView(views: [saveLoginButton, forgetLoginButton])
-        loginButtons.spacing = 8
+        section("Download Speed", [speedRow, note("Total for all game downloads. Changes apply immediately.")])
 
-        for (button, action) in [
-            (hideDockCheckbox, #selector(hideDockChanged)),
-            (loginCheckbox, #selector(loginChanged)),
-            (notificationsCheckbox, #selector(notificationsChanged)),
-            (loginSettings, #selector(openLoginSettings)),
-            (testNotificationButton, #selector(sendTestNotification)),
-        ] { button.target = self; button.action = action }
-        notificationTestNote.font = .preferredFont(forTextStyle: .subheadline)
-        notificationTestNote.textColor = .secondaryLabelColor
-        notificationTestNote.preferredMaxLayoutWidth = 360
-        notificationTestNote.widthAnchor.constraint(equalToConstant: 360).isActive = true
-        backgroundNote.font = .preferredFont(forTextStyle: .subheadline)
-        backgroundNote.textColor = .secondaryLabelColor
-        backgroundNote.preferredMaxLayoutWidth = 360
-        backgroundNote.widthAnchor.constraint(equalToConstant: 360).isActive = true
-        let backgroundOptions = NSStackView(views: [menuBarCheckbox, hideDockCheckbox, loginCheckbox, loginSettings])
-        backgroundOptions.orientation = .vertical
-        backgroundOptions.alignment = .leading
-        backgroundOptions.spacing = 8
-        let updateOptions = NSStackView(views: [notificationsCheckbox, testNotificationButton, notificationTestNote, backgroundNote])
-        updateOptions.orientation = .vertical
-        updateOptions.alignment = .leading
-        updateOptions.spacing = 8
-
-        let grid = NSGridView(views: [
-            [NSTextField(labelWithString: "Region:"), regionPopup],
-            [NSGridCell.emptyContentView, regionNote],
-            [NSTextField(labelWithString: "Background:"), backgroundOptions],
-            [NSTextField(labelWithString: "Artwork:"), artworkCheckbox],
-            [NSGridCell.emptyContentView, artworkNote],
-            [NSTextField(labelWithString: "Download speed:"), speedRow],
-            [NSGridCell.emptyContentView, speedNote],
-            [NSTextField(labelWithString: "Account:"), accountLabel],
-            [NSGridCell.emptyContentView, savedLoginNote],
-            [NSGridCell.emptyContentView, loginButtons],
-            [NSTextField(labelWithString: "Updates:"), updateOptions],
-        ])
-        grid.column(at: 0).xPlacement = .trailing
-        grid.rowAlignment = .firstBaseline
-        grid.rowSpacing = 8
-        grid.columnSpacing = 8
-        grid.row(at: 2).topPadding = 12
-        grid.row(at: 3).topPadding = 12
-        grid.row(at: 5).topPadding = 12
-        grid.row(at: 7).topPadding = 12
-        grid.row(at: 10).topPadding = 12
-
-        let container = NSView()
-        grid.translatesAutoresizingMaskIntoConstraints = false
-        container.addSubview(grid)
-        NSLayoutConstraint.activate([
-            grid.leadingAnchor.constraint(equalTo: container.leadingAnchor, constant: 30),
-            grid.trailingAnchor.constraint(equalTo: container.trailingAnchor, constant: -30),
-            grid.topAnchor.constraint(equalTo: container.topAnchor, constant: 24),
-            grid.bottomAnchor.constraint(equalTo: container.bottomAnchor, constant: -24),
-        ])
-        view = container
-
-        observeChanges { [weak self] in self?.renderBackground() }
         observeChanges { [weak self] in self?.renderRegion() }
-        observeChanges { [weak self] in self?.renderSavedLogin() }
         observeChanges { [weak self] in self?.renderArtwork() }
-        // ⌘-dragging the item out of the menu bar turns the setting off.
         defaultsObserver = NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated {
-                self?.renderBackground()
-                self?.renderMenuBar()
-                self?.renderSpeed()
-            }
+            MainActor.assumeIsolated { self?.renderSpeed() }
         }
-        renderMenuBar()
         renderSpeed()
     }
-
-    private func renderBackground() {
-        let defaults = UserDefaults.standard
-        hideDockCheckbox.state = defaults.bool(forKey: UpdatePreferences.hideDockKey) ? .on : .off
-        notificationsCheckbox.state = defaults.bool(forKey: UpdatePreferences.notificationsKey) ? .on : .off
-        loginCheckbox.state = backgroundServices.loginStatus == .enabled || backgroundServices.loginStatus == .requiresApproval ? .on : .off
-        loginCheckbox.isEnabled = !changingLogin && backgroundServices.supportsSystemIntegration
-        notificationsCheckbox.isEnabled = !changingNotifications && backgroundServices.supportsSystemIntegration
-        notificationTestNote.stringValue = backgroundServices.notificationTestStatus ?? ""
-        notificationTestNote.isHidden = backgroundServices.notificationTestStatus == nil
-        testNotificationButton.isEnabled = !backgroundServices.isTestingNotification && backgroundServices.supportsSystemIntegration &&
-            defaults.bool(forKey: UpdatePreferences.notificationsKey) && backgroundServices.notificationStatus == .authorized
-        loginSettings.isHidden = backgroundServices.loginStatus != .requiresApproval
-        var note = "Checks installed games every 30 minutes while Waypoint is running. Game updates require your approval."
-        if !backgroundServices.supportsSystemIntegration { note += " Notifications and login items require an installed app bundle." }
-        if backgroundServices.loginStatus == .requiresApproval { note += " Approve Waypoint in Login Items Settings." }
-        if backgroundServices.notificationStatus == .denied { note += " Notifications are blocked in macOS Notification Settings." }
-        if let error = backgroundServices.errorMessage { note += " " + error }
-        backgroundNote.stringValue = note
-    }
-
-    @objc private func hideDockChanged() { backgroundServices.setHideDock(hideDockCheckbox.state == .on) }
-    @objc private func loginChanged() {
-        let enabled = loginCheckbox.state == .on
-        changingLogin = true; renderBackground()
-        Task {
-            await backgroundServices.setLoginEnabled(enabled)
-            changingLogin = false; renderBackground()
-        }
-    }
-    @objc private func notificationsChanged() {
-        let enabled = notificationsCheckbox.state == .on
-        changingNotifications = true; renderBackground()
-        Task {
-            await backgroundServices.setNotificationsEnabled(enabled)
-            changingNotifications = false; renderBackground()
-            if UserDefaults.standard.bool(forKey: UpdatePreferences.notificationsKey) {
-                await model.checkForUpdates(force: true)
-            }
-        }
-    }
-    @objc private func sendTestNotification() { Task { await backgroundServices.sendTestNotification() } }
-    @objc private func openLoginSettings() { SMAppService.openSystemSettingsLoginItems() }
 
     private func renderRegion() {
         let region = model.regionOverride.flatMap { Region.allCases.firstIndex(of: $0) }
         regionPopup.selectItem(at: region.map { $0 + 1 } ?? 0)
-    }
-
-    private func renderMenuBar() {
-        menuBarCheckbox.state = UserDefaults.standard.bool(forKey: MenuBarItem.defaultsKey) ? .on : .off
-    }
-
-    private func renderArtwork() {
-        artworkCheckbox.state = model.showsArtwork ? .on : .off
-    }
-
-    @objc private func artworkChanged() {
-        model.showsArtwork = artworkCheckbox.state == .on
     }
 
     @objc private func regionChanged() {
@@ -222,9 +157,8 @@ final class SettingsViewController: NSViewController {
         model.regionOverride = index > 0 ? Region.allCases[index - 1] : nil
     }
 
-    @objc private func menuBarChanged() {
-        UserDefaults.standard.set(menuBarCheckbox.state == .on, forKey: MenuBarItem.defaultsKey)
-    }
+    private func renderArtwork() { artworkCheckbox.state = model.showsArtwork ? .on : .off }
+    @objc private func artworkChanged() { model.showsArtwork = artworkCheckbox.state == .on }
 
     private func renderSpeed() {
         let limit = DownloadSpeedLimit.load()
@@ -239,16 +173,163 @@ final class SettingsViewController: NSViewController {
         DownloadSpeedLimit.choices[index].save()
         renderSpeed()
     }
+}
 
-    private func renderSavedLogin() {
+// MARK: Account
+
+@MainActor
+private final class AccountSettings: SettingsPane {
+    private let model: AppModel
+    private let accountLabel = NSTextField(labelWithString: "")
+    private lazy var savedLoginNote = note()
+    private let saveLoginButton = NSButton(title: "Save Login…", target: nil, action: nil)
+    private let forgetLoginButton = NSButton(title: "Forget Saved Login", target: nil, action: nil)
+
+    init(model: AppModel) {
+        self.model = model
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    override func build() {
+        saveLoginButton.target = self
+        saveLoginButton.action = #selector(saveLogin)
+        forgetLoginButton.target = self
+        forgetLoginButton.action = #selector(forgetLogin)
+        let buttons = NSStackView(views: [saveLoginButton, forgetLoginButton])
+        buttons.spacing = 8
+        section("Battle.net Account", [accountLabel, savedLoginNote, buttons])
+            .setCustomSpacing(12, after: savedLoginNote)
+        observeChanges { [weak self] in self?.render() }
+    }
+
+    private func render() {
         accountLabel.stringValue = model.activeAccount?.displayName ?? "Not Signed In"
         savedLoginNote.stringValue = model.savedLoginStatus
         saveLoginButton.title = model.hasSavedLogin ? "Update Saved Login…" : "Save Login…"
         saveLoginButton.isEnabled = model.activeAccount != nil && !model.isSigningIn
         forgetLoginButton.isEnabled = model.hasSavedLogin && !model.isSigningIn
         forgetLoginButton.isHidden = !model.hasSavedLogin
+        if view.window != nil { fit() }
     }
 
     @objc private func saveLogin() { model.editSavedLogin() }
     @objc private func forgetLogin() { model.removeSavedLogin() }
+}
+
+// MARK: Background
+
+/// The opt-in ways Waypoint keeps running without its window.
+@MainActor
+private final class BackgroundSettings: SettingsPane {
+    private let services: BackgroundServices
+    private let menuBarCheckbox = NSButton(checkboxWithTitle: "Show Waypoint in the menu bar", target: nil, action: nil)
+    private let hideDockCheckbox = NSButton(checkboxWithTitle: "Hide Dock icon", target: nil, action: nil)
+    private let loginCheckbox = NSButton(checkboxWithTitle: "Open Waypoint at login", target: nil, action: nil)
+    private lazy var loginNote = note()
+    private let loginItemsButton = NSButton(title: "Login Items Settings…", target: nil, action: nil)
+    private let notificationsCheckbox = NSButton(checkboxWithTitle: "Notify me about game updates", target: nil, action: nil)
+    private lazy var notificationsNote = note()
+    private var changing = false
+    private var defaultsObserver: NSObjectProtocol?
+    private var activeObserver: NSObjectProtocol?
+
+    init(services: BackgroundServices) {
+        self.services = services
+        super.init(nibName: nil, bundle: nil)
+    }
+
+    required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
+
+    override func build() {
+        for (button, action) in [
+            (menuBarCheckbox, #selector(menuBarChanged)),
+            (hideDockCheckbox, #selector(hideDockChanged)),
+            (loginCheckbox, #selector(loginChanged)),
+            (loginItemsButton, #selector(openLoginItems)),
+            (notificationsCheckbox, #selector(notificationsChanged)),
+        ] { button.target = self; button.action = action }
+        // Without the Dock icon, the menu bar item is the way back to
+        // Waypoint, so the one goes with the other.
+        let hideDockRow = NSStackView(views: [hideDockCheckbox])
+        hideDockRow.edgeInsets = NSEdgeInsets(top: 0, left: 20, bottom: 0, right: 0)
+        section("Menu Bar", [menuBarCheckbox, hideDockRow])
+        section("Login", [loginCheckbox, loginNote, loginItemsButton])
+            .setCustomSpacing(10, after: loginNote)
+        section("Notifications", [notificationsCheckbox, notificationsNote])
+
+        observeChanges { [weak self] in self?.render() }
+        defaultsObserver = NotificationCenter.default.addObserver(
+            forName: UserDefaults.didChangeNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated { self?.render() }
+        }
+        // Approval may have changed in System Settings meanwhile.
+        activeObserver = NotificationCenter.default.addObserver(
+            forName: NSApplication.didBecomeActiveNotification, object: nil, queue: .main) { [weak self] _ in
+            MainActor.assumeIsolated {
+                guard let self, self.view.window?.isVisible == true else { return }
+                self.services.refreshStatus()
+            }
+        }
+    }
+
+    override func viewWillAppear() {
+        services.refreshStatus()
+        super.viewWillAppear()
+    }
+
+    private func render() {
+        let defaults = UserDefaults.standard
+        let menuBar = defaults.bool(forKey: MenuBarItem.defaultsKey)
+        menuBarCheckbox.state = menuBar ? .on : .off
+        hideDockCheckbox.state = defaults.bool(forKey: UpdatePreferences.hideDockKey) ? .on : .off
+        hideDockCheckbox.isEnabled = menuBar
+
+        let integrated = services.supportsSystemIntegration
+        let status = services.loginStatus
+        loginCheckbox.state = status == .enabled || status == .requiresApproval ? .on : .off
+        loginCheckbox.isEnabled = integrated && !changing
+        let needsApproval = status == .requiresApproval
+        loginItemsButton.isHidden = !needsApproval
+        show(loginNote, needsApproval ? "Allow Waypoint in Login Items to finish." : services.loginError)
+
+        let notifications = defaults.bool(forKey: UpdatePreferences.notificationsKey)
+        notificationsCheckbox.state = notifications ? .on : .off
+        notificationsCheckbox.isEnabled = integrated && !changing
+        show(notificationsNote, notifications && services.notificationStatus == .denied
+             ? "Notifications for Waypoint are turned off in System Settings." : services.notificationsError)
+        if view.window != nil { fit() }
+    }
+
+    private func show(_ note: NSTextField, _ text: String?) {
+        note.stringValue = text ?? ""
+        note.isHidden = text == nil
+    }
+
+    @objc private func menuBarChanged() {
+        UserDefaults.standard.set(menuBarCheckbox.state == .on, forKey: MenuBarItem.defaultsKey)
+    }
+
+    @objc private func hideDockChanged() { services.setHideDock(hideDockCheckbox.state == .on) }
+
+    @objc private func loginChanged() {
+        let enabled = loginCheckbox.state == .on
+        changing = true; render()
+        Task {
+            await services.setLoginEnabled(enabled)
+            changing = false; render()
+        }
+    }
+
+    @objc private func notificationsChanged() {
+        let enabled = notificationsCheckbox.state == .on
+        changing = true; render()
+        Task {
+            await services.setNotificationsEnabled(enabled)
+            changing = false; render()
+        }
+    }
+
+    @objc private func openLoginItems() { SMAppService.openSystemSettingsLoginItems() }
 }
