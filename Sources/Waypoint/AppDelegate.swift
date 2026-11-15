@@ -13,6 +13,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private var isTerminating = false
 
     static func main() {
+        // Started by a tip build going back to the release: swap and exit,
+        // before anything else (no model, no Sparkle, no window).
+        if ReleaseReturn.isSwapRequest() { ReleaseReturn.performSwap() }
         let app = NSApplication.shared
         let delegate = AppDelegate()
         app.delegate = delegate
@@ -45,6 +48,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     private static var launchedAtLogin: Bool {
         let event = NSAppleEventManager.shared().currentAppleEvent
         return event?.paramDescriptor(forKeyword: keyAEPropData)?.enumCodeValue == keyAELaunchedAsLogInItem
+    }
+
+    func applicationWillTerminate(_ notification: Notification) {
+        appUpdater.willTerminate()
     }
 
     func applicationShouldTerminate(_ sender: NSApplication) -> NSApplication.TerminateReply {
@@ -113,7 +120,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     }
 
     @objc func showSettings(_ sender: Any?) {
-        let window = settingsWindow ?? NSWindow(contentViewController: SettingsViewController(model: model, backgroundServices: backgroundServices))
+        let window = settingsWindow ?? NSWindow(contentViewController: SettingsViewController(model: model, appUpdater: appUpdater, backgroundServices: backgroundServices))
         window.styleMask = [.titled, .closable]
         window.toolbarStyle = .preference
         window.isReleasedWhenClosed = false

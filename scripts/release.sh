@@ -7,13 +7,22 @@
 #   scripts/release.sh 0.2.0             # → dist/Waypoint-0.2.0.dmg (+ .sha256, appcast.xml)
 #   scripts/release.sh 0.2.0 --publish   # …tag v0.2.0, upload to S3, create the GitHub release
 #   scripts/release.sh tip --publish     # a tip build of this branch, on the tip feed
+#   scripts/release.sh 0.2.0 --tip-feed  # after a release: (again) add it to the tip feed
 #
 # Tip builds (like Ghostty's) are for trying what's next: experimental work
 # that may live on a branch. A tip is built from the checked-out branch,
 # which must contain the latest origin/main: tips are main plus more, never
-# behind it. It is versioned after the latest release (1.1.4-tip.195), has
+# behind it. It is versioned after the latest release (1.1.4-tip.3), has
 # its own feed (waypoint/tip/appcast.xml), which only tip builds follow, and
 # replaces the GitHub pre-release tagged "tip". Stable users never see one.
+# Tip build numbers sit between releases: after release 181 come 181.1,
+# 181.2…, newer than it and older than the next release (182 or more). So
+# Sparkle takes a copy from the release to a tip, from tip to tip, and on to
+# the next release; going back to the current release, which Sparkle refuses
+# (a lower number), Waypoint does itself (ReleaseReturn.swift). The tip feed
+# also carries the newest release (scripts/merge-tip-appcast.py), so tip
+# copies move on to a release as soon as it's out; publishing a release
+# updates it too. Tips are turned on and off in Settings ▸ General.
 # Tips reuse the published Windows runtime. The "tip" tag moves: a clone
 # that fetched it before needs `git fetch --tags --force` (or `git tag -d tip`).
 #
@@ -45,10 +54,13 @@ version="${1:-}"
 publish=0
 mode="${2:-}"
 [[ "$mode" == "--publish" || "$mode" == "--publish-only" ]] && publish=1
+tip_feed_only=0
+[[ "$mode" == "--tip-feed" ]] && tip_feed_only=1
 channel=stable
 [[ "$version" == "tip" ]] && channel=tip
 [[ ( "$channel" == "tip" || "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ) && ( -z "$mode" || "$mode" == "--publish" || "$mode" == "--publish-only" ) ]] \
-    || fail "usage: scripts/release.sh <x.y.z|tip> [--publish|--publish-only]"
+    || [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$mode" == "--tip-feed" ]] \
+    || fail "usage: scripts/release.sh <x.y.z|tip> [--publish|--publish-only] | <x.y.z> --tip-feed"
 
 tag="v$version"
 repo_url="https://github.com/wowlocal/waypoint-launcher"
@@ -77,7 +89,7 @@ live_tip_build() {
         200) ;;
         *) rm -f "$body"; fail "$feed_url answered HTTP $code" ;;
     esac
-    build="$(sed -n 's/.*sparkle:version="\([0-9]*\)".*/\1/p;s/.*<sparkle:version>\([0-9]*\)<.*/\1/p' "$body" | sort -n | tail -1)"
+    build="$(sed -n 's/.*sparkle:version="\([0-9.]*\)".*/\1/p;s/.*<sparkle:version>\([0-9.]*\)<.*/\1/p' "$body" | sort -t. -k1,1n -k2,2n | tail -1)"
     rm -f "$body"
     [[ -n "$build" ]] || fail "can't find the build number in $feed_url"
     print -r -- "$build"
@@ -114,18 +126,20 @@ if [[ "$channel" == "tip" ]]; then
         # moved on since, which doesn't matter for publishing it.
         version="$(python3 -c 'import json; print(json.load(open("dist/release.json"))["version"])')"
         [[ "$version" == *-tip.* ]] || fail "dist/ holds no prepared tip build"
-        build_number="${version##*-tip.}"
+        build_number="$(python3 -c 'import json; print(json.load(open("dist/release.json"))["build"])')"
     else
         # Tips are main plus more: never one that lacks something on main.
         git merge-base --is-ancestor origin/main HEAD \
             || fail "this branch doesn't contain the latest origin/main; merge or rebase it onto main first"
         base="${latest_release#v}"
-        # One more than the live tip if that's higher: tips from different
-        # branches still count up, so Sparkle always offers the newest.
-        build_number="$(git rev-list --count HEAD)"
+        # <release build>.<n>: n counts up past the live tip of the same
+        # release, whatever branch it came from, so Sparkle offers the newest.
+        release_build="$(git rev-list --count "$latest_release")"
         previous="$(live_tip_build)"
-        [[ -z "$previous" ]] || (( build_number > previous )) || build_number=$(( previous + 1 ))
-        version="${base%.*}.$(( ${base##*.} + 1 ))-tip.$build_number"
+        sequence=1
+        if [[ "$previous" == "$release_build".* ]]; then sequence=$(( ${previous#*.} + 1 )); fi
+        build_number="$release_build.$sequence"
+        version="${base%.*}.$(( ${base##*.} + 1 ))-tip.$sequence"
     fi
     # Tips reuse the newest published Windows runtime; they never publish one.
     [[ -z "${REUSE_WINDOWS_ASSETS_FROM+set}" || -n "$REUSE_WINDOWS_ASSETS_FROM" ]] \
@@ -138,6 +152,60 @@ if [[ "$channel" == "tip" ]]; then
 fi
 download_base="$s3_endpoint/$s3_bucket/$channel_prefix"
 
+# The tip: a link that always gets the newest, the moving "tip" tag and
+# pre-release, then the feed, which is what tip copies update from.
+publish_tip() {
+    local latest="$dist/Waypoint-Tip.dmg" branch notes live
+    [[ "$channel_prefix" == "$s3_prefix/tip" ]] || fail "tip publishing outside the tip prefix"
+    # Another tip may have gone out since this one was built.
+    live="$(live_tip_build)"
+    [[ -z "$live" ]] || python3 -c 'import sys; a,b=(tuple(map(int,v.split("."))) for v in sys.argv[1:]); sys.exit(a<=b)' "$build_number" "$live" \
+        || fail "the live tip ($live) is as new as this one ($build_number); build again"
+    cp "$dmg" "$latest"
+    (cd "$dist" && shasum -a 256 "${latest:t}" >"${latest:t}.sha256")
+    s3 cp "$latest" "s3://$s3_bucket/$channel_prefix/${latest:t}" --content-type application/x-apple-diskimage --cache-control no-cache
+    branch="$(git rev-parse --abbrev-ref HEAD)"
+    git tag -f -a tip -m "Waypoint $version" >/dev/null
+    git push -f -q origin refs/tags/tip
+    notes="$(mktemp)"
+    {
+        print "**Tip build: Waypoint $version**, from \`$branch\` at $(git rev-parse --short HEAD), on top of the latest \`main\`."
+        print
+        print "Tip builds carry experimental work that hasn't been released. They update to the next tip, or the next release, on their own. To go back to releases, turn off **Get tip builds** in Settings ▸ General, or install the [latest release]($repo_url/releases/latest) over it."
+        print
+        print "Download: [Waypoint-Tip.dmg]($download_base/${latest:t}) · $(awk '{print $1}' "$latest.sha256")"
+        [[ -z "${NOTES_FILE:-}" ]] || { print; cat "$NOTES_FILE" }
+    } >"$notes"
+    if gh release view tip >/dev/null 2>&1; then
+        gh release edit tip --prerelease --latest=false --title "Waypoint Tip" --notes-file "$notes"
+        gh release upload tip "$latest" "$latest.sha256" --clobber
+    else
+        gh release create tip "$latest" "$latest.sha256" --prerelease --latest=false --title "Waypoint Tip" --notes-file "$notes" --verify-tag
+    fi
+    rm -f "$notes"
+    # The newest release goes in too: whichever is newer is offered.
+    curl -fsS "$public_base/appcast.xml" -o "$dist/release-appcast.xml" || fail "can't read the release feed"
+    python3 scripts/merge-tip-appcast.py "$dist/appcast.xml" "$dist/release-appcast.xml" "$dist/tip-appcast.xml"
+    s3 cp "$dist/tip-appcast.xml" "s3://$s3_bucket/$channel_prefix/appcast.xml" --content-type application/xml --cache-control no-cache
+    curl -fs "$feed_url" | cmp -s - "$dist/tip-appcast.xml" || fail "the public feed at $feed_url doesn't match the new appcast"
+    print -P "%F{green}Live tip:%f $feed_url"
+}
+
+# After a release: the tip feed offers it too, so tip copies get it.
+add_release_to_tip_feed() {
+    local tip_feed="$public_base/tip/appcast.xml" code
+    code="$(curl -sS --max-time 30 -o "$dist/live-tip-appcast.xml" -w '%{http_code}' "$tip_feed")" || fail "can't read $tip_feed"
+    case "$code" in
+        403|404) return 0 ;;   # no tips yet
+        200) ;;
+        *) fail "$tip_feed answered HTTP $code" ;;
+    esac
+    python3 scripts/merge-tip-appcast.py "$dist/live-tip-appcast.xml" "$dist/appcast.xml" "$dist/tip-appcast.xml"
+    s3 cp "$dist/tip-appcast.xml" "s3://$s3_bucket/$s3_prefix/tip/appcast.xml" --content-type application/xml --cache-control no-cache
+    curl -fs "$tip_feed" | cmp -s - "$dist/tip-appcast.xml" || fail "the tip feed at $tip_feed doesn't match"
+    print -P "%F{green}Tip feed offers it too:%f $tip_feed"
+}
+
 if [[ -f scripts/release.env ]]; then
     set -a
     source scripts/release.env
@@ -149,6 +217,13 @@ profile="${NOTARY_KEYCHAIN_PROFILE:-${NOTARY_PROFILE:-keys-cli-notary}}"
 # Separate from build/Waypoint.app, which may be running.
 app="build/release/Waypoint.app"
 dist="dist"
+if (( tip_feed_only )); then
+    [[ -f "$dist/appcast.xml" ]] && grep -q "<sparkle:shortVersionString>$version<" "$dist/appcast.xml" \
+        || fail "dist/appcast.xml isn't $version's; publish the release first"
+    command -v aws >/dev/null || fail "aws CLI not found (brew install awscli)"
+    add_release_to_tip_feed
+    exit 0
+fi
 dmg="$dist/Waypoint-$version.dmg"
 component="${WINDOWS_COMPONENT_RELEASE:-build/windows-runtime-release}"
 export WINDOWS_RUNTIME="$component/distribution"
@@ -290,49 +365,16 @@ signature="$(sed -n 's/.*sparkle:edSignature="\([^"]*\)".*/\1/p' "$dist/appcast.
 "$sparkle_bin/sign_update" --account waypoint --verify "$dmg" "$signature" || fail "appcast signature doesn't match the DMG"
 grep -q "url=\"$download_base/${dmg:t}\"" "$dist/appcast.xml" || fail "appcast points somewhere unexpected"
 print -P "%F{green}Ready:%f $dmg"
-python3 - "$version" "$dmg" "$dist/appcast.xml" "$component/publication.json" <<'PY'
+python3 - "$version" "$app" "$dmg" "$dist/appcast.xml" "$component/publication.json" <<'PY'
 import hashlib,json,pathlib,subprocess,sys
 version,*names=sys.argv[1:]
-d={"version":version,"commit":subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip(),
+import plistlib
+build=plistlib.load(open(names.pop(0)+"/Contents/Info.plist","rb"))["CFBundleVersion"]
+d={"version":version,"build":build,"commit":subprocess.check_output(["git","rev-parse","HEAD"],text=True).strip(),
    "files":{name:hashlib.sha256(pathlib.Path(name).read_bytes()).hexdigest() for name in names}}
 pathlib.Path("dist/release.json").write_text(json.dumps(d,indent=2)+"\n")
 PY
 fi
-
-# The tip: a link that always gets the newest, the moving "tip" tag and
-# pre-release, then the feed, which is what tip copies update from.
-publish_tip() {
-    local latest="$dist/Waypoint-Tip.dmg" branch notes live
-    [[ "$channel_prefix" == "$s3_prefix/tip" ]] || fail "tip publishing outside the tip prefix"
-    # Another tip may have gone out since this one was built.
-    live="$(live_tip_build)"
-    [[ -z "$live" ]] || (( build_number > live )) || fail "the live tip ($live) is as new as this one ($build_number); build again"
-    cp "$dmg" "$latest"
-    (cd "$dist" && shasum -a 256 "${latest:t}" >"${latest:t}.sha256")
-    s3 cp "$latest" "s3://$s3_bucket/$channel_prefix/${latest:t}" --content-type application/x-apple-diskimage --cache-control no-cache
-    branch="$(git rev-parse --abbrev-ref HEAD)"
-    git tag -f -a tip -m "Waypoint $version" >/dev/null
-    git push -f -q origin refs/tags/tip
-    notes="$(mktemp)"
-    {
-        print "**Tip build: Waypoint $version**, from \`$branch\` at $(git rev-parse --short HEAD), on top of the latest \`main\`."
-        print
-        print "Tip builds carry experimental work that hasn't been released. They update to the next tip on their own; to go back to stable releases, install the [latest release]($repo_url/releases/latest) over it."
-        print
-        print "Download: [Waypoint-Tip.dmg]($download_base/${latest:t}) · $(awk '{print $1}' "$latest.sha256")"
-        [[ -z "${NOTES_FILE:-}" ]] || { print; cat "$NOTES_FILE" }
-    } >"$notes"
-    if gh release view tip >/dev/null 2>&1; then
-        gh release edit tip --prerelease --latest=false --title "Waypoint Tip" --notes-file "$notes"
-        gh release upload tip "$latest" "$latest.sha256" --clobber
-    else
-        gh release create tip "$latest" "$latest.sha256" --prerelease --latest=false --title "Waypoint Tip" --notes-file "$notes" --verify-tag
-    fi
-    rm -f "$notes"
-    s3 cp "$dist/appcast.xml" "s3://$s3_bucket/$channel_prefix/appcast.xml" --content-type application/xml --cache-control no-cache
-    curl -fs "$feed_url" | cmp -s - "$dist/appcast.xml" || fail "the public feed at $feed_url doesn't match the new appcast"
-    print -P "%F{green}Live tip:%f $feed_url"
-}
 
 if (( publish )); then
     python3 - "$version" <<'PY'
@@ -394,4 +436,5 @@ PY
     curl -fs "$feed_url" | cmp -s - "$dist/appcast.xml" || fail "the public feed at $feed_url doesn't match the new appcast"
     gh release edit "$tag" --draft=false --latest
     print -P "%F{green}Live:%f $feed_url"
+    add_release_to_tip_feed || fail "the release is live, but the tip feed wasn't updated; run: scripts/release.sh $version --tip-feed"
 fi

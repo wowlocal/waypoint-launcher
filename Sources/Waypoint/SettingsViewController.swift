@@ -5,10 +5,10 @@ import WaypointCore
 /// Settings (⌘,): a toolbar of panes, each a short column of titled sections.
 @MainActor
 final class SettingsViewController: NSTabViewController {
-    init(model: AppModel, backgroundServices: BackgroundServices) {
+    init(model: AppModel, appUpdater: AppUpdater, backgroundServices: BackgroundServices) {
         super.init(nibName: nil, bundle: nil)
         tabStyle = .toolbar
-        add(GeneralSettings(model: model), "General", symbol: "gearshape")
+        add(GeneralSettings(model: model, updater: appUpdater), "General", symbol: "gearshape")
         add(AccountSettings(model: model), "Account", symbol: "person.crop.circle")
         add(BackgroundSettings(services: backgroundServices), "Background", symbol: "menubar.rectangle")
     }
@@ -105,9 +105,14 @@ private final class GeneralSettings: SettingsPane {
                                        maxValue: Double(DownloadSpeedLimit.choices.count - 1), target: nil, action: nil)
     private let speedValue = NSTextField.label(.body, monospacedDigits: true)
     private var defaultsObserver: NSObjectProtocol?
+    private let updater: AppUpdater
+    private let tipsCheckbox = NSButton(checkboxWithTitle: "Get tip builds", target: nil, action: nil)
+    private let tipsStatus = NSTextField(wrappingLabelWithString: "")
+    private let restartButton = NSButton(title: "Restart to Update", target: nil, action: nil)
 
-    init(model: AppModel) {
+    init(model: AppModel, updater: AppUpdater) {
         self.model = model
+        self.updater = updater
         super.init(nibName: nil, bundle: nil)
     }
 
@@ -138,6 +143,23 @@ private final class GeneralSettings: SettingsPane {
         speedRow.spacing = 10
         section("Download Speed", [speedRow, note("Total for all game downloads. Changes apply immediately.")])
 
+        // Development builds don't update themselves: no choice to offer.
+        if updater.canUpdate {
+            tipsCheckbox.target = self
+            tipsCheckbox.action = #selector(tipsChanged)
+            tipsStatus.font = .preferredFont(forTextStyle: .subheadline)
+            tipsStatus.preferredMaxLayoutWidth = Self.width - 48
+            restartButton.target = self
+            restartButton.action = #selector(restart)
+            let running = updater.running == .tip
+                ? " This copy is tip build \(Bundle.main.object(forInfoDictionaryKey: "CFBundleShortVersionString") as? String ?? "")."
+                : ""
+            section("Updates", [tipsCheckbox,
+                                note("Try what’s next before it’s released: new features, which may be unfinished. Turning this off goes back to the latest release.\(running)"),
+                                tipsStatus, restartButton])
+            observeChanges { [weak self] in self?.renderUpdates() }
+        }
+
         observeChanges { [weak self] in self?.renderRegion() }
         observeChanges { [weak self] in self?.renderArtwork() }
         defaultsObserver = NotificationCenter.default.addObserver(
@@ -158,6 +180,18 @@ private final class GeneralSettings: SettingsPane {
     }
 
     private func renderArtwork() { artworkCheckbox.state = model.showsArtwork ? .on : .off }
+
+    private func renderUpdates() {
+        tipsCheckbox.state = updater.receivesTips ? .on : .off
+        tipsStatus.stringValue = updater.status ?? ""
+        tipsStatus.isHidden = updater.status == nil
+        restartButton.isHidden = updater.readyVersion == nil
+        // Only while General shows: another pane must keep its own height.
+        if view.window != nil { fit() }
+    }
+
+    @objc private func tipsChanged() { updater.setReceivesTips(tipsCheckbox.state == .on) }
+    @objc private func restart() { updater.restartToUpdate() }
     @objc private func artworkChanged() { model.showsArtwork = artworkCheckbox.state == .on }
 
     private func renderSpeed() {
