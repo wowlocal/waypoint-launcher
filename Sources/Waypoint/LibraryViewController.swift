@@ -422,9 +422,13 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
         guard let id = info.draggingPasteboard.string(forType: .libraryGame) else { return false }
         let target: String? = if row < gameRowCount, case .game(let state) = rows[row] { state.game.install.uid } else { nil }
         model.moveGame(id, before: target)
-        // Within the drop: the table moves the row with its own animation,
-        // and the dragged picture glides into the row's new place.
-        render()
+        // The gap already shows where the game goes: take the new order as
+        // it is, without animating the row from its old place (which slid
+        // it up from under the next row into the gap).
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            render()
+        }
         landed = true
         return true
     }
