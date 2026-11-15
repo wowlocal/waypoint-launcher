@@ -122,6 +122,8 @@ final class AppModel {
     /// storage alone), but nothing may write to it or be uninstalled.
     private var cleaningFolders: Set<String> = []
     private(set) var running: Set<String> = []
+    /// Each WoW version's add-ons, kept current automatically.
+    @ObservationIgnored let addOns = AddOnsModel()
     /// Game uid -> result of the last update check.
     private(set) var updates: [String: UpdateCheck] = [:]
     @ObservationIgnored private var updateCheckSchedule = UpdateCheckSchedule()
@@ -655,6 +657,11 @@ final class AppModel {
             guard updateCheckSchedule.complete(), !isPreparingToQuit else { break }
             announces = announces || updateCheckSchedule.followUpAnnounces
         } while true
+        // The add-ons too, at launch and with every background check; at
+        // most hourly, since nothing tells Waypoint an add-on has a release.
+        for game in discoveredGames where canManageAddOns(game) {
+            addOns.updateAutomatically(game, minimumInterval: 3600)
+        }
         return true
     }
 
@@ -963,10 +970,18 @@ final class AppModel {
 
     private func runDownload(uid: String) async {
         let request = downloads[uid]?.request
+        // While WoW updates (and can't be played), its add-ons update too.
+        if request?.kind == .update, let game = discoveredGames.first(where: { $0.id == uid }), canManageAddOns(game) {
+            addOns.updateAutomatically(game)
+        }
         if await downloadQueue.run(key: uid) == .completed {
             if let request, request.kind == .install { await rememberInstallLocation(request.install) }
             reload()
             await checkForUpdates(force: true)
+            // Again for the new build: authors release for the new patch.
+            if request?.kind == .update, let game = discoveredGames.first(where: { $0.id == uid }), canManageAddOns(game) {
+                addOns.updateAutomatically(game)
+            }
         }
     }
 
@@ -1078,18 +1093,22 @@ final class AppModel {
         catch { NSAlert(error: error).runModal(); return false }
     }
 
-    var hasActiveDownloads: Bool { downloadQueue.hasActiveJobs }
+    /// Downloads, or add-on work that mustn't stop halfway: quitting waits.
+    var hasActiveDownloads: Bool { downloadQueue.hasActiveJobs || addOns.isBusy }
     var downloadRecoveryError: String? {
         downloadQueue.restoreErrors.first.map { "Some unfinished downloads could not be restored. \($0)" }
     }
 
     func prepareToQuit() async -> Bool {
         isPreparingToQuit = true
+        // An add-on swap in progress finishes; downloads stop.
+        await addOns.prepareToQuit()
         do {
             try await downloadQueue.pauseAll()
             return true
         } catch {
             isPreparingToQuit = false
+            addOns.quitCancelled()
             NSAlert(error: error).runModal()
             return false
         }
@@ -1100,11 +1119,21 @@ final class AppModel {
     /// Whether `game` can be uninstalled now: it's on disk, and nothing in
     /// its folder is running, busy or has a download to resume (a paused
     /// WoW install keeps its data in the shared storage).
+    /// Whether the add-ons sheet and automatic updates apply: an installed
+    /// Mac WoW version whose drive is there and that nothing else is
+    /// removing.
+    func canManageAddOns(_ game: Game) -> Bool {
+        game.family == .worldOfWarcraft && game.install.platform == .macOS && game.isInstalled && !game.isOffline &&
+            !isPreparingToQuit && !isUninstalling(uid: game.id) &&
+            !uninstallingFolders.contains(Self.folderKey(game.install.installPath)) &&
+            !cleaningFolders.contains(Self.folderKey(game.install.installPath))
+    }
+
     func canUninstall(_ game: Game) -> Bool {
         let folder = Self.folderKey(game.install.installPath)
         let neighbours = discoveredGames.filter { Self.folderKey($0.install.installPath) == folder }
         return game.isInstalled && !isBusy(game) && !isRunning(game) && !cleaningFolders.contains(folder) &&
-            !neighbours.contains { isRunning($0) || isBusy(uid: $0.id) } &&
+            !neighbours.contains { isRunning($0) || isBusy(uid: $0.id) || addOns.isWorking($0) } &&
             !downloads.keys.contains { $0 != game.id && jobFolders[$0] == folder }
     }
 
@@ -1239,6 +1268,10 @@ final class AppModel {
     /// active one stays active.
     func play(_ game: Game, forceSignIn: Bool = false, as accountID: String? = nil) async {
         guard canPlay(game) else { return }
+        // Automatic add-on updates hold off from here until the game runs
+        // (then the process list holds them).
+        addOns.launching.insert(game.id)
+        defer { addOns.launching.remove(game.id) }
         guard acceptGraphicsLicense(for: WindowsTitle.forInstall(game.install)) else { return }
         let account: Account?
         if let accountID {
@@ -1796,6 +1829,7 @@ final class AppModel {
             windowsProcesses[game.id] = WineProcesses.gameAndLaunchers(
                 in: URL(fileURLWithPath: game.install.installPath), title: title, processes: processes)
         }
+        let wasRunning = running
         running = Set(discoveredGames.filter { game in
             if game.install.platform == .windows { return windowsProcesses[game.id]?.isEmpty == false }
             guard let app = game.appURL else { return false }
@@ -1804,6 +1838,7 @@ final class AppModel {
         for game in windowsGames {
             for pid in windowsProcesses[game.id] ?? [] { observeWindowsExit(pid: pid, game: game) }
         }
+        for game in discoveredGames where wasRunning.contains(game.id) && !running.contains(game.id) { addOns.gameQuit(game) }
     }
 
     private func observeWindowsExit(pid: Int32, game: Game) {

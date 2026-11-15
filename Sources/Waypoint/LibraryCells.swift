@@ -433,8 +433,11 @@ final class GameCell: NSView {
         if game.isInstalled {
             if !menu.items.isEmpty { menu.addItem(.separator()) }
             menu.addItem(ActionItem("Show in Finder") { NSWorkspace.shared.activateFileViewerSelecting([game.finderItem]) })
-            if let addOns = game.addOnsFolder {
-                menu.addItem(ActionItem("Open AddOns Folder") { NSWorkspace.shared.open(addOns) })
+            // Off the golden path, and reads nothing from the disk here.
+            if game.family == .worldOfWarcraft, game.install.platform == .macOS {
+                menu.addItem(ActionItem("Add-Ons…", enabled: model.canManageAddOns(game)) { [weak self] in
+                    self?.window?.contentViewController?.presentAsSheet(AddOnsSheet(game: game, model: model))
+                })
             }
         }
         // Unsupported games too: removing one is the one thing left to do with it.

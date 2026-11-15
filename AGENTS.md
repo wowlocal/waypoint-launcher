@@ -86,3 +86,24 @@ default it creates no status item at all, not even a hidden one: no
 after the user turns on "Show Waypoint in the menu bar" in Settings ▸
 Background (the `showsMenuBarItem` default), and removes it again when they
 turn it off. Keep it that way.
+
+## Add-ons
+
+`Sources/WaypointCore/AddOns` manages WoW add-ons; the ••• menu's
+"Add-Ons…" opens the sheet. Keep these rules:
+
+- **Only sources any app may download from:** GitHub releases with the
+  BigWigs packager's `release.json` (through GitHub's web links, not its
+  API), Tukui and WoWInterface. CurseForge's API needs a private key its
+  terms forbid shipping in an open-source app; Wago needs a paid key. Their
+  add-ons are listed as "Not Updated by Waypoint".
+- **GitHub repositories come only from `AddOnIndex`,** hand-checked to be the
+  author's own (`tools/addon-index/check.py` reads their folders and IDs).
+  No fuzzy matching, no third-party catalogue: a fork must never take over
+  an add-on's updates.
+- **Never touch `WTF`,** and change only folders an add-on owns. A replaced
+  copy Waypoint didn't install, or one someone changed, goes to the Trash.
+- **Automatic updates only for add-ons Waypoint installed or updated** (an
+  Update click is the say-so): with the game's own update, the background
+  check, and when the game quits. Never while the game is open or starting,
+  never on Play, never a changed add-on.
