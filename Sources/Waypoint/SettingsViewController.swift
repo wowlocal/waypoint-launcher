@@ -231,7 +231,10 @@ private final class BackgroundSettings: SettingsPane {
     private let loginItemsButton = NSButton(title: "Login Items Settings…", target: nil, action: nil)
     private let notificationsCheckbox = NSButton(checkboxWithTitle: "Notify me about updates", target: nil, action: nil)
     private lazy var notificationsNote = note()
-    private var changing = false
+    /// While macOS applies a click, its checkbox keeps showing what was
+    /// clicked: redrawing from the old status would flip it back and forth.
+    private var changingLogin = false
+    private var changingNotifications = false
     private var defaultsObserver: NSObjectProtocol?
     private var activeObserver: NSObjectProtocol?
 
@@ -288,19 +291,24 @@ private final class BackgroundSettings: SettingsPane {
 
         let integrated = services.supportsSystemIntegration
         let status = services.loginStatus
-        loginCheckbox.state = status == .enabled || status == .requiresApproval ? .on : .off
-        loginCheckbox.isEnabled = integrated && !changing
+        if !changingLogin { loginCheckbox.state = status == .enabled || status == .requiresApproval ? .on : .off }
+        loginCheckbox.isEnabled = integrated
         let needsApproval = status == .requiresApproval
         loginItemsButton.isHidden = !needsApproval
         show(loginNote, needsApproval ? "Allow Waypoint in Login Items to finish." : services.loginError)
 
         let notifications = defaults.bool(forKey: BackgroundPreferences.notificationsKey)
-        notificationsCheckbox.state = notifications ? .on : .off
-        notificationsCheckbox.isEnabled = integrated && !changing
+        if !changingNotifications { notificationsCheckbox.state = notifications ? .on : .off }
+        notificationsCheckbox.isEnabled = integrated
         show(notificationsNote, notifications && services.notificationStatus == .denied
              ? "Notifications for Waypoint are turned off in System Settings." : services.notificationsError)
-        if view.window != nil { fit() }
+        // Only a note appearing or going changes the pane's height.
+        let shape = [loginNote.isHidden, loginItemsButton.isHidden, notificationsNote.isHidden]
+        if shape != lastShape, view.window != nil { fit() }
+        lastShape = shape
     }
+
+    private var lastShape: [Bool] = []
 
     private func show(_ note: NSTextField, _ text: String?) {
         note.stringValue = text ?? ""
@@ -315,19 +323,22 @@ private final class BackgroundSettings: SettingsPane {
 
     @objc private func loginChanged() {
         let enabled = loginCheckbox.state == .on
-        changing = true; render()
+        // A click while the last one is applied: the box stays as it shows.
+        guard !changingLogin else { loginCheckbox.state = enabled ? .off : .on; return }
+        changingLogin = true
         Task {
             await services.setLoginEnabled(enabled)
-            changing = false; render()
+            changingLogin = false; render()
         }
     }
 
     @objc private func notificationsChanged() {
         let enabled = notificationsCheckbox.state == .on
-        changing = true; render()
+        guard !changingNotifications else { notificationsCheckbox.state = enabled ? .off : .on; return }
+        changingNotifications = true
         Task {
             await services.setNotificationsEnabled(enabled)
-            changing = false; render()
+            changingNotifications = false; render()
         }
     }
 
