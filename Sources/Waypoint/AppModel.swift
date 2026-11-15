@@ -126,6 +126,8 @@ final class AppModel {
     private(set) var updates: [String: UpdateCheck] = [:]
     @ObservationIgnored private var updateCheckSchedule = UpdateCheckSchedule()
     @ObservationIgnored var updateChecked: ((Game, UpdateCheck) -> Void)?
+    /// Game uid -> the latest build the background check confirmed on disk.
+    @ObservationIgnored private var confirmedUpdates: [String: String] = [:]
 
     /// nil = use the region each game was installed for.
     var regionOverride: Region? {
@@ -582,18 +584,30 @@ final class AppModel {
             !cleaningFolders.contains(Self.folderKey(game.install.installPath))
     }
 
-    /// Asks Blizzard's version service which build is live. Cheap (one small
-    /// request per game), throttled to every 15 minutes unless forced.
-    /// Refresh the existing off-main-thread installation scan before polling,
-    /// even while menu-only and inactive: another launcher may have updated a game.
+    /// The check every 30 minutes and after wake. It goes by the installs as
+    /// last read, so a sleeping external drive stays asleep. Only a build it
+    /// hasn't seen before has the installs read again (another launcher may
+    /// have installed it meanwhile) and checked once more before it's
+    /// announced.
     func checkForUpdatesInBackground() async {
         guard !isPreparingToQuit else { return }
-        if scanOffMainThread == nil { scanOffMainThreadOnce() }
-        while let scan = scanOffMainThread { await scan.value }
-        await checkForUpdates()
+        await checkForUpdates(announces: false)
+        let new = discoveredGames.compactMap { game -> (String, String)? in
+            guard let latest = availableUpdate(for: game)?.latest.buildConfig,
+                  confirmedUpdates[game.id] != latest else { return nil }
+            return (game.id, latest)
+        }
+        guard !new.isEmpty, !isPreparingToQuit else { return }
+        scanOffMainThreadOnce()
+        await scansFinished()
+        await checkForUpdates(force: true)
+        for (uid, build) in new { confirmedUpdates[uid] = build }
     }
 
-    func checkForUpdates(force: Bool = false) async {
+    /// Asks Blizzard's version service which build is live. Cheap (one small
+    /// request per game), throttled to every 15 minutes unless forced.
+    /// `announces`: tell `updateChecked` what was found.
+    func checkForUpdates(force: Bool = false, announces: Bool = true) async {
         // Do not consume the throttle on startup before external drives are read.
         while let scan = scanOffMainThread { await scan.value }
         guard !isPreparingToQuit,
@@ -608,7 +622,7 @@ final class AppModel {
                           current.isInstalled, current.install.version == game.install.version,
                           current.install.buildConfig == game.install.buildConfig else { continue }
                     updates[game.id] = check
-                    if downloads[game.id] == nil { updateChecked?(current, check) }
+                    if downloads[game.id] == nil, announces { updateChecked?(current, check) }
                     Log.info(.gameUpdate, "checked", nil, ["uid": game.id, "installed": game.install.version ?? "?",
                                                            "latest": check.latest.name, "update_available": check.isUpdateAvailable])
                 } catch {
