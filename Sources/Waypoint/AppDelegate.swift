@@ -63,8 +63,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     /// Closing the window doesn't quit (AppKit's default): game downloads and
     /// Sparkle's install-on-quit keep going. Reopening Waypoint (Dock click,
     /// Spotlight, Raycast, `open`) brings the library back.
+    /// Goes by the library, not by any window: with only Settings open,
+    /// reopening still brings the games back.
     func applicationShouldHandleReopen(_ sender: NSApplication, hasVisibleWindows: Bool) -> Bool {
-        if !hasVisibleWindows { showLibrary(nil) }
+        guard let window = libraryWindow, window.isVisible, !window.isMiniaturized else {
+            showLibrary(nil)
+            return false
+        }
         return true
     }
 
