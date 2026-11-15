@@ -1,8 +1,4 @@
-# Appearance and optional background mode
-
-Settings offers System, Light and Dark. System is the default and clears the
-AppKit appearance override; choosing Light or Dark applies immediately and is
-remembered without changing macOS itself.
+# Optional background mode
 
 The menu bar remains opt-in. A normal icon click toggles the library window;
 right-click or Control-click opens the quick-action menu. Closing the library

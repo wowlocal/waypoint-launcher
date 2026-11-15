@@ -18,7 +18,6 @@ final class SettingsViewController: NSViewController {
     private let loginSettings = NSButton(title: "Login Items Settings…", target: nil, action: nil)
     private var changingLogin = false
     private var changingNotifications = false
-    private let appearancePopup = NSPopUpButton()
     private let regionPopup = NSPopUpButton()
     private let menuBarCheckbox = NSButton(checkboxWithTitle: "Show Waypoint in the menu bar", target: nil, action: nil)
     private let artworkCheckbox = NSButton(checkboxWithTitle: "Show game artwork", target: nil, action: nil)
@@ -41,10 +40,6 @@ final class SettingsViewController: NSViewController {
     required init?(coder: NSCoder) { fatalError("init(coder:) is not used") }
 
     override func loadView() {
-        appearancePopup.addItems(withTitles: AppAppearance.Mode.allCases.map(\.title))
-        appearancePopup.target = self
-        appearancePopup.action = #selector(appearanceChanged)
-        appearancePopup.setAccessibilityLabel("Appearance")
         regionPopup.addItem(withTitle: "As Installed")
         regionPopup.addItems(withTitles: Region.allCases.map(\.displayName))
         regionPopup.target = self
@@ -114,7 +109,6 @@ final class SettingsViewController: NSViewController {
         updateOptions.spacing = 8
 
         let grid = NSGridView(views: [
-            [NSTextField(labelWithString: "Appearance:"), appearancePopup],
             [NSTextField(labelWithString: "Region:"), regionPopup],
             [NSGridCell.emptyContentView, regionNote],
             [NSTextField(labelWithString: "Background:"), backgroundOptions],
@@ -131,11 +125,11 @@ final class SettingsViewController: NSViewController {
         grid.rowAlignment = .firstBaseline
         grid.rowSpacing = 8
         grid.columnSpacing = 8
+        grid.row(at: 2).topPadding = 12
         grid.row(at: 3).topPadding = 12
-        grid.row(at: 4).topPadding = 12
-        grid.row(at: 6).topPadding = 12
-        grid.row(at: 8).topPadding = 12
-        grid.row(at: 11).topPadding = 12
+        grid.row(at: 5).topPadding = 12
+        grid.row(at: 7).topPadding = 12
+        grid.row(at: 10).topPadding = 12
 
         let container = NSView()
         grid.translatesAutoresizingMaskIntoConstraints = false
@@ -156,25 +150,13 @@ final class SettingsViewController: NSViewController {
         defaultsObserver = NotificationCenter.default.addObserver(
             forName: UserDefaults.didChangeNotification, object: nil, queue: .main) { [weak self] _ in
             MainActor.assumeIsolated {
-                self?.renderAppearance()
                 self?.renderBackground()
                 self?.renderMenuBar()
                 self?.renderSpeed()
             }
         }
-        renderAppearance()
         renderMenuBar()
         renderSpeed()
-    }
-
-    private func renderAppearance() {
-        appearancePopup.selectItem(at: AppAppearance.Mode.allCases.firstIndex(of: AppAppearance.selected) ?? 0)
-    }
-
-    @objc private func appearanceChanged() {
-        let index = appearancePopup.indexOfSelectedItem
-        guard AppAppearance.Mode.allCases.indices.contains(index) else { return }
-        AppAppearance.select(AppAppearance.Mode.allCases[index])
     }
 
     private func renderBackground() {
