@@ -19,13 +19,14 @@ final class InstallSheet: NSViewController {
     private var volume: Result<InstallVolume?, Error>?
 
     private let location = NSTextField.label(.body, color: .secondaryLabelColor)
-    /// The space free there, or why a game can't go there.
-    private let volumeText = NSTextField(wrappingLabelWithString: "")
-    private var volumeRow: NSGridRow?
+    /// The space free there, or why a game can't go there. Its line is kept
+    /// while that's read, so the sheet doesn't grow when it arrives.
+    private let volumeText = NSTextField(wrappingLabelWithString: " ")
     private let languagePicker: LanguagePicker
     private let regionPopup = NSPopUpButton()
     private let platformPopup = NSPopUpButton()
-    private let sizeSpinner = NSProgressIndicator.spinner()
+    /// The download size, or "Calculating…" in its place until it's known:
+    /// one line either way, so nothing moves when it arrives.
     private let sizeText = NSTextField.label(.body)
     private let installButton = NSButton(title: "Install", target: nil, action: nil)
 
@@ -76,15 +77,13 @@ final class InstallSheet: NSViewController {
             ? [[Self.formLabel("Version:"), platformPopup]] : []
         let grid = NSGridView(views: platformRows + [[Self.formLabel("Location:"), locationRow], [NSGridCell.emptyContentView, volumeText]] + languagePicker.rows + [
             [Self.formLabel("Region:"), regionPopup],
-            [Self.formLabel("Download:"), NSStackView(views: [sizeSpinner, sizeText])],
+            [Self.formLabel("Download:"), sizeText],
         ])
         grid.column(at: 0).xPlacement = .trailing
         grid.rowAlignment = .firstBaseline
         grid.rowSpacing = 10
         grid.columnSpacing = 8
-        volumeRow = grid.cell(for: volumeText)?.row
-        volumeRow?.topPadding = -4
-        volumeRow?.isHidden = true
+        grid.cell(for: volumeText)?.row?.topPadding = -4
 
         let cancel = NSButton(title: "Cancel", target: self, action: #selector(cancel))
         cancel.keyEquivalent = "\u{1b}"
@@ -173,8 +172,7 @@ final class InstallSheet: NSViewController {
         case .success(nil):
             break
         }
-        volumeText.stringValue = text ?? ""
-        volumeRow?.isHidden = text?.isEmpty ?? true
+        volumeText.stringValue = text.flatMap { $0.isEmpty ? nil : $0 } ?? " "
         volumeText.textColor = problem ? .systemRed : .secondaryLabelColor
         installButton.isEnabled = languages != nil && volume != nil && !problem
     }
@@ -206,11 +204,11 @@ final class InstallSheet: NSViewController {
     }
 
     private func show(size: Result<(download: UInt64, stored: UInt64), Error>?) {
-        sizeSpinner.isHidden = size != nil
-        if size == nil { sizeSpinner.startAnimation(nil) } else { sizeSpinner.stopAnimation(nil) }
         switch size {
         case nil:
-            sizeText.stringValue = ""
+            sizeText.stringValue = "Calculating…"
+            sizeText.textColor = .secondaryLabelColor
+            sizeText.toolTip = nil
         case .success(let bytes):
             let download = ByteCountFormatter.string(fromByteCount: Int64(bytes.download), countStyle: .file)
             sizeText.stringValue = bytes.stored == 0 ? download
