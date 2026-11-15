@@ -36,3 +36,35 @@ import Testing
     let games = [Game(id: "wow", uid: "wow"), Game(id: "heroes@windows", uid: "heroes")]
     #expect(LibraryOrder.sorted(games, by: ["heroes", "wow"], id: \.uid).map(\.id) == ["heroes@windows", "wow"])
 }
+
+@Test func aCarriedGameTakesThePlaceNearestToWhereItIsHeld() {
+    let heights = [68.0, 68, 68, 68]
+    // It stays until it covers half of the next row.
+    #expect(LibraryOrder.landing(from: 1, carried: 0, heights: heights) == 1)
+    #expect(LibraryOrder.landing(from: 1, carried: 33, heights: heights) == 1)
+    #expect(LibraryOrder.landing(from: 1, carried: -33, heights: heights) == 1)
+    // Down: before the row after the ones it passed, or at the end.
+    #expect(LibraryOrder.landing(from: 1, carried: 34, heights: heights) == 3)
+    #expect(LibraryOrder.landing(from: 1, carried: 101, heights: heights) == 3)
+    #expect(LibraryOrder.landing(from: 1, carried: 102, heights: heights) == 4)
+    #expect(LibraryOrder.landing(from: 1, carried: 5000, heights: heights) == 4)
+    // Up: before the first row it passed.
+    #expect(LibraryOrder.landing(from: 3, carried: -34, heights: heights) == 2)
+    #expect(LibraryOrder.landing(from: 3, carried: -102, heights: heights) == 1)
+    #expect(LibraryOrder.landing(from: 3, carried: -5000, heights: heights) == 0)
+    // Nowhere to go past the ends.
+    #expect(LibraryOrder.landing(from: 0, carried: -50, heights: heights) == 0)
+    #expect(LibraryOrder.landing(from: 3, carried: 50, heights: heights) == 3)
+}
+
+@Test func aCarriedGamePassesATallRowAtItsMiddleWhateverItsOwnHeight() {
+    // Its own height (a row hidden while dragged reports none) doesn't count.
+    let heights = [68.0, 0, 100, 68]
+    #expect(LibraryOrder.landing(from: 1, carried: 49, heights: heights) == 1)
+    #expect(LibraryOrder.landing(from: 1, carried: 50, heights: heights) == 3)
+    #expect(LibraryOrder.landing(from: 1, carried: 133, heights: heights) == 3)
+    #expect(LibraryOrder.landing(from: 1, carried: 134, heights: heights) == 4)
+    // Back up, the tall row is passed at the same place.
+    #expect(LibraryOrder.landing(from: 3, carried: -49, heights: [68, 68, 100, 0]) == 3)
+    #expect(LibraryOrder.landing(from: 3, carried: -50, heights: [68, 68, 100, 0]) == 2)
+}

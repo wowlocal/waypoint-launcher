@@ -27,6 +27,11 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
             }
         }
 
+        /// The installed game, if the row shows one.
+        var game: Game? {
+            if case .game(let row) = self { row.game } else { nil }
+        }
+
         /// Which kind of cell shows the row.
         var kind: Int {
             switch self {
@@ -78,10 +83,9 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
     private let model: AppModel
     private let appUpdater: AppUpdater
     private var rows: [Row] = []
-    /// Whether the drag in progress ended with a drop in the list.
-    private var landed = false
-    /// The drag in progress, if a game is being dragged.
-    private var session: NSDraggingSession?
+    /// A game dropped in the list, until its drag ends: its uid, and that
+    /// of the game it goes before (nil: last).
+    private var dropped: (uid: String, before: String?)?
 
     private let table = LibraryTable()
     private let scrollView = NSScrollView()
@@ -131,6 +135,7 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
         // Installed games can be dragged into another order.
         table.registerForDraggedTypes([.libraryGame])
         table.canDragRow = { [weak self] row in self?.gameRowCount ?? 0 > row }
+        table.dragEnded = { [weak self] in self?.dragEnded() }
         table.setDraggingSourceOperationMask(.move, forLocal: true)
         // Out of Waypoint, a game is its folder, as a link only: Terminal
         // pastes the path, Finder makes an alias rather than copying a game.
@@ -251,6 +256,10 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
     }
 
     private func show(_ newRows: [Row]) {
+        // The list stays as it is under a game being dragged: the table
+        // loses track of its rows when they change around the gap. What
+        // changed meanwhile shows when the drag ends.
+        guard table.lifted == nil else { return }
         var previousRows = rows
         rows = newRows
         let current = rows.map(\.id)
@@ -399,7 +408,7 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
 
     /// Installed games lead the list; drags start and land among them only.
     private var gameRowCount: Int {
-        rows.prefix { if case .game = $0 { true } else { false } }.count
+        rows.prefix { $0.game != nil }.count
     }
 
     func tableView(_ tableView: NSTableView, pasteboardWriterForRow row: Int) -> (any NSPasteboardWriting)? {
@@ -411,41 +420,49 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
 
     func tableView(_ tableView: NSTableView, validateDrop info: any NSDraggingInfo, proposedRow row: Int,
                    proposedDropOperation dropOperation: NSTableView.DropOperation) -> NSDragOperation {
-        guard info.draggingSource as? NSTableView === table else { return [] }
-        // Between two games, or after the last one; never on a row.
-        tableView.setDropRow(min(row, gameRowCount), dropOperation: .above)
+        guard info.draggingSource as? NSTableView === table, let lifted = table.lifted else { return [] }
+        // Between two games, or after the last one, whichever place is
+        // nearest to the card: `info` is where the card's middle is. The
+        // table asks as that enters a row, so a row of another height may
+        // make way a little late.
+        let carried = tableView.convert(info.draggingLocation, from: nil).y - lifted.frame.midY
+        let heights = (0..<gameRowCount).map { Double(tableView.rect(ofRow: $0).height) }
+        tableView.setDropRow(LibraryOrder.landing(from: lifted.row, carried: carried, heights: heights), dropOperation: .above)
         return .move
     }
 
     func tableView(_ tableView: NSTableView, acceptDrop info: any NSDraggingInfo, row: Int,
                    dropOperation: NSTableView.DropOperation) -> Bool {
-        guard let id = info.draggingPasteboard.string(forType: .libraryGame) else { return false }
-        let target: String? = if row < gameRowCount, case .game(let state) = rows[row] { state.game.install.uid } else { nil }
-        model.moveGame(id, before: target)
-        // The gap already shows where the game goes: take the new order as
-        // it is, without animating the row from its old place (which slid
-        // it up from under the next row into the gap).
-        NSAnimationContext.runAnimationGroup { context in
-            context.duration = 0
-            render()
+        guard let lifted = table.lifted, let uid = rows[lifted.row].game?.install.uid else { return false }
+        // The card glides from where it was let go into the gap: its own
+        // place, past the rows between.
+        let from = lifted.row
+        let passed = (row > from ? from + 1..<row : row..<from).reduce(0) { $0 + tableView.rect(ofRow: $1).height }
+        info.animatesToDestination = true
+        info.enumerateDraggingItems(options: [], for: tableView, classes: [NSPasteboardItem.self], searchOptions: [:]) { item, _, _ in
+            item.draggingFrame = lifted.frame.offsetBy(dx: 0, dy: row > from ? passed : -passed)
         }
-        landed = true
+        // The game moves when the drag ends, once the card is there.
+        if row != from { dropped = (uid, row < gameRowCount ? rows[row].game?.install.uid : nil) }
         return true
     }
 
-    /// The row's picture as a whole card, rounded as the game's picture is,
-    /// rather than the row's rectangle with a square edge on the left.
+    /// Notes where the game was picked up, and makes the row's picture a
+    /// whole card, rounded as the game's picture is, rather than the row's
+    /// rectangle with a square edge on the left.
     func tableView(_ tableView: NSTableView, draggingSession session: NSDraggingSession, willBeginAt screenPoint: NSPoint,
                    forRowIndexes rowIndexes: IndexSet) {
-        self.session = session
-        guard let row = rowIndexes.first, let rowView = tableView.rowView(atRow: row, makeIfNecessary: false),
-              let cell = rowView.view(atColumn: 0) as? NSView else { return }
-        // As the picture sits in the cell: 3 points in at the top and
-        // bottom, 8 out at the trailing edge, and the same at the leading.
-        let card = NSRect(x: cell.frame.minX - 8, y: 3, width: cell.frame.width + 16, height: rowView.bounds.height - 6)
+        guard let row = rowIndexes.first, let window = tableView.window else { return }
+        let pointer = tableView.convert(window.convertPoint(fromScreen: screenPoint), from: nil)
+        let rowView = tableView.rowView(atRow: row, makeIfNecessary: false)
         session.enumerateDraggingItems(options: [], for: tableView, classes: [NSPasteboardItem.self], searchOptions: [:]) { item, _, _ in
-            let components = item.imageComponents ?? []
             let frame = item.draggingFrame
+            self.table.lifted = (row, frame, frame.midY - pointer.y)
+            guard let rowView, let cell = rowView.view(atColumn: 0) as? NSView else { return }
+            // As the picture sits in the cell: 3 points in at the top and
+            // bottom, 8 out at the trailing edge, and the same at the leading.
+            let card = NSRect(x: cell.frame.minX - 8, y: 3, width: cell.frame.width + 16, height: rowView.bounds.height - 6)
+            let components = item.imageComponents ?? []
             let image = NSImage(size: frame.size, flipped: false) { _ in
                 NSBezierPath(roundedRect: card, xRadius: 12, yRadius: 12).addClip()
                 for component in components {
@@ -461,23 +478,32 @@ final class LibraryViewController: NSViewController, NSTableViewDataSource, NSTa
         }
     }
 
-    func tableView(_ tableView: NSTableView, draggingSession session: NSDraggingSession, endedAt screenPoint: NSPoint,
-                   operation: NSDragOperation) {
-        // The table hides the dragged row's view during the drag and shows
-        // the one at its old index again after; once the rows have moved,
-        // that's another view, and the hidden one could be reused for any
-        // row (Available Games, say) and stay invisible. Show them all.
-        tableView.enumerateAvailableRowViews { rowView, _ in rowView.isHidden = false }
-        // Let go outside the list, or handed to Terminal: every row comes
-        // back as it was, the dragged one included.
-        if !landed { tableView.reloadData() }
-        landed = false
-        self.session = nil
+    /// As a drag ends, the table closes the gap and shows the dragged row
+    /// again where it was. A dropped game goes to its new place right then,
+    /// at once, before any of that is seen: the rows stay where the gap
+    /// left them, which is their new order, and the row shows where its
+    /// card landed. Moved any sooner, while its row was still hidden, the
+    /// table lost track of its rows; moved with the list's usual animation,
+    /// the row slid there from its old place across the others.
+    private func dragEnded() {
+        // A row view hidden for the drag that the list, scrolling, gave to
+        // another row meanwhile would stay hidden.
+        table.enumerateAvailableRowViews { rowView, _ in rowView.isHidden = false }
+        guard let dropped else {
+            render()
+            return
+        }
+        self.dropped = nil
+        model.moveGame(dropped.uid, before: dropped.before)
+        NSAnimationContext.runAnimationGroup { context in
+            context.duration = 0
+            render()
+        }
     }
 
     /// A reused row view is never one left hidden by a drag.
     func tableView(_ tableView: NSTableView, didAdd rowView: NSTableRowView, forRow row: Int) {
-        if session == nil { rowView.isHidden = false }
+        if table.lifted == nil { rowView.isHidden = false }
     }
 
     func tableView(_ tableView: NSTableView, shouldSelectRow row: Int) -> Bool { false }
@@ -530,13 +556,96 @@ private final class GameDragWriter: NSObject, NSPasteboardWriting {
 
 /// The library's table: only installed games can be picked up. Asked before a
 /// drag starts, so another row (an available game, Available Games) is never
-/// lifted and hidden with nothing to drop.
+/// lifted and hidden with nothing to drop. A dragged game makes room by
+/// where its card is, and `dragEnded` says when the table is done with it.
 @MainActor
 private final class LibraryTable: NSTableView {
     var canDragRow: ((Int) -> Bool)?
+    /// The game being dragged: its row, its card's frame where it was
+    /// picked up, and how far under the pointer the card's middle is.
+    var lifted: (row: Int, frame: NSRect, grab: CGFloat)?
+    /// Called once a drag is over and the table has tidied up after it.
+    var dragEnded: (() -> Void)?
 
     override func canDragRows(with rowIndexes: IndexSet, at mouseDownPoint: NSPoint) -> Bool {
         !rowIndexes.isEmpty && rowIndexes.allSatisfy { canDragRow?($0) ?? false }
             && super.canDragRows(with: rowIndexes, at: mouseDownPoint)
+    }
+
+    // The table's delegate hears that a drag ended before the table has
+    // closed the gap and shown the dragged row again; `dragEnded`, after.
+    override func draggingSession(_ session: NSDraggingSession, endedAt screenPoint: NSPoint, operation: NSDragOperation) {
+        super.draggingSession(session, endedAt: screenPoint, operation: operation)
+        lifted = nil
+        dragEnded?()
+    }
+
+    // A table opens the gap by where the pointer is, and only asks where
+    // to open it as the pointer enters a row: a card held by its lower edge
+    // covered the whole row above before that row made way. So it is told
+    // where the card's middle is instead.
+    override func draggingEntered(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        super.draggingEntered(card(sender))
+    }
+
+    override func draggingUpdated(_ sender: any NSDraggingInfo) -> NSDragOperation {
+        super.draggingUpdated(card(sender))
+    }
+
+    private func card(_ drag: any NSDraggingInfo) -> any NSDraggingInfo {
+        guard let lifted, drag.draggingSource as? NSTableView === self else { return drag }
+        return CardDrag(drag, in: self, grab: lifted.grab)
+    }
+}
+
+/// A drag as it is, except for where: at the middle of the dragged card,
+/// `grab` under the pointer in `table`.
+private final class CardDrag: NSObject, NSDraggingInfo {
+    private let drag: any NSDraggingInfo
+    private let table: NSTableView
+    private let grab: CGFloat
+
+    init(_ drag: any NSDraggingInfo, in table: NSTableView, grab: CGFloat) {
+        self.drag = drag
+        self.table = table
+        self.grab = grab
+    }
+
+    var draggingLocation: NSPoint {
+        var middle = table.convert(drag.draggingLocation, from: nil)
+        middle.y += grab
+        return table.convert(middle, to: nil)
+    }
+
+    var draggingDestinationWindow: NSWindow? { drag.draggingDestinationWindow }
+    var draggingSourceOperationMask: NSDragOperation { drag.draggingSourceOperationMask }
+    var draggedImageLocation: NSPoint { drag.draggedImageLocation }
+    var draggedImage: NSImage? { nil } // Deprecated: the pictures are the dragging items'.
+    var draggingPasteboard: NSPasteboard { drag.draggingPasteboard }
+    var draggingSource: Any? { drag.draggingSource }
+    var draggingSequenceNumber: Int { drag.draggingSequenceNumber }
+    var springLoadingHighlight: NSSpringLoadingHighlight { drag.springLoadingHighlight }
+    var draggingFormation: NSDraggingFormation {
+        get { drag.draggingFormation }
+        set { drag.draggingFormation = newValue }
+    }
+    var animatesToDestination: Bool {
+        get { drag.animatesToDestination }
+        set { drag.animatesToDestination = newValue }
+    }
+    var numberOfValidItemsForDrop: Int {
+        get { drag.numberOfValidItemsForDrop }
+        set { drag.numberOfValidItemsForDrop = newValue }
+    }
+
+    /// Whatever else the table asks, it asks the drag itself.
+    override func forwardingTarget(for selector: Selector!) -> Any? { drag }
+
+    func slideDraggedImage(to screenPoint: NSPoint) { drag.slideDraggedImage(to: screenPoint) }
+    func resetSpringLoading() { drag.resetSpringLoading() }
+    func enumerateDraggingItems(options: NSDraggingItemEnumerationOptions, for view: NSView?, classes: [AnyClass],
+                                searchOptions: [NSPasteboard.ReadingOptionKey: Any],
+                                using block: @escaping (NSDraggingItem, Int, UnsafeMutablePointer<ObjCBool>) -> Void) {
+        drag.enumerateDraggingItems(options: options, for: view, classes: classes, searchOptions: searchOptions, using: block)
     }
 }

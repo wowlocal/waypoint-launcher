@@ -17,6 +17,28 @@ public enum LibraryOrder {
         }.map(\.element)
     }
 
+    /// Where a game picked up from row `from` goes once it has been carried
+    /// `carried` points down the list (negative: up): the row it would be
+    /// dropped before, `from` while it stays, the rows' count for the end.
+    /// It passes a row once it covers half of it, so it takes the place
+    /// nearest to where it is held. `heights`: the rows' heights; its own
+    /// doesn't count.
+    public static func landing(from: Int, carried: Double, heights: [Double]) -> Int {
+        var row = from, passed = 0.0
+        if carried > 0 {
+            while row + 1 < heights.count, carried >= passed + heights[row + 1] / 2 {
+                row += 1
+                passed += heights[row]
+            }
+            return row == from ? from : row + 1
+        }
+        while row > 0, -carried >= passed + heights[row - 1] / 2 {
+            row -= 1
+            passed += heights[row]
+        }
+        return row
+    }
+
     /// The order after `moved` is dropped before `target` (nil: at the end)
     /// in the list `shown`. Games remembered but not shown (on a drive not
     /// read yet, say) keep their places: each stays after the shown game it
