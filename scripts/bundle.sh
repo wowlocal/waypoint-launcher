@@ -11,6 +11,8 @@
 #                  on S3 for signed builds (see release.sh); ad-hoc builds get
 #                  none, so development copies never replace themselves.
 #   BUNDLE_ID      bundle identifier (default: dev.waypoint.launcher)
+#   CHANNEL        "tip" marks a tip build (WaypointChannel in Info.plist); it
+#                  must not use the release feed. Default: stable.
 #   WINDOWS_RUNTIME signed download descriptor directory (default:
 #                  build/windows-runtime-release/distribution if present).
 #                  A staged full runtime remains supported for local builds.
@@ -41,6 +43,12 @@ if [[ "${WINDOWS_EXPERIMENTAL:-0}" == "1" && "$feed" == "https://storage.yandexc
     print -u2 "Experimental builds cannot use the production Sparkle feed"
     exit 1
 fi
+channel="${CHANNEL:-stable}"
+[[ "$channel" == "stable" || "$channel" == "tip" ]] || { print -u2 "CHANNEL must be stable or tip"; exit 1 }
+if [[ "$channel" == "tip" && "$feed" == "https://storage.yandexcloud.net/macos-releases/waypoint/appcast.xml" ]]; then
+    print -u2 "Tip builds cannot use the release feed"
+    exit 1
+fi
 # Public half of the EdDSA key that signs updates; the private half lives in
 # the release machine's keychain (generate_keys --account waypoint).
 sparkle_public_key="mfL3STHC28BUAVXlUOjMVv0pZ8noAtFWM115ekfpbsg="
@@ -67,6 +75,8 @@ windows_experimental=""
 if [[ "${WINDOWS_EXPERIMENTAL:-0}" == "1" ]]; then
     windows_experimental="    <key>WaypointWindowsExperimental</key><true/>"
 fi
+channel_keys=""
+[[ "$channel" == "stable" ]] || channel_keys="    <key>WaypointChannel</key><string>${channel}</string>"
 if [[ -n "$feed" ]]; then
     # Check, download and install without asking; Waypoint shows progress
     # inline and installs on quit (see AppUpdater.swift).
@@ -99,6 +109,7 @@ cat > "$app/Contents/Info.plist" <<PLIST
          keep them dirty after they're freed (80 MB vs 6 MB idle afterwards). -->
     <key>LSEnvironment</key><dict><key>MallocLargeCache</key><string>0</string></dict>
 ${windows_experimental}
+${channel_keys}
 ${sparkle_keys}
 </dict>
 </plist>

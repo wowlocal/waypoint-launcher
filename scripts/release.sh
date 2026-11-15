@@ -6,6 +6,16 @@
 #
 #   scripts/release.sh 0.2.0             # → dist/Waypoint-0.2.0.dmg (+ .sha256, appcast.xml)
 #   scripts/release.sh 0.2.0 --publish   # …tag v0.2.0, upload to S3, create the GitHub release
+#   scripts/release.sh tip --publish     # a tip build of this branch, on the tip feed
+#
+# Tip builds (like Ghostty's) are for trying what's next: experimental work
+# that may live on a branch. A tip is built from the checked-out branch,
+# which must contain the latest origin/main: tips are main plus more, never
+# behind it. It is versioned after the latest release (1.1.4-tip.195), has
+# its own feed (waypoint/tip/appcast.xml), which only tip builds follow, and
+# replaces the GitHub pre-release tagged "tip". Stable users never see one.
+# Tips reuse the published Windows runtime. The "tip" tag moves: a clone
+# that fetched it before needs `git fetch --tags --force` (or `git tag -d tip`).
 #
 # --publish needs S3 credentials in AWS_ACCESS_KEY_ID / AWS_SECRET_ACCESS_KEY,
 # or in scripts/release.env (gitignored, same format as snippets' Distribution/.env).
@@ -35,8 +45,10 @@ version="${1:-}"
 publish=0
 mode="${2:-}"
 [[ "$mode" == "--publish" || "$mode" == "--publish-only" ]] && publish=1
-[[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && ( -z "$mode" || "$mode" == "--publish" || "$mode" == "--publish-only" ) ]] \
-    || fail "usage: scripts/release.sh <x.y.z> [--publish|--publish-only]"
+channel=stable
+[[ "$version" == "tip" ]] && channel=tip
+[[ ( "$channel" == "tip" || "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ) && ( -z "$mode" || "$mode" == "--publish" || "$mode" == "--publish-only" ) ]] \
+    || fail "usage: scripts/release.sh <x.y.z|tip> [--publish|--publish-only]"
 
 tag="v$version"
 repo_url="https://github.com/wowlocal/waypoint-launcher"
@@ -49,7 +61,82 @@ s3_bucket="macos-releases"
 s3_prefix="waypoint"
 public_base="$s3_endpoint/$s3_bucket/$s3_prefix"
 feed_url="$public_base/appcast.xml"
+# Where this channel's DMGs and feed go: the prefix itself, or tip/ in it.
+channel_prefix="$s3_prefix"
+build_number=""
 s3() { aws s3 "$@" --endpoint-url "$s3_endpoint" --region "$s3_region" }
+
+# The build number in the live tip feed; empty only when there is no tip yet.
+# Any other failure stops the run: guessing low would strand tip users.
+live_tip_build() {
+    local body code build
+    body="$(mktemp)"
+    code="$(curl -sS --max-time 30 -o "$body" -w '%{http_code}' "$feed_url")" || { rm -f "$body"; fail "can't read $feed_url" }
+    case "$code" in
+        403|404) rm -f "$body"; return 0 ;;
+        200) ;;
+        *) rm -f "$body"; fail "$feed_url answered HTTP $code" ;;
+    esac
+    build="$(sed -n 's/.*sparkle:version="\([0-9]*\)".*/\1/p;s/.*<sparkle:version>\([0-9]*\)<.*/\1/p' "$body" | sort -n | tail -1)"
+    rm -f "$body"
+    [[ -n "$build" ]] || fail "can't find the build number in $feed_url"
+    print -r -- "$build"
+}
+
+# The newest release whose assets include the Windows runtime in
+# build/windows-runtime-release (stable releases that reuse it don't attach it).
+newest_release_with_windows_runtime() {
+    python3 - "${WINDOWS_COMPONENT_RELEASE:-build/windows-runtime-release}/publication.json" <<'PYNEWEST'
+import json,subprocess,sys
+required={a["name"] for a in json.load(open(sys.argv[1]))["assets"]}
+required|={n+".sha256" for n in list(required)}
+tags=json.loads(subprocess.check_output(["gh","release","list","--limit","50","--json","tagName,isDraft"],text=True))
+for release in tags:
+    if release["isDraft"] or not release["tagName"].startswith("v"):
+        continue
+    assets=json.loads(subprocess.check_output(["gh","release","view",release["tagName"],"--json","assets"],text=True))["assets"]
+    if required <= {a["name"] for a in assets}:
+        print(release["tagName"]); break
+else:
+    sys.exit(1)
+PYNEWEST
+}
+
+if [[ "$channel" == "tip" ]]; then
+    channel_prefix="$s3_prefix/tip"
+    feed_url="$public_base/tip/appcast.xml"
+    tag="tip"
+    git fetch -q origin
+    latest_release="$(git describe --tags --abbrev=0 --match 'v[0-9]*' origin/main 2>/dev/null)" \
+        || fail "no release tag on origin/main to version the tip after"
+    if [[ "$mode" == "--publish-only" ]]; then
+        # The prepared build is pinned by dist/release.json; main may have
+        # moved on since, which doesn't matter for publishing it.
+        version="$(python3 -c 'import json; print(json.load(open("dist/release.json"))["version"])')"
+        [[ "$version" == *-tip.* ]] || fail "dist/ holds no prepared tip build"
+        build_number="${version##*-tip.}"
+    else
+        # Tips are main plus more: never one that lacks something on main.
+        git merge-base --is-ancestor origin/main HEAD \
+            || fail "this branch doesn't contain the latest origin/main; merge or rebase it onto main first"
+        base="${latest_release#v}"
+        # One more than the live tip if that's higher: tips from different
+        # branches still count up, so Sparkle always offers the newest.
+        build_number="$(git rev-list --count HEAD)"
+        previous="$(live_tip_build)"
+        [[ -z "$previous" ]] || (( build_number > previous )) || build_number=$(( previous + 1 ))
+        version="${base%.*}.$(( ${base##*.} + 1 ))-tip.$build_number"
+    fi
+    # Tips reuse the newest published Windows runtime; they never publish one.
+    [[ -z "${REUSE_WINDOWS_ASSETS_FROM+set}" || -n "$REUSE_WINDOWS_ASSETS_FROM" ]] \
+        || fail "tips reuse a published Windows runtime; leave REUSE_WINDOWS_ASSETS_FROM unset or name a release"
+    if [[ -z "${REUSE_WINDOWS_ASSETS_FROM:-}" ]]; then
+        REUSE_WINDOWS_ASSETS_FROM="$(newest_release_with_windows_runtime)" \
+            || fail "no published release carries this Windows runtime"
+    fi
+    step "Tip $version from $(git rev-parse --abbrev-ref HEAD) @ $(git rev-parse --short HEAD)"
+fi
+download_base="$s3_endpoint/$s3_bucket/$channel_prefix"
 
 if [[ -f scripts/release.env ]]; then
     set -a
@@ -109,7 +196,11 @@ private_key_public_half="$("$sparkle_bin/generate_keys" --account waypoint -p 2>
 [[ -n "$private_key_public_half" ]] || fail "no Sparkle signing key in the keychain (account \"waypoint\")"
 [[ "$(<scripts/bundle.sh)" == *"sparkle_public_key=\"$private_key_public_half\""* ]] \
     || fail "the keychain's Sparkle key doesn't match the public key in scripts/bundle.sh; updates would be rejected"
-if (( publish )); then
+if (( publish )) && [[ "$channel" == "tip" ]]; then
+    gh auth status >/dev/null 2>&1 || fail "gh is not logged in"
+    command -v aws >/dev/null || fail "aws CLI not found (brew install awscli)"
+    s3 ls "s3://$s3_bucket/" >/dev/null || fail "can't reach s3://$s3_bucket/; check the S3 credentials"
+elif (( publish )); then
     if git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then
         [[ "$(git rev-list -n 1 "$tag")" == "$(git rev-parse HEAD)" ]] || fail "tag $tag points to another commit"
         [[ "$mode" == "--publish-only" ]] || fail "tag already exists; resume the exact artifacts with --publish-only"
@@ -129,7 +220,8 @@ step "Testing"
 xcrun swift test
 
 step "Building Waypoint $version"
-APP_PATH="$app" VERSION="$version" SIGN_IDENTITY="$identity" scripts/bundle.sh
+APP_PATH="$app" VERSION="$version" SIGN_IDENTITY="$identity" SPARKLE_FEED="$feed_url" CHANNEL="$channel" \
+    BUILD_NUMBER="${build_number:-$(git rev-list --count HEAD)}" scripts/bundle.sh
 codesign --verify --deep --strict "$app"
 [[ -n "$reuse_windows_from" ]] || python3 scripts/validate-windows-publication.py "$component" --app "$app"
 [[ "$(/usr/libexec/PlistBuddy -c 'Print SUFeedURL' "$app/Contents/Info.plist")" == "$feed_url" ]] \
@@ -190,13 +282,13 @@ feed_dir="$(mktemp -d)"
 cp "$dmg" "$feed_dir/"
 # One item per release and no deltas. The Windows runtime is separate and reused.
 "$sparkle_bin/generate_appcast" --account waypoint --maximum-deltas 0 \
-    --download-url-prefix "$public_base/" --link "$repo_url" \
+    --download-url-prefix "$download_base/" --link "$repo_url" \
     -o "$dist/appcast.xml" "$feed_dir"
 rm -rf "$feed_dir"
 signature="$(sed -n 's/.*sparkle:edSignature="\([^"]*\)".*/\1/p' "$dist/appcast.xml" | awk 'NR == 1')"
 [[ -n "$signature" ]] || fail "appcast has no EdDSA signature"
 "$sparkle_bin/sign_update" --account waypoint --verify "$dmg" "$signature" || fail "appcast signature doesn't match the DMG"
-grep -q "url=\"$public_base/${dmg:t}\"" "$dist/appcast.xml" || fail "appcast points somewhere unexpected"
+grep -q "url=\"$download_base/${dmg:t}\"" "$dist/appcast.xml" || fail "appcast points somewhere unexpected"
 print -P "%F{green}Ready:%f $dmg"
 python3 - "$version" "$dmg" "$dist/appcast.xml" "$component/publication.json" <<'PY'
 import hashlib,json,pathlib,subprocess,sys
@@ -206,6 +298,41 @@ d={"version":version,"commit":subprocess.check_output(["git","rev-parse","HEAD"]
 pathlib.Path("dist/release.json").write_text(json.dumps(d,indent=2)+"\n")
 PY
 fi
+
+# The tip: a link that always gets the newest, the moving "tip" tag and
+# pre-release, then the feed, which is what tip copies update from.
+publish_tip() {
+    local latest="$dist/Waypoint-Tip.dmg" branch notes live
+    [[ "$channel_prefix" == "$s3_prefix/tip" ]] || fail "tip publishing outside the tip prefix"
+    # Another tip may have gone out since this one was built.
+    live="$(live_tip_build)"
+    [[ -z "$live" ]] || (( build_number > live )) || fail "the live tip ($live) is as new as this one ($build_number); build again"
+    cp "$dmg" "$latest"
+    (cd "$dist" && shasum -a 256 "${latest:t}" >"${latest:t}.sha256")
+    s3 cp "$latest" "s3://$s3_bucket/$channel_prefix/${latest:t}" --content-type application/x-apple-diskimage --cache-control no-cache
+    branch="$(git rev-parse --abbrev-ref HEAD)"
+    git tag -f -a tip -m "Waypoint $version" >/dev/null
+    git push -f -q origin refs/tags/tip
+    notes="$(mktemp)"
+    {
+        print "**Tip build: Waypoint $version**, from \`$branch\` at $(git rev-parse --short HEAD), on top of the latest \`main\`."
+        print
+        print "Tip builds carry experimental work that hasn't been released. They update to the next tip on their own; to go back to stable releases, install the [latest release]($repo_url/releases/latest) over it."
+        print
+        print "Download: [Waypoint-Tip.dmg]($download_base/${latest:t}) · $(awk '{print $1}' "$latest.sha256")"
+        [[ -z "${NOTES_FILE:-}" ]] || { print; cat "$NOTES_FILE" }
+    } >"$notes"
+    if gh release view tip >/dev/null 2>&1; then
+        gh release edit tip --prerelease --latest=false --title "Waypoint Tip" --notes-file "$notes"
+        gh release upload tip "$latest" "$latest.sha256" --clobber
+    else
+        gh release create tip "$latest" "$latest.sha256" --prerelease --latest=false --title "Waypoint Tip" --notes-file "$notes" --verify-tag
+    fi
+    rm -f "$notes"
+    s3 cp "$dist/appcast.xml" "s3://$s3_bucket/$channel_prefix/appcast.xml" --content-type application/xml --cache-control no-cache
+    curl -fs "$feed_url" | cmp -s - "$dist/appcast.xml" || fail "the public feed at $feed_url doesn't match the new appcast"
+    print -P "%F{green}Live tip:%f $feed_url"
+}
 
 if (( publish )); then
     python3 - "$version" <<'PY'
@@ -244,10 +371,14 @@ PY
     )
     (( ${#assets} == 4 )) || fail "not every component asset was published"
     fi
-    step "Uploading to s3://$s3_bucket/$s3_prefix/"
-    s3 cp "$dmg" "s3://$s3_bucket/$s3_prefix/${dmg:t}" --content-type application/x-apple-diskimage
-    [[ "$(curl -fsI "$public_base/${dmg:t}" | awk 'tolower($1) == "content-length:" { print $2 + 0 }')" == "$(stat -f %z "$dmg")" ]] \
-        || fail "$public_base/${dmg:t} isn't publicly served at the right size"
+    step "Uploading to s3://$s3_bucket/$channel_prefix/"
+    s3 cp "$dmg" "s3://$s3_bucket/$channel_prefix/${dmg:t}" --content-type application/x-apple-diskimage
+    [[ "$(curl -fsI "$download_base/${dmg:t}" | awk 'tolower($1) == "content-length:" { print $2 + 0 }')" == "$(stat -f %z "$dmg")" ]] \
+        || fail "$download_base/${dmg:t} isn't publicly served at the right size"
+    if [[ "$channel" == "tip" ]]; then
+        publish_tip
+        exit 0
+    fi
     if ! git rev-parse -q --verify "refs/tags/$tag" >/dev/null; then git tag -a "$tag" -m "Waypoint $version"; fi
     git push origin "$tag"
     step "Staging GitHub release"
