@@ -2,15 +2,10 @@ import Foundation
 import Testing
 @testable import WaypointCore
 
-@Test func automaticUpdateChecksDefaultOnButRespectOptOut() throws {
+@Test func backgroundPreferencesAreOffByDefault() throws {
     let suite = "WaypointCoreTests.updatePreferences.\(UUID())"
     let defaults = try #require(UserDefaults(suiteName: suite))
     defer { defaults.removePersistentDomain(forName: suite) }
-    #expect(UpdatePreferences.automatic(in: defaults))
-    defaults.set(false, forKey: UpdatePreferences.automaticKey)
-    #expect(!UpdatePreferences.automatic(in: defaults))
-    defaults.set(true, forKey: UpdatePreferences.automaticKey)
-    #expect(UpdatePreferences.automatic(in: defaults))
     #expect(!defaults.bool(forKey: UpdatePreferences.notificationsKey))
     #expect(!defaults.bool(forKey: UpdatePreferences.hideDockKey))
 }
@@ -33,32 +28,23 @@ import Testing
 @Test func forcedRefreshDuringBackgroundPassIsCoalescedButNeverLost() {
     var schedule = UpdateCheckSchedule()
     let now = Date(timeIntervalSince1970: 10000)
-    let result1 = schedule.request(force: false, automatic: true, now: now)
-    #expect(result1)
-    let result2 = !schedule.request(force: true, automatic: true, now: now)
-    #expect(result2)
-    let result3 = !schedule.request(force: true, automatic: true, now: now)
-    #expect(result3)
-    // A completed install requests force:true while another title is waiting.
-    let result4 = schedule.complete(now: now)
-    #expect(result4)
-    let result5 = !schedule.complete(now: now)
-    #expect(result5)
-    let result6 = !schedule.request(force: false, automatic: true, now: now.addingTimeInterval(899))
-    #expect(result6)
-    let result7 = schedule.request(force: false, automatic: true, now: now.addingTimeInterval(900))
-    #expect(result7)
-    let result8 = !schedule.complete(now: now)
-    #expect(result8)
+    let first = schedule.request(force: false, now: now)
+    // A completed install asks for a forced pass while another is running.
+    let forcedWhileRunning = schedule.request(force: true, now: now)
+    let forcedAgain = schedule.request(force: true, now: now)
+    let runsFollowUp = schedule.complete(now: now)
+    let followUpDone = schedule.complete(now: now)
+    #expect(first && !forcedWhileRunning && !forcedAgain && runsFollowUp && !followUpDone)
+    // Unforced checks stay throttled to every 15 minutes.
+    let tooSoon = schedule.request(force: false, now: now.addingTimeInterval(899))
+    let later = schedule.request(force: false, now: now.addingTimeInterval(900))
+    #expect(!tooSoon && later)
 }
 
-@Test func automaticOptOutStillAllowsManualCheckAndCancellationAllowsRetry() {
+@Test func cancellationAllowsRetry() {
     var schedule = UpdateCheckSchedule()
-    let result9 = !schedule.request(force: false, automatic: false)
-    #expect(result9)
-    let result10 = schedule.request(force: true, automatic: false)
-    #expect(result10)
+    let first = schedule.request(force: true)
     schedule.cancel()
-    let result11 = schedule.request(force: true, automatic: false)
-    #expect(result11)
+    let retry = schedule.request(force: true)
+    #expect(first && retry)
 }

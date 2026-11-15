@@ -45,7 +45,7 @@ final class BackgroundServices: NSObject, UNUserNotificationCenterDelegate {
         }
         announceAppUpdate = { [weak updater] in updater?.announceAvailableUpdate() }
         let check: @MainActor () -> Void = { [weak model] in
-            guard UpdatePreferences.automatic(), let model, !model.isPreparingToQuit else { return }
+            guard let model, !model.isPreparingToQuit else { return }
             Task { await model.checkForUpdatesInBackground() }
         }
         timer = Timer.scheduledTimer(withTimeInterval: 30 * 60, repeats: true) { _ in

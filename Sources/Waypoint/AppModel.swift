@@ -587,7 +587,7 @@ final class AppModel {
     /// Refresh the existing off-main-thread installation scan before polling,
     /// even while menu-only and inactive: another launcher may have updated a game.
     func checkForUpdatesInBackground() async {
-        guard !isPreparingToQuit, UpdatePreferences.automatic() else { return }
+        guard !isPreparingToQuit else { return }
         if scanOffMainThread == nil { scanOffMainThreadOnce() }
         while let scan = scanOffMainThread { await scan.value }
         await checkForUpdates()
@@ -597,7 +597,7 @@ final class AppModel {
         // Do not consume the throttle on startup before external drives are read.
         while let scan = scanOffMainThread { await scan.value }
         guard !isPreparingToQuit,
-              updateCheckSchedule.request(force: force, automatic: UpdatePreferences.automatic()) else { return }
+              updateCheckSchedule.request(force: force) else { return }
         defer { updateCheckSchedule.cancel() }
         repeat {
             for game in discoveredGames where (game.family != .other || GameUpdate.canUpdate(game.install)) && game.isInstalled {

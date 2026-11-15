@@ -10,7 +10,6 @@ final class SettingsViewController: NSViewController {
     private let backgroundServices: BackgroundServices
     private let hideDockCheckbox = NSButton(checkboxWithTitle: "Hide Dock icon (menu bar only)", target: nil, action: nil)
     private let loginCheckbox = NSButton(checkboxWithTitle: "Start Waypoint at login", target: nil, action: nil)
-    private let automaticCheckbox = NSButton(checkboxWithTitle: "Automatically check for game updates", target: nil, action: nil)
     private let notificationsCheckbox = NSButton(checkboxWithTitle: "Notify me when updates are available", target: nil, action: nil)
     private let testNotificationButton = NSButton(title: "Send Test Notification", target: nil, action: nil)
     private let notificationTestNote = NSTextField(wrappingLabelWithString: "")
@@ -86,7 +85,6 @@ final class SettingsViewController: NSViewController {
         for (button, action) in [
             (hideDockCheckbox, #selector(hideDockChanged)),
             (loginCheckbox, #selector(loginChanged)),
-            (automaticCheckbox, #selector(automaticChanged)),
             (notificationsCheckbox, #selector(notificationsChanged)),
             (loginSettings, #selector(openLoginSettings)),
             (testNotificationButton, #selector(sendTestNotification)),
@@ -103,7 +101,7 @@ final class SettingsViewController: NSViewController {
         backgroundOptions.orientation = .vertical
         backgroundOptions.alignment = .leading
         backgroundOptions.spacing = 8
-        let updateOptions = NSStackView(views: [automaticCheckbox, notificationsCheckbox, testNotificationButton, notificationTestNote, backgroundNote])
+        let updateOptions = NSStackView(views: [notificationsCheckbox, testNotificationButton, notificationTestNote, backgroundNote])
         updateOptions.orientation = .vertical
         updateOptions.alignment = .leading
         updateOptions.spacing = 8
@@ -162,7 +160,6 @@ final class SettingsViewController: NSViewController {
     private func renderBackground() {
         let defaults = UserDefaults.standard
         hideDockCheckbox.state = defaults.bool(forKey: UpdatePreferences.hideDockKey) ? .on : .off
-        automaticCheckbox.state = UpdatePreferences.automatic() ? .on : .off
         notificationsCheckbox.state = defaults.bool(forKey: UpdatePreferences.notificationsKey) ? .on : .off
         loginCheckbox.state = backgroundServices.loginStatus == .enabled || backgroundServices.loginStatus == .requiresApproval ? .on : .off
         loginCheckbox.isEnabled = !changingLogin && backgroundServices.supportsSystemIntegration
@@ -181,10 +178,6 @@ final class SettingsViewController: NSViewController {
     }
 
     @objc private func hideDockChanged() { backgroundServices.setHideDock(hideDockCheckbox.state == .on) }
-    @objc private func automaticChanged() {
-        UserDefaults.standard.set(automaticCheckbox.state == .on, forKey: UpdatePreferences.automaticKey)
-        if automaticCheckbox.state == .on { Task { await model.checkForUpdates() } }
-    }
     @objc private func loginChanged() {
         let enabled = loginCheckbox.state == .on
         changingLogin = true; renderBackground()

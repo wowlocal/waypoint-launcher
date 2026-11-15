@@ -1,13 +1,9 @@
 import Foundation
 
-/// Shared preferences keep automatic checks distinct from explicit Check for Updates.
+/// The opt-in background preferences. All are off by default.
 public enum UpdatePreferences {
-    public static let automaticKey = "automaticUpdateChecks"
     public static let notificationsKey = "updateNotifications"
     public static let hideDockKey = "hideDockIcon"
-    public static func automatic(in defaults: UserDefaults = .standard) -> Bool {
-        defaults.object(forKey: automaticKey) as? Bool ?? true
-    }
 }
 
 /// Persist only alerts actually handed to Notification Center, so failed or
@@ -32,8 +28,7 @@ public struct UpdateCheckSchedule {
     private var forcedAgain = false
     private var lastCheck: Date?
     public init() {}
-    public mutating func request(force: Bool, automatic: Bool, now: Date = Date()) -> Bool {
-        guard force || automatic else { return false }
+    public mutating func request(force: Bool, now: Date = Date()) -> Bool {
         if running {
             if force { forcedAgain = true }
             return false
