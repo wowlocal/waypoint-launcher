@@ -40,11 +40,6 @@ Before committing code changes, run an independent sub-agent review and address
 its findings. Include installation/update migrations and real client behavior
 in the review when a change affects downloaded content or Battle.net metadata.
 
-## TODO
-
-- [x] **Remove SwiftUI.** The app's UI (`Sources/Waypoint`) is AppKit now; no
-  file imports SwiftUI. See the rule below for why.
-
 ## Never use SwiftUI
 
 Build UI with AppKit only: `NSWindow`, `NSView`, `NSTableView`, `NSMenu`,
@@ -88,6 +83,6 @@ Lots of apps add a menu bar item by default, even ones as basic as Waypoint,
 and people's menu bars are crowded with them. Waypoint must not do that. By
 default it creates no status item at all, not even a hidden one: no
 `NSStatusItem`, no SwiftUI `MenuBarExtra`. `MenuBarItem.swift` creates it only
-after the user turns on "Show Waypoint in the menu bar" in Settings (the
-`showsMenuBarItem` default), and removes it again when they turn it off. Keep
-it that way.
+after the user turns on "Show Waypoint in the menu bar" in Settings ▸
+Background (the `showsMenuBarItem` default), and removes it again when they
+turn it off. Keep it that way.
