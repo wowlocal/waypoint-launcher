@@ -611,14 +611,35 @@ final class AvailableHeaderCell: NSView {
         let title = NSMutableAttributedString(string: " Available Games", attributes: [.font: font, .foregroundColor: NSColor.secondaryLabelColor])
         title.append(NSAttributedString(string: "  \(count)", attributes: [.font: font, .foregroundColor: NSColor.tertiaryLabelColor]))
         button.attributedTitle = title
-        button.image = NSImage(systemSymbolName: expanded ? "chevron.down" : "chevron.right", accessibilityDescription: nil)?
-            .withSymbolConfiguration(.init(pointSize: 9, weight: .bold))
+        button.image = expanded ? Self.chevrons.down : Self.chevrons.right
         button.contentTintColor = .tertiaryLabelColor
         button.setAccessibilityLabel("Available Games, \(count)")
         button.setAccessibilityValue(expanded ? "expanded" : "collapsed")
     }
 
     @objc private func clicked() { toggle?() }
+
+    /// The two chevrons differ in width and height, so each is centered in
+    /// the same square: the title doesn't move when the group opens.
+    private static let chevrons: (right: NSImage?, down: NSImage?) = {
+        let config = NSImage.SymbolConfiguration(pointSize: 9, weight: .bold)
+        let symbols = ["chevron.right", "chevron.down"].map {
+            NSImage(systemSymbolName: $0, accessibilityDescription: nil)?.withSymbolConfiguration(config)
+        }
+        let side = ceil(symbols.compactMap { $0.map { max($0.size.width, $0.size.height) } }.max() ?? 10)
+        let squared = symbols.map { symbol in
+            symbol.map { symbol in
+                let image = NSImage(size: NSSize(width: side, height: side), flipped: false) { _ in
+                    symbol.draw(in: NSRect(x: (side - symbol.size.width) / 2, y: (side - symbol.size.height) / 2,
+                                           width: symbol.size.width, height: symbol.size.height))
+                    return true
+                }
+                image.isTemplate = true
+                return image
+            }
+        }
+        return (squared[0], squared[1])
+    }()
 }
 
 /// A game that isn't installed. Smaller and quieter than an installed one: its icon (its initial, without one), its
