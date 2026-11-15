@@ -73,7 +73,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     @objc func showLibrary(_ sender: Any?) {
         let window = libraryWindow ?? makeLibraryWindow()
         libraryWindow = window
-        NSApp.activate()
+        NSApp.bringToFront()
         if window.isMiniaturized { window.deminiaturize(nil) }
         window.makeKeyAndOrderFront(nil)
     }
@@ -114,7 +114,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         window.isReleasedWhenClosed = false
         if settingsWindow == nil { window.center() }
         settingsWindow = window
-        NSApp.activate()
+        NSApp.bringToFront()
         window.makeKeyAndOrderFront(nil)
     }
 
@@ -213,4 +213,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         default: true
         }
     }
+}
+
+extension NSApplication {
+    /// Brings Waypoint in front of the active app. `activate()` only asks,
+    /// and macOS refuses when the request comes from the menu bar item's menu
+    /// with no Dock icon, or right after hiding the Dock icon: the window
+    /// would open behind. The deprecated form is still honored; checked on
+    /// macOS 27.
+    func bringToFront() { activate(ignoringOtherApps: true) }
 }

@@ -147,9 +147,13 @@ final class BackgroundServices: NSObject, UNUserNotificationCenterDelegate {
         let policy: NSApplication.ActivationPolicy = defaults.bool(forKey: BackgroundPreferences.hideDockKey) ? .accessory : .regular
         guard NSApp.activationPolicy() != policy else { return }
         NSApp.setActivationPolicy(policy)
-        // Switching drops the open window behind other apps, or leaves the
-        // previous app's menus showing: bring Waypoint back to the front.
-        if NSApp.windows.contains(where: \.isVisible) { NSApp.activate() }
+        // Hiding the Dock icon drops the open window behind other apps:
+        // bring Waypoint back, once AppKit has finished the switch.
+        guard let window = NSApp.keyWindow ?? NSApp.windows.first(where: \.isVisible) else { return }
+        DispatchQueue.main.async {
+            NSApp.bringToFront()
+            window.makeKeyAndOrderFront(nil)
+        }
     }
 
     private func notify(id: String, build: String, title: String, body: String) {
