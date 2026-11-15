@@ -36,7 +36,7 @@ public final class Diagnostics: @unchecked Sendable {
     }
 
     public enum Category: String, Sendable, CaseIterable {
-        case app, library, auth, launch, gameUpdate = "game_update", install, cdn, selfUpdate = "self_update", cli
+        case app, library, auth, launch, gameUpdate = "game_update", install, cdn, selfUpdate = "self_update", cli, addOns = "addons"
     }
 
     public static let shared = Diagnostics(directory: directoryForThisProcess)

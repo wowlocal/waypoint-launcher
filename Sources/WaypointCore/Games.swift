@@ -61,6 +61,15 @@ public struct Game: Identifiable, Equatable, Sendable {
         return root
     }
 
+    /// Where a World of Warcraft version's add-ons go, whether or not the
+    /// game has made the folder yet. Reads nothing from the disk.
+    public var addOnsLocation: URL? {
+        guard family == .worldOfWarcraft else { return nil }
+        return URL(fileURLWithPath: install.installPath, isDirectory: true)
+            .appendingPathComponent(GameCatalog.wowFolder(for: install.productCode), isDirectory: true)
+            .appendingPathComponent("Interface/AddOns", isDirectory: true)
+    }
+
     /// A World of Warcraft version's add-ons folder, once there is one: the
     /// game makes it the first time it runs.
     public var addOnsFolder: URL? {

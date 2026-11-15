@@ -92,8 +92,11 @@ case "repair-install-metadata":
 case "diagnose":
     diagnose()
 
+case "addons":
+    await addOnsCommand(Array(args.dropFirst()))
+
 default:
-    fail("usage: waypoint-cli [list | catalog [--refresh] | plan <uid> | check-tokens [GAMEKEY…] | check-updates | update <uid> [--path root] [--state file] [--verify] [--language xxXX [--speech xxXX]] [--dry-run] | cleanup <uid> [--path root] [--state file] [--dry-run] | fetch <uid> <regex> <dir> | install <uid> <dir> [options] | launch <uid> [--state file] [--dry-run] | logs [options] | repair-install-metadata | diagnose]")
+    fail("usage: waypoint-cli [list | catalog [--refresh] | plan <uid> | check-tokens [GAMEKEY…] | check-updates | update <uid> [--path root] [--state file] [--verify] [--language xxXX [--speech xxXX]] [--dry-run] | cleanup <uid> [--path root] [--state file] [--dry-run] | fetch <uid> <regex> <dir> | install <uid> <dir> [options] | launch <uid> [--state file] [--dry-run] | logs [options] | repair-install-metadata | diagnose | addons [uid] [--path folder --flavor mainline] [--update]]")
 }
 
 Diagnostics.shared.flush()
