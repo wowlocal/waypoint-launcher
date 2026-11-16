@@ -21,6 +21,8 @@ public struct InstalledAddOn: Identifiable, Equatable, Sendable {
     public var folders: [String]
     public var version: String?
     public var author: String?
+    /// Its TOC's own description.
+    public var notes: String?
     /// Where Waypoint updates it from.
     public var ref: AddOnRef?
     public var unmanaged: Unmanaged?
@@ -128,6 +130,7 @@ public struct AddOnMatcher: Sendable {
             let folder = byName[main.lowercased()]
             row.version = folder?.toc?.version
             row.author = folder?.toc?.author ?? entry?.author
+            row.notes = folder?.toc?.notes
             row.modified = folder?.tocModified
             if row.ref != nil, row.record == nil { row.name = entry?.name ?? folder?.toc?.title ?? row.name }
             else if row.ref == nil { row.name = folder?.toc?.title ?? main }

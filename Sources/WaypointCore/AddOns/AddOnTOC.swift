@@ -7,6 +7,8 @@ public struct AddOnTOC: Equatable, Sendable {
     /// Without color, texture and load-condition markup.
     public var title: String?
     public var author: String?
+    /// The add-on's own one-line description.
+    public var notes: String?
     /// Nil for a packager placeholder (`@project-version@`): a development copy.
     public var version: String?
     public var curseID: String?
@@ -38,6 +40,7 @@ public struct AddOnTOC: Equatable, Sendable {
                 interfaces = value.split(separator: ",").compactMap { Int($0.trimmingCharacters(in: .whitespaces)) }
             case "title": title = Self.plain(value)
             case "author": author = Self.plain(value)
+            case "notes": notes = Self.plain(value)
             case "version":
                 version = value.isEmpty || value.contains("@project-") ? nil : value
             case "x-curse-project-id": curseID = Self.id(value)

@@ -77,8 +77,22 @@ public enum AddOnSourceError: Error, Equatable, Sendable, LocalizedError {
     }
 }
 
+/// What a source tells about an add-on, for its detail page.
+public struct AddOnDetails: Equatable, Sendable {
+    public var summary: String?
+    public var website: URL?
+    /// Downloads per month (WoWInterface), or stars (GitHub).
+    public var popularity: String?
+    public var updated: Date?
+
+    public init(summary: String? = nil, website: URL? = nil, popularity: String? = nil, updated: Date? = nil) {
+        (self.summary, self.website, self.popularity, self.updated) = (summary, website, popularity, updated)
+    }
+}
+
 public protocol AddOnSource: Sendable {
     var id: AddOnSourceID { get }
+    func details(_ ref: AddOnRef) async -> AddOnDetails?
     /// The latest stable release of each add-on for `flavor`. `interface`
     /// is the game's own number, preferred when a release lists several.
     func latest(_ refs: [AddOnRef], flavor: WoWFlavor, interface: Int?) async -> [AddOnRef: Result<AddOnRelease, AddOnSourceError>]

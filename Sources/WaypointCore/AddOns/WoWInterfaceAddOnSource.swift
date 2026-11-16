@@ -69,6 +69,44 @@ public struct WoWInterfaceAddOnSource: AddOnSource {
         return results
     }
 
+    /// The add-on's description from its WoWInterface page, as plain text.
+    public func details(_ ref: AddOnRef) async -> AddOnDetails? {
+        guard ref.id.allSatisfy(\.isASCIIDigit),
+              let url = URL(string: "https://api.mmoui.com/v4/game/WOW/filedetails/\(ref.id).json"),
+              let response = try? await http.get(url), response.status == 200,
+              let json = try? JSONSerialization.jsonObject(with: response.data) else { return nil }
+        guard let item = ((json as? [[String: Any]])?.first ?? json as? [String: Any]) else { return nil }
+        func text(_ key: String) -> String? {
+            guard let value = item[key], !(value is NSNull) else { return nil }
+            return "\(value)"
+        }
+        let monthly = text("downloadsMonthly").flatMap { Int($0) }
+        let updated = text("lastUpdate").flatMap(Double.init).map { Date(timeIntervalSince1970: $0 / 1000) }
+        return AddOnDetails(summary: text("description").map(Self.plain).flatMap(Self.firstParagraph), website: ref.webPage,
+                            popularity: monthly.map { "\($0.formatted()) a month" }, updated: updated)
+    }
+
+    /// The first paragraph of real text: not a lone heading ("About").
+    static func firstParagraph(_ text: String) -> String? {
+        let paragraphs = text.components(separatedBy: "\n\n").map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+        let paragraph = paragraphs.first { $0.count > 40 } ?? paragraphs.first { !$0.isEmpty }
+        guard let paragraph else { return nil }
+        return paragraph.count > 400 ? String(paragraph.prefix(400)).trimmingCharacters(in: .whitespaces) + "…" : paragraph
+    }
+
+    /// BBCode as plain text: tags and images out, links' text kept, at
+    /// most a few paragraphs.
+    static func plain(_ bbcode: String) -> String {
+        var text = ListEntry.unescaped(bbcode)
+        for (pattern, replacement) in [(#"\[img\][^\[]*\[/img\]"#, ""), (#"\[url=[^\]]*\]([^\[]*)\[/url\]"#, "$1"),
+                                       (#"\[\*\]"#, "• "), (#"\[/?[a-zA-Z]+(=[^\]]*)?\]"#, ""), (#"\r"#, ""),
+                                       (#"[ \t]+"#, " "), (#"\n\s*\n+"#, "\n\n")] {
+            text = text.replacingOccurrences(of: pattern, with: replacement, options: .regularExpression)
+        }
+        text = text.trimmingCharacters(in: .whitespacesAndNewlines)
+        return text.count > 700 ? String(text.prefix(700)).trimmingCharacters(in: .whitespaces) + "…" : text
+    }
+
     static func release(_ entry: Details, ref: AddOnRef) -> Result<AddOnRelease, AddOnSourceError> {
         guard let download = URL(string: entry.downloadUri), download.scheme == "https",
               let host = download.host?.lowercased(), host == "wowinterface.com" || host.hasSuffix(".wowinterface.com") else {
@@ -92,11 +130,14 @@ public struct WoWInterfaceAddOnSource: AddOnSource {
         public var UIDir: [String]?
         public var UICompatibility: [Compatibility]?
         public var UIDownloadTotal: String?
+        public var UIDownloadMonthly: String?
 
         public struct Compatibility: Decodable, Sendable { public var version: String }
 
         public var date: Date? { UIDate.map { Date(timeIntervalSince1970: $0 / 1000) } }
         public var downloads: Int { UIDownloadTotal.flatMap { Int($0) } ?? 0 }
+        /// What people download now: the ranking for search.
+        public var monthlyDownloads: Int { UIDownloadMonthly.flatMap { Int($0) } ?? 0 }
         /// Names come HTML-escaped, sometimes twice (`&amp;#54392;`).
         public var name: String { Self.unescaped(UIName) }
         public var author: String? { UIAuthorName.map(Self.unescaped) }

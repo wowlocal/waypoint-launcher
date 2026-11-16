@@ -17,6 +17,15 @@ public struct TukUIAddOnSource: AddOnSource {
         var patch: [String]?
         var directories: [String]?
         var last_update: String?
+        var small_desc: String?
+        var web_url: String?
+    }
+
+    public func details(_ ref: AddOnRef) async -> AddOnDetails? {
+        guard let response = try? await http.get(URL(string: "https://api.tukui.org/v1/addons")!), response.status == 200,
+              let entry = (try? JSONDecoder().decode([Entry].self, from: response.data))?.first(where: { $0.slug == ref.id }) else { return nil }
+        return AddOnDetails(summary: entry.small_desc,
+                            website: entry.web_url.flatMap(URL.init(string:)).flatMap { $0.scheme == "https" ? $0 : nil })
     }
 
     public func latest(_ refs: [AddOnRef], flavor: WoWFlavor, interface: Int?) async -> [AddOnRef: Result<AddOnRelease, AddOnSourceError>] {

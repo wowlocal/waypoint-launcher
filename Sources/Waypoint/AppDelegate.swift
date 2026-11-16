@@ -53,12 +53,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         guard let uid = arguments["WaypointOpenAddOns"] as? String else { return }
         let search = arguments["WaypointAddOnsSearch"] as? String ?? ""
         let expand = (arguments["WaypointAddOnsExpand"] as? String).map { ["YES", "1", "true"].contains($0) } ?? false
+        let detail = arguments["WaypointAddOnsDetail"] as? String
         Task { [weak self] in
             for _ in 0..<100 {
                 guard let self else { return }
                 if let game = self.model.games.first(where: { $0.install.uid == uid }), self.model.canManageAddOns(game),
                    let library = self.libraryWindow?.contentViewController {
-                    let sheet = AddOnsSheet(game: game, model: self.model, search: search, othersExpanded: expand)
+                    let sheet = AddOnsSheet(game: game, model: self.model, search: search, othersExpanded: expand, detail: detail)
                     library.presentAsSheet(sheet)
                     // `-WaypointAddOnsSnapshot <file.png>`: the sheet as an
                     // image once it has settled, drawn in-process (works with

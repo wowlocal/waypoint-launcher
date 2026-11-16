@@ -37,6 +37,8 @@ public final class AddOnsModel {
         public var keepsCurrent = false
         /// An update happened while the game was open: it needs a restart.
         public var changedWhileRunning = false
+        /// Popular add-ons for this game that aren't installed.
+        public var suggestions: [AddOnSearchResult] = []
 
         public func update(for addOn: InstalledAddOn) -> AddOnRelease? {
             if case .available(let release) = updates[addOn.id] { return release }
@@ -115,7 +117,9 @@ public final class AddOnsModel {
         guard let library = library(for: game) else { return }
         states[game.id, default: State()].isScanning = true
         do {
-            states[game.id, default: State()].addOns = try await library.scan()
+            let addOns = try await library.scan()
+            states[game.id, default: State()].addOns = addOns
+            states[game.id, default: State()].suggestions = await library.suggestions(for: addOns)
             states[game.id, default: State()].keepsCurrent = await library.keepsCurrent()
             states[game.id, default: State()].scanFailure = nil
             for (id, message) in automaticFailures[game.id] ?? [:] where states[game.id]?.failures[id] == nil {
@@ -284,7 +288,26 @@ public final class AddOnsModel {
 
     private func rescan(_ game: Game) async {
         guard let library = library(for: game), let addOns = try? await library.scan() else { return }
-        states[game.id, default: State()].addOns = addOns
+        states[game.id]?.addOns = addOns
+        states[game.id]?.suggestions = await library.suggestions(for: addOns)
+    }
+
+    public func details(_ game: Game, _ ref: AddOnRef) async -> AddOnDetails? {
+        guard let library = library(for: game) else { return nil }
+        return await library.details(ref)
+    }
+
+    public func latest(_ game: Game, _ ref: AddOnRef) async -> Result<AddOnRelease, AddOnSourceError> {
+        guard let library = library(for: game) else { return .failure(.unavailable) }
+        return await library.latest(ref)
+    }
+
+    public func indexEntry(_ game: Game, _ ref: AddOnRef) async -> AddOnIndex.Entry? {
+        await library(for: game)?.indexEntry(ref)
+    }
+
+    public func elsewhere(_ game: Game, _ text: String) async -> [String] {
+        await library(for: game)?.elsewhere(matching: text) ?? []
     }
 
     private func progress(_ game: Game, _ id: String) -> @Sendable (Double) -> Void {

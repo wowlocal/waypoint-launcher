@@ -96,7 +96,7 @@ turn it off. Keep it that way.
   BigWigs packager's `release.json` (through GitHub's web links, not its
   API), Tukui and WoWInterface. CurseForge's API needs a private key its
   terms forbid shipping in an open-source app; Wago needs a paid key. Their
-  add-ons are listed as "Not Updated by Waypoint".
+  add-ons are listed under "Other Add-Ons", and search names the well-known ones.
 - **GitHub repositories come only from `AddOnIndex`,** hand-checked to be the
   author's own (`tools/addon-index/check.py` reads their folders and IDs).
   No fuzzy matching, no third-party catalogue: a fork must never take over

@@ -20,7 +20,17 @@ public struct AddOnSearchResult: Equatable, Sendable, Identifiable {
     public var ref: AddOnRef
     public var name: String
     public var author: String?
+    /// What it does, when the index knows.
+    public var summary: String?
     public var id: String { ref.description }
+
+    public init(ref: AddOnRef, name: String, author: String?, summary: String? = nil) {
+        (self.ref, self.name, self.author, self.summary) = (ref, name, author, summary)
+    }
+
+    init(_ entry: AddOnIndex.Entry) {
+        self.init(ref: entry.source, name: entry.name, author: entry.author, summary: entry.summary)
+    }
 }
 
 /// One `Interface/AddOns` folder: all disk and network work on it, off the
@@ -342,14 +352,14 @@ public actor AddOnLibrary {
     /// The index's matches for this game: no network, so they show at once.
     public func searchIndex(_ text: String) -> [AddOnSearchResult] {
         guard let flavor else { return [] }
-        return matcher.index.search(text, flavor: flavor).map { AddOnSearchResult(ref: $0.source, name: $0.name, author: $0.author) }
+        return matcher.index.search(text, flavor: flavor).map(AddOnSearchResult.init)
     }
 
     /// WoWInterface's matches: only add-ons updated in the last year (most
     /// of its list is years old), none the index already has (by ID or by
     /// folder), best match first; at most 30.
     public func searchWoWInterface(_ text: String) async throws -> [AddOnSearchResult] {
-        let words = text.lowercased().split(separator: " ").map(String.init)
+        let words = AddOnIndex.words(text)
         guard !words.isEmpty, flavor != nil else { return [] }
         let known = Set(matcher.index.entries.compactMap(\.wowi))
         let knownFolders = Set(matcher.index.entries.flatMap(\.folders).map { $0.lowercased() })
@@ -358,14 +368,45 @@ public actor AddOnLibrary {
         let matches = list.filter { entry in
             guard !known.contains(entry.UID), entry.isRecent(now: date), entry.fits(flavor!),
                   !(entry.UIDir ?? []).contains(where: { knownFolders.contains($0.lowercased()) }) else { return false }
-            return words.allSatisfy { "\(entry.name) \(entry.author ?? "")".lowercased().contains($0) }
+            return AddOnIndex.matches(words, in: [entry.name, entry.author ?? ""] + (entry.UIDir ?? []))
         }
         .sorted { a, b in
             let (ra, rb) = (AddOnIndex.rank(a.name, words), AddOnIndex.rank(b.name, words))
-            return ra != rb ? ra < rb : a.downloads > b.downloads
+            return ra != rb ? ra < rb : a.monthlyDownloads > b.monthlyDownloads
         }
         return matches.prefix(30).map { AddOnSearchResult(ref: AddOnRef(.wowInterface, $0.UID), name: $0.name, author: $0.author) }
     }
+
+    /// Popular add-ons for this game that aren't installed, from the index.
+    public func suggestions(for installed: [InstalledAddOn]) -> [AddOnSearchResult] {
+        guard let flavor else { return [] }
+        let folders = Set(installed.flatMap(\.folders).map { $0.lowercased() })
+        return matcher.index.suggestions(for: flavor, excluding: Set(installed.compactMap(\.ref)), folders: folders)
+            .map(AddOnSearchResult.init)
+    }
+
+    /// Well-known add-ons a search names that only CurseForge or Wago have.
+    public func elsewhere(matching text: String) -> [String] { matcher.index.elsewhere(matching: text) }
+
+    public func indexEntry(_ ref: AddOnRef) -> AddOnIndex.Entry? { matcher.index.entry(for: ref) }
+
+    /// The newest release for this game, for an add-on's page.
+    public func latest(_ ref: AddOnRef) async -> Result<AddOnRelease, AddOnSourceError> {
+        guard let flavor, let source = sources[ref.source] else { return .failure(.unavailable) }
+        return await source.latest([ref], flavor: flavor, interface: interface)[ref] ?? .failure(.unavailable)
+    }
+
+    /// What the add-on's source says about it, for its detail page; cached
+    /// while this library lives. Nil when the source has nothing.
+    public func details(_ ref: AddOnRef) async -> AddOnDetails? {
+        if let cached = detailsCache[ref] { return cached }
+        guard let source = sources[ref.source] else { return nil }
+        let details = await source.details(ref)
+        detailsCache[ref] = details
+        return details
+    }
+
+    private var detailsCache: [AddOnRef: AddOnDetails?] = [:]
 
     /// Both, the index first.
     public func search(_ text: String) async throws -> [AddOnSearchResult] {

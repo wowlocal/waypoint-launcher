@@ -43,6 +43,17 @@ public struct GitHubAddOnSource: AddOnSource {
         return .success(AddOnRelease(ref: ref, id: tag, version: release.version ?? tag, date: response.lastModified, download: download))
     }
 
+    /// Nothing beyond the index's own line: GitHub's API is rate-limited
+    /// and Waypoint doesn't use it (only its web links).
+    public func details(_ ref: AddOnRef) async -> AddOnDetails? { nil }
+
+    /// The release's page on GitHub, for "What's New".
+    static func releasePage(_ release: AddOnRelease) -> URL? {
+        guard release.ref.source == .github,
+              let tag = release.id.addingPercentEncoding(withAllowedCharacters: .urlPathAllowed.subtracting(["/"])) else { return nil }
+        return URL(string: "https://github.com/\(release.ref.id)/releases/tag/\(tag)")
+    }
+
     /// "owner/repo", the only form an index entry may use.
     static func isRepository(_ id: String) -> Bool {
         let parts = id.split(separator: "/", omittingEmptySubsequences: false)
