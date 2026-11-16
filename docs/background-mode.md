@@ -31,4 +31,37 @@ follow-up pass, and keeps its wish to announce.
 Closing the library window keeps Waypoint, its downloads and these checks
 running; Quit ends them.
 
+## Automatic game updates
+
+Each game opts in separately with **Keep Updated Automatically** in its **…**
+menu. All games start with this off. The choice is independent of update
+notifications, the menu bar item and opening at login.
+
+**Settings → Downloads** offers an optional local-time download window. It
+can cross midnight; equal start and end times mean all day. A boundary timer
+pauses automatic downloads at the end and resumes them in the next allowed
+window. Wake, clock and time-zone changes re-evaluate the window. Waypoint
+must be running and the Mac awake; this does not wake a sleeping Mac.
+
+Automatic updates run one at a time in library order, after active downloads
+finish. Dragging games in the library changes this priority. Before starting,
+Waypoint re-reads installation records and asks for the current build. Running
+games, shared WoW folders in use, disconnected drives, Battle.net and its Agent
+prevent automatic work. An already-started final commit may finish after a
+pause request.
+
+Only scheduler-owned updates resume automatically, including after a restart.
+Older unfinished downloads stay manual. User Pause, Resume or cancellation
+relinquishes scheduler ownership; a cancelled build is not recreated on the
+next poll. Failed automatic updates wait for manual retry. A later build can
+still update automatically after cancellation. Turning a game’s automatic
+updates off pauses its automatic download and leaves manual Resume available.
+Downloads already completed by another launcher lose their obsolete automatic
+checkpoint; game files and staged data are retained.
+
+**File → Update All Games** runs available updates sequentially in library
+order without changing per-game preferences or applying the automatic time
+window. It skips unavailable/busy games and unfinished downloads, and stops
+the batch on pause or failure.
+
 Not covered by automated tests: a real login launch after logout or reboot.

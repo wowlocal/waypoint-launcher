@@ -352,9 +352,14 @@ final class GameCell: NSView {
         guard let state else { return false }
         switch state.phase {
         // A running game still has its folders to show.
-        case .idle, .failed: return state.game.isInstalled || (state.game.isSupported && !state.isRunning) || state.game.locationID != nil
-        default: return false
+        case .idle, .failed: return state.game.isInstalled || (state.game.isSupported && !state.isRunning) || state.game.locationID != nil || offersAutomaticUpdates
+        default: return offersAutomaticUpdates
         }
+    }
+
+    private var offersAutomaticUpdates: Bool {
+        guard let game = state?.game else { return false }
+        return (game.isInstalled || game.isOffline) && GameUpdate.canUpdate(game.install)
     }
 
     private func makeMenu() -> NSMenu? {
@@ -362,6 +367,20 @@ final class GameCell: NSView {
         let game = state.game
         let menu = NSMenu()
         menu.autoenablesItems = false
+        // Keep the opt-out available while a download or a game is running,
+        // without exposing the other commands during an unfinished operation.
+        if offersAutomaticUpdates {
+            let automatic = ActionItem("Keep Updated Automatically") {
+                model.setAutomaticallyUpdates(!model.automaticallyUpdates(game), for: game)
+            }
+            automatic.state = model.automaticallyUpdates(game) ? .on : .off
+            menu.addItem(automatic)
+        }
+        switch state.phase {
+        case .idle, .failed: break
+        default: return menu.items.isEmpty ? nil : menu
+        }
+        if !menu.items.isEmpty, game.isSupported, !state.isRunning { menu.addItem(.separator()) }
         if game.isSupported, !state.isRunning {
             if model.availableUpdate(for: game) != nil {
                 menu.addItem(ActionItem("Play Without Updating") { Task { await model.play(game) } })

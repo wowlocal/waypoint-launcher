@@ -80,11 +80,16 @@ public struct UnfinishedDownload: Codable, Sendable, Equatable {
     public var progress: UpdateProgress?
     public var keepsMacAwake: Bool
     public var failure: String?
+    /// Only scheduled updates opt in. Missing in older checkpoints, whose
+    /// paused downloads must keep waiting for an explicit Resume.
+    public var automaticUpdate: Bool?
 
-    public init(request: DownloadRequest, progress: UpdateProgress? = nil, keepsMacAwake: Bool = false, failure: String? = nil) {
+    public init(request: DownloadRequest, progress: UpdateProgress? = nil, keepsMacAwake: Bool = false,
+                failure: String? = nil, automaticUpdate: Bool = false) {
         self.request = request
         self.progress = progress
         self.keepsMacAwake = keepsMacAwake
         self.failure = failure
+        self.automaticUpdate = automaticUpdate && request.kind == .update ? true : nil
     }
 }

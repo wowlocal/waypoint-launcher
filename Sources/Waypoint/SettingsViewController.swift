@@ -9,6 +9,7 @@ final class SettingsViewController: NSTabViewController {
         super.init(nibName: nil, bundle: nil)
         tabStyle = .toolbar
         add(GeneralSettings(model: model, updater: appUpdater), "General", symbol: "gearshape")
+        add(AutomaticUpdateSettings(model: model), "Downloads", symbol: "arrow.down.circle")
         add(AccountSettings(model: model), "Account", symbol: "person.crop.circle")
         add(BackgroundSettings(services: backgroundServices), "Background", symbol: "menubar.rectangle")
     }

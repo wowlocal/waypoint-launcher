@@ -48,13 +48,18 @@ public final class DownloadQueue {
     /// `keepsMacAwake`: the job's starting choice (the install sheet's); its
     /// own button changes it later.
     @discardableResult
-    public func enqueue(_ request: DownloadRequest, keepsMacAwake: Bool = false) throws -> DownloadJob {
+    public func enqueue(_ request: DownloadRequest, keepsMacAwake: Bool = false,
+                        automaticUpdate: Bool = false) throws -> DownloadJob {
+        guard !automaticUpdate || request.kind == .update else {
+            throw TACTError.malformed("only game updates can run automatically")
+        }
         guard jobs[request.key] == nil else { throw DownloadStoreError.alreadyQueued }
         let lease = try store.claim(key: request.key)
         guard !FileManager.default.fileExists(atPath: store.file(for: request.key).path) else {
             throw DownloadStoreError.alreadyQueued
         }
-        let record = UnfinishedDownload(request: request, keepsMacAwake: keepsMacAwake)
+        let record = UnfinishedDownload(request: request, keepsMacAwake: keepsMacAwake,
+                                        automaticUpdate: automaticUpdate)
         try store.save(record) // Must be durable before the first request starts.
         let job = makeJob(record, lease: lease, restoring: false)
         jobs[request.key] = job
