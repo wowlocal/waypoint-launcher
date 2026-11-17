@@ -82,6 +82,29 @@ These are completed updates recorded in Waypoint's usage logs, rather than dry r
 
 Blizzard's ownership and account requirements still apply, including Overwatch SMS Protect where required. [Release notes](https://github.com/wowlocal/waypoint-launcher/releases) describe changes and earlier validation.
 
+## FAQ
+
+**Is there a native Battle.net launcher for Apple Silicon Macs?**
+Waypoint is one: an unofficial, open-source launcher built for arm64 with Swift and AppKit. It installs, updates and launches Blizzard games without the Battle.net app, and the launcher itself never needs Rosetta. Some games still do; see [Supported games](#supported-games).
+
+**Can I play World of Warcraft on a Mac without the Battle.net app?**
+Yes. Waypoint downloads WoW straight from Blizzard, keeps it up to date and signs you in, for Retail, Classic Era and the other editions above. It also picks up games you already installed with Battle.net.
+
+**How do I sign in? Does Waypoint see my password?**
+You sign in on Battle.net's own web login page, including two-factor authentication. Waypoint keeps the sign-in each game needs in your Keychain. Saving your email and password is optional and off until you choose it; they stay in Keychain too.
+
+**Can I play Overwatch or Diablo IV on a Mac?**
+Their Windows editions run in Preview through a free Wine component that Waypoint downloads when needed; CrossOver isn't required. They need Apple silicon, Rosetta and macOS 26.5 or later. Diablo II: Resurrected is in Preview too.
+
+**Does it work alongside Battle.net?**
+Yes. Waypoint finds Battle.net's installs and updates games installed by either app, and Battle.net still recognizes games installed with Waypoint. Quit Battle.net and its Agent before installing or updating, so the two don't write the same files.
+
+**Is it official? Is it safe?**
+It's a fan project, not affiliated with Blizzard. Releases are signed with a Developer ID and notarized by Apple, and all the source is here. Blizzard doesn't officially support launching games outside Battle.net; see the [Disclaimer](#disclaimer).
+
+**Does it run on Intel Macs?**
+No. Waypoint needs an Apple Silicon Mac with macOS 14 or later.
+
 ## Download
 
 Get **Waypoint-x.y.z.dmg** from [Releases](https://github.com/wowlocal/waypoint-launcher/releases/latest), open it, and drag Waypoint to Applications. Releases are signed with a Developer ID and notarized by Apple, so the app opens without warnings.
