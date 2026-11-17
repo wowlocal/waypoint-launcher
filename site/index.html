@@ -1,0 +1,301 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Waypoint: Native Battle.net Launcher for Apple Silicon Macs</title>
+<meta name="description" content="Unofficial, open-source native Battle.net launcher for Mac. Install, update and play World of Warcraft and more on Apple Silicon without the Battle.net app.">
+<link rel="canonical" href="https://wowlocal.github.io/waypoint-launcher/">
+<meta name="color-scheme" content="light dark">
+<meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)">
+<meta name="theme-color" content="#000000" media="(prefers-color-scheme: dark)">
+<link rel="icon" type="image/png" sizes="64x64" href="favicon.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<link rel="stylesheet" href="style.css">
+
+<meta property="og:type" content="website">
+<meta property="og:site_name" content="Waypoint">
+<meta property="og:locale" content="en_US">
+<meta property="og:url" content="https://wowlocal.github.io/waypoint-launcher/">
+<meta property="og:title" content="Waypoint: Native Battle.net Launcher for Apple Silicon Macs">
+<meta property="og:description" content="Install, update and play World of Warcraft and other Blizzard games on your Mac without the Battle.net app. Unofficial and open source.">
+<meta property="og:image" content="https://wowlocal.github.io/waypoint-launcher/og.jpg">
+<meta property="og:image:type" content="image/jpeg">
+<meta property="og:image:width" content="1200">
+<meta property="og:image:height" content="630">
+<meta property="og:image:alt" content="Waypoint, a native Battle.net launcher for Apple Silicon Macs, next to its library window with six installed games">
+<meta name="twitter:card" content="summary_large_image">
+<meta name="twitter:title" content="Waypoint: Native Battle.net Launcher for Apple Silicon Macs">
+<meta name="twitter:description" content="Install, update and play World of Warcraft and other Blizzard games on your Mac without the Battle.net app. Unofficial and open source.">
+<meta name="twitter:image" content="https://wowlocal.github.io/waypoint-launcher/og.jpg">
+<meta name="twitter:image:alt" content="Waypoint, a native Battle.net launcher for Apple Silicon Macs, next to its library window with six installed games">
+
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "SoftwareApplication",
+  "name": "Waypoint",
+  "description": "Unofficial, open-source native Battle.net launcher for Apple Silicon Macs. Installs, updates and launches World of Warcraft and other Blizzard games without the Battle.net app.",
+  "url": "https://wowlocal.github.io/waypoint-launcher/",
+  "applicationCategory": "UtilitiesApplication",
+  "operatingSystem": "macOS 14 or later",
+  "processorRequirements": "Apple Silicon (arm64)",
+  "downloadUrl": "https://github.com/wowlocal/waypoint-launcher/releases/latest",
+  "releaseNotes": "https://github.com/wowlocal/waypoint-launcher/releases",
+  "image": "https://wowlocal.github.io/waypoint-launcher/og.jpg",
+  "screenshot": "https://wowlocal.github.io/waypoint-launcher/img/screenshot-1104.webp",
+  "license": "https://github.com/wowlocal/waypoint-launcher/blob/main/LICENSE",
+  "sameAs": "https://github.com/wowlocal/waypoint-launcher",
+  "isAccessibleForFree": true,
+  "offers": {
+    "@type": "Offer",
+    "price": "0",
+    "priceCurrency": "USD"
+  }
+}
+</script>
+<script type="application/ld+json">
+{
+  "@context": "https://schema.org",
+  "@type": "FAQPage",
+  "mainEntity": [
+    {
+      "@type": "Question",
+      "name": "Is there a native Battle.net launcher for Apple Silicon Macs?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Waypoint is one: an unofficial, open-source launcher built for arm64 with Swift and AppKit. It installs, updates and launches Blizzard games without the Battle.net app, and the launcher itself never needs Rosetta. Some games still do; see Supported games."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Can I play World of Warcraft on a Mac without the Battle.net app?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes. Waypoint downloads WoW straight from Blizzard, keeps it up to date and signs you in, for Retail, Classic Era and the other editions above. It also picks up games you already installed with Battle.net."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "How do I sign in? Does Waypoint see my password?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "You sign in on Battle.net's own web login page, including two-factor authentication. Waypoint keeps the sign-in each game needs in your Keychain. Saving your email and password is optional and off until you choose it; they stay in Keychain too."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Can I play Overwatch or Diablo IV on a Mac?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Their Windows editions run in Preview through a free Wine component that Waypoint downloads when needed; CrossOver isn't required. They need Apple silicon, Rosetta and macOS 26.5 or later. Diablo II: Resurrected is in Preview too."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Does it work alongside Battle.net?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "Yes. Waypoint finds Battle.net's installs and updates games installed by either app, and Battle.net still recognizes games installed with Waypoint. Quit Battle.net and its Agent before installing or updating, so the two don't write the same files."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Is it official? Is it safe?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "It's a fan project, not affiliated with Blizzard. Releases are signed with a Developer ID and notarized by Apple, and all the source is on GitHub. Blizzard doesn't officially support launching games outside Battle.net; see the Disclaimer."
+      }
+    },
+    {
+      "@type": "Question",
+      "name": "Does it run on Intel Macs?",
+      "acceptedAnswer": {
+        "@type": "Answer",
+        "text": "No. Waypoint needs an Apple Silicon Mac with macOS 14 or later."
+      }
+    }
+  ]
+}
+</script>
+</head>
+<body>
+<a class="skip" href="#main">Skip to Content</a>
+
+<header class="bar">
+  <div class="wrap bar-inner">
+    <a class="brand" href="#top" aria-label="Waypoint, back to top">
+      <img src="img/icon-128.webp" width="28" height="28" alt="">
+      <span>Waypoint</span>
+    </a>
+    <nav aria-label="Sections">
+      <a href="#features">Features</a>
+      <a href="#games">Games</a>
+      <a href="#faq">FAQ</a>
+      <a href="https://github.com/wowlocal/waypoint-launcher">GitHub</a>
+    </nav>
+    <a class="button small" href="https://github.com/wowlocal/waypoint-launcher/releases/latest">Download</a>
+  </div>
+</header>
+
+<main id="main">
+
+<section class="hero" id="top">
+  <div class="wrap hero-grid">
+    <div class="hero-text">
+      <img class="hero-icon" src="img/icon-128.webp" srcset="img/icon-128.webp 1x, img/icon-256.webp 2x" width="112" height="112" alt="Waypoint app icon">
+      <h1>
+        <span class="h1-name">Waypoint</span>
+        <span class="h1-tag">A native Battle.net launcher for Apple Silicon Macs.</span>
+      </h1>
+      <p class="lead">Install, update and launch Blizzard games without the Battle.net app. The launcher runs natively. Just press Play.</p>
+      <p class="cta">
+        <a class="button" href="https://github.com/wowlocal/waypoint-launcher/releases/latest">Download for macOS</a>
+        <a class="more" href="https://github.com/wowlocal/waypoint-launcher">View Source on GitHub</a>
+      </p>
+      <p class="fine">Requires an Apple Silicon Mac with macOS 14 or later.<br>Free, open source and unofficial.</p>
+    </div>
+    <div class="hero-shot">
+      <img src="img/screenshot-1104.webp"
+           srcset="img/screenshot-552.webp 552w, img/screenshot-1104.webp 1104w"
+           sizes="(max-width: 600px) 100vw, 552px"
+           width="552" height="650" fetchpriority="high"
+           alt="Waypoint library with colorful game icons, artwork and six installed games">
+    </div>
+  </div>
+</section>
+
+<section class="band" id="features" aria-labelledby="features-title">
+  <div class="wrap">
+    <h2 id="features-title">Install, update and play in one native window.</h2>
+    <p class="intro">A launcher should install your games, keep them up to date, and sign you in. Waypoint does that in a native Swift and AppKit window, with downloads straight from Blizzard and no Battle.net app or Agent needed to play.</p>
+    <ul class="cards">
+      <li>
+        <h3>Your library in one window</h3>
+        <p>Games already on your Mac appear in the library, including ones Battle.net installed. Install more from the Available Games list below them.</p>
+      </li>
+      <li>
+        <h3>Install, update and repair</h3>
+        <p>Download directly from Blizzard, update games installed by either launcher, and use Verify Files to repair missing or corrupt content. Automatic game updates are optional, per game.</p>
+      </li>
+      <li>
+        <h3>Downloads you can leave</h3>
+        <p>Installs and updates survive quitting, crashes and Waypoint's own updates. Pause and resume, set a speed limit, or keep the Mac awake for a download.</p>
+      </li>
+      <li>
+        <h3>Sign in once per game</h3>
+        <p>Use the official Battle.net web login, including two-factor authentication. Switch accounts, or use Play As for a single launch.</p>
+      </li>
+      <li>
+        <h3>Windows games, too</h3>
+        <p>The Windows edition of Heroes of the Storm runs with a free Wine component; CrossOver is not required. Overwatch, Diablo IV and Diablo II: Resurrected are in Preview.</p>
+      </li>
+      <li>
+        <h3>Small and native</h3>
+        <p>A native Swift and AppKit app for Apple silicon. The app is 9.6 MB, about 4.5 MB to download. The menu bar item is off unless you turn it on in Settings.</p>
+      </li>
+    </ul>
+  </div>
+</section>
+
+<section id="games" aria-labelledby="games-title">
+  <div class="wrap">
+    <h2 id="games-title">Supported games</h2>
+    <p class="intro">World of Warcraft, Hearthstone and other Mac games use their own executables. Supported Windows editions use an optional Wine runtime that downloads on demand.</p>
+    <div class="games">
+      <div class="panel">
+        <div class="panel-head"><h3>Tested</h3><p class="sub">Install, launch and updates</p></div>
+        <ul class="rows">
+          <li><span>Hearthstone</span><span class="how">Native</span></li>
+          <li><span>World of Warcraft: Retail</span><span class="how">Native</span></li>
+          <li><span>World of Warcraft: Forever</span><span class="how">Native</span></li>
+          <li><span>World of Warcraft: Classic Era</span><span class="how">Native</span></li>
+          <li><span>Warcraft III: Reforged</span><span class="how">Rosetta</span></li>
+          <li><span>Heroes of the Storm</span><span class="how long">Windows, or macOS under Rosetta</span></li>
+          <li><span>Overwatch</span><span class="how">Windows <b class="tag">Preview</b></span></li>
+          <li><span>Diablo IV</span><span class="how">Windows <b class="tag">Preview</b></span></li>
+        </ul>
+      </div>
+      <div class="panel">
+        <div class="panel-head"><h3>Available</h3><p class="sub">Not yet tested</p></div>
+        <ul class="rows">
+          <li><span>World of Warcraft: Classic, Anniversary</span></li>
+          <li><span>StarCraft II</span></li>
+          <li><span>StarCraft: Remastered</span></li>
+          <li><span>Diablo III</span></li>
+          <li><span>Diablo II: Resurrected</span><span class="how">Windows <b class="tag">Preview</b></span></li>
+        </ul>
+      </div>
+    </div>
+    <p class="note">Status combines the developer's hands-on testing with usage logs through November 11, 2026. Windows Heroes of the Storm needs Rosetta and macOS 15 or later; Windows games in Preview need Rosetta and macOS 26.5 or later. Blizzard's ownership and account requirements still apply, including Overwatch SMS Protect where required. <a href="https://github.com/wowlocal/waypoint-launcher#supported-games">See the full status table</a>.</p>
+  </div>
+</section>
+
+<section class="band" id="faq" aria-labelledby="faq-title">
+  <div class="wrap narrow">
+    <h2 id="faq-title">Frequently asked questions</h2>
+    <div class="faq">
+      <div class="qa">
+        <h3>Is there a native Battle.net launcher for Apple Silicon Macs?</h3>
+        <p>Waypoint is one: an unofficial, open-source launcher built for arm64 with Swift and AppKit. It installs, updates and launches Blizzard games without the Battle.net app, and the launcher itself never needs Rosetta. Some games still do; see <a href="#games">Supported games</a>.</p>
+      </div>
+      <div class="qa">
+        <h3>Can I play World of Warcraft on a Mac without the Battle.net app?</h3>
+        <p>Yes. Waypoint downloads WoW straight from Blizzard, keeps it up to date and signs you in, for Retail, Classic Era and the other editions above. It also picks up games you already installed with Battle.net.</p>
+      </div>
+      <div class="qa">
+        <h3>How do I sign in? Does Waypoint see my password?</h3>
+        <p>You sign in on Battle.net's own web login page, including two-factor authentication. Waypoint keeps the sign-in each game needs in your Keychain. Saving your email and password is optional and off until you choose it; they stay in Keychain too.</p>
+      </div>
+      <div class="qa">
+        <h3>Can I play Overwatch or Diablo IV on a Mac?</h3>
+        <p>Their Windows editions run in Preview through a free Wine component that Waypoint downloads when needed; CrossOver isn't required. They need Apple silicon, Rosetta and macOS 26.5 or later. Diablo II: Resurrected is in Preview too.</p>
+      </div>
+      <div class="qa">
+        <h3>Does it work alongside Battle.net?</h3>
+        <p>Yes. Waypoint finds Battle.net's installs and updates games installed by either app, and Battle.net still recognizes games installed with Waypoint. Quit Battle.net and its Agent before installing or updating, so the two don't write the same files.</p>
+      </div>
+      <div class="qa">
+        <h3>Is it official? Is it safe?</h3>
+        <p>It's a fan project, not affiliated with Blizzard. Releases are signed with a Developer ID and notarized by Apple, and all the source is <a href="https://github.com/wowlocal/waypoint-launcher">on GitHub</a>. Blizzard doesn't officially support launching games outside Battle.net; see the <a href="#disclaimer">Disclaimer</a>.</p>
+      </div>
+      <div class="qa">
+        <h3>Does it run on Intel Macs?</h3>
+        <p>No. Waypoint needs an Apple Silicon Mac with macOS 14 or later.</p>
+      </div>
+    </div>
+  </div>
+</section>
+
+<section class="get" id="download" aria-labelledby="download-title">
+  <div class="wrap narrow">
+    <img src="img/icon-128.webp" srcset="img/icon-128.webp 1x, img/icon-256.webp 2x" width="88" height="88" alt="" loading="lazy">
+    <h2 id="download-title">Get Waypoint</h2>
+    <p class="intro">Download the DMG, open it, and drag Waypoint to Applications. Releases are signed with a Developer ID and notarized by Apple, so the app opens without warnings.</p>
+    <p class="cta">
+      <a class="button" href="https://github.com/wowlocal/waypoint-launcher/releases/latest">Download for macOS</a>
+      <a class="more" href="https://github.com/wowlocal/waypoint-launcher/releases">Release Notes</a>
+    </p>
+    <p class="fine">Requires an Apple Silicon Mac with macOS 14 or later.</p>
+  </div>
+</section>
+
+</main>
+
+<footer>
+  <div class="wrap">
+    <nav aria-label="Project links">
+      <a href="https://github.com/wowlocal/waypoint-launcher">Source on GitHub</a>
+      <a href="https://github.com/wowlocal/waypoint-launcher/releases">Releases</a>
+      <a href="https://github.com/wowlocal/waypoint-launcher/blob/main/LICENSE">0BSD License</a>
+      <a href="https://github.com/wowlocal/waypoint-launcher/blob/main/README.ru.md" lang="ru" hreflang="ru">Русский</a>
+    </nav>
+    <div id="disclaimer">
+      <h2>Disclaimer</h2>
+      <p>Waypoint is an unofficial fan project. It is not affiliated with or endorsed by Blizzard Entertainment. Blizzard, Battle.net, Hearthstone, World of Warcraft, Warcraft, StarCraft, Diablo and Heroes of the Storm are trademarks of Blizzard Entertainment, Inc.</p>
+      <p>Blizzard doesn't officially support launching games outside the Battle.net app. The approach has been used for years (see <a href="https://github.com/wowlocal/waypoint-launcher#credits">Credits</a>), but there are no guarantees, and Blizzard can change the login hand-off at any time. Use at your own risk.</p>
+    </div>
+  </div>
+</footer>
+</body>
+</html>

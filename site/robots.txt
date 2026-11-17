@@ -1,0 +1,8 @@
+# Crawlers read robots.txt only at the root of a host, so under
+# wowlocal.github.io/waypoint-launcher/ this file is not used. It is here for
+# when the site has a host of its own; until then, submit sitemap.xml in
+# Search Console.
+User-agent: *
+Allow: /
+
+Sitemap: https://wowlocal.github.io/waypoint-launcher/sitemap.xml
