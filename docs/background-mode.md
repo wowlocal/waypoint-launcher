@@ -31,4 +31,56 @@ follow-up pass, and keeps its wish to announce.
 Closing the library window keeps Waypoint, its downloads and these checks
 running; Quit ends them.
 
+## Automatic game updates
+
+Each game opts in separately with **Update Automatically** in its **…** menu.
+All games start with this off. The choice is independent of update
+notifications, the menu bar item and opening at login; with notifications on,
+an update Waypoint will download by itself isn't announced while the hours are
+open. Outside them it's announced as usual.
+
+**Settings → Downloads** offers optional hours, in local time. They can cross
+midnight; equal start and end times mean all day. A boundary timer pauses
+automatic downloads at the end and resumes them in the next allowed hours; the
+row says when (“Resumes at 2:00 AM”), and a waiting update says when it
+downloads. Wake, clock and time-zone changes re-evaluate the hours. Waypoint
+must be running and the Mac awake; this does not wake a sleeping Mac.
+
+Automatic updates run one at a time in library order, after active downloads
+finish. Dragging games in the library changes this priority. Running the
+scheduler is cheap: it rescans the drives and asks for the current build only
+when the last known results say an update could start now. A game whose last
+version check failed waits for a successful one (its Update button stays).
+While any game in the library is running, automatic updates wait, so a
+download doesn't slow the game down: one under way pauses when a game starts
+and resumes when the last one quits (“Resumes when you stop playing”). A
+launch that stalled (“Needs attention”) doesn't count as playing. Shared
+WoW folders in use, disconnected drives, Battle.net and its Agent prevent
+automatic work too. An already-started final commit may finish after a pause
+request.
+
+A paused automatic update shows **Update Now** where Play would be, so the way
+to finish it now is plain and isn't confused with Cancel, which skips the
+version. Update Now is a Resume: the download becomes the person's. If the
+game on disk or the live build has moved on since the download paused, Update
+Now starts a fresh, ordinary update to the live build instead, as Update
+would, reusing what was verified.
+
+Only scheduler-owned updates resume automatically, including after a restart;
+older unfinished downloads stay manual. A person's Pause or Resume ends
+scheduler ownership and is remembered in the checkpoint: no other automatic
+update starts until that download finishes, fails or is canceled. Canceling a
+scheduler-owned download, or one the person took over, skips that build; a later build still updates
+automatically. Canceling a manual download, Play and uninstalling never skip a
+build. Failed automatic updates wait for manual retry. Turning a game's
+automatic updates off turns its download into an ordinary one and ends any
+hold. Uninstalling or removing a game turns its automatic updates off.
+Downloads already completed by another launcher lose their obsolete
+checkpoint; game files and staged data are retained.
+
+**File → Update All Games** runs available updates sequentially in library
+order without changing per-game preferences or applying the hours. It skips
+unavailable or busy games and unfinished downloads, and stops the batch on
+pause or failure.
+
 Not covered by automated tests: a real login launch after logout or reboot.

@@ -27,6 +27,16 @@ public final class DownloadJob {
         }
     }
     public var request: DownloadRequest? { checkpoint?.record.request }
+    public var isAutomaticUpdate: Bool {
+        guard let record = checkpoint?.record else { return false }
+        return record.automaticUpdate == true && record.request.kind == .update && record.failure == nil
+    }
+    /// A scheduled update the person paused or resumed themselves. Until it
+    /// finishes or is cancelled, no other automatic update starts.
+    public var isTakenOverFromSchedule: Bool {
+        guard let record = checkpoint?.record else { return false }
+        return record.automaticUpdate == false && record.request.kind == .update && record.failure == nil
+    }
     public var canPause: Bool { state == .running }
     public var canResume: Bool {
         switch state {
@@ -76,6 +86,7 @@ public final class DownloadJob {
         do { try saveCheckpoint() }
         catch {
             state = .failed("Could not save download state: \(errorMessage(error))")
+            checkpoint?.record.automaticUpdate = nil
             return state
         }
         let task = Task { [self] () -> State in
@@ -105,11 +116,13 @@ public final class DownloadJob {
             }
             self.task = nil
             state = result
+            if case .failed = result { checkpoint?.record.automaticUpdate = nil }
             do {
                 if result == .completed { try discardCheckpoint() }
                 else { try saveCheckpoint() }
             } catch {
                 state = .failed("Could not save download state: \(errorMessage(error))")
+                checkpoint?.record.automaticUpdate = nil
                 Log.error(category, "checkpoint_failed", nil, ["uid": uid, "error": error])
             }
             return state
@@ -126,6 +139,23 @@ public final class DownloadJob {
     }
 
     public func waitUntilStopped() async { if let task { _ = await task.value } }
+
+    /// A user's Pause or Resume takes precedence over the schedule, including
+    /// after a restart. Commit that choice before changing the running task.
+    /// `byPerson`: they paused or resumed it, so other automatic updates wait
+    /// for this one; otherwise (automatic updates turned off for the game) it
+    /// simply becomes an ordinary download, which also ends such a wait.
+    public func makeManual(byPerson: Bool) throws {
+        guard let checkpoint, let automatic = checkpoint.record.automaticUpdate,
+              automatic || !byPerson else { return }
+        let previous = checkpoint.record
+        checkpoint.record.automaticUpdate = byPerson ? false : nil
+        do { try saveCheckpoint() }
+        catch {
+            checkpoint.record = previous
+            throw error
+        }
+    }
 
     public func saveCheckpoint() throws {
         try checkpoint?.save(progress: progress, keepsMacAwake: keepsMacAwake,

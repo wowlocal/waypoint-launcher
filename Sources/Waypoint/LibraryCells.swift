@@ -17,6 +17,10 @@ struct GameRowState {
     var download: DownloadControls
     /// The game's picture, once it has been downloaded.
     var banner: URL?
+    /// When an automatic update resumes or downloads, if one is waiting.
+    var automaticStatus: String? = nil
+    /// The schedule paused this game's automatic update: Update Now shows.
+    var waitsForSchedule = false
 }
 
 extension GameRowState {
@@ -27,7 +31,9 @@ extension GameRowState {
                     (WindowsHeroes.isAvailable || model.heroesEdition(.windows) != nil),
                   wowAccount: model.shownWoWAccount(for: game)?.name,
                   download: DownloadControls(uid: game.id, model: model),
-                  banner: model.artwork(productCode: game.install.productCode).picture)
+                  banner: model.artwork(productCode: game.install.productCode).picture,
+                  automaticStatus: model.automaticUpdateStatus(for: game),
+                  waitsForSchedule: model.isWaitingForSchedule(uid: game.id))
     }
 }
 
@@ -186,8 +192,10 @@ final class GameCell: NSView {
         case .pausing(let update), .paused(let update):
             fraction = update?.fraction ?? 0
             let pausing = if case .pausing = state.phase { true } else { false }
-            detail.stringValue = downloadStatus(update, label: pausing ? "Pausing…" : "Paused")
-            downloadTooltip = { downloadDetails(update, bytesPerSecond: nil, status: pausing ? "Pausing…" : "Paused") }
+            // A download the schedule paused says when it continues.
+            let label = pausing ? "Pausing…" : state.automaticStatus ?? "Paused"
+            detail.stringValue = downloadStatus(update, label: label)
+            downloadTooltip = { downloadDetails(update, bytesPerSecond: nil, status: label) }
         case .uninstalling(let step):
             detail.stringValue = step
         case .failed(let message) where !game.isOffline:
@@ -199,7 +207,11 @@ final class GameCell: NSView {
             if game.isOffline {
                 detail.stringValue = "Drive not connected"
             } else if state.update != nil, !state.isRunning {
-                detail.stringValue = GameUpdate.canUpdate(game.install) ? "Update available" : "Update available in Battle.net"
+                detail.stringValue = GameUpdate.canUpdate(game.install)
+                    ? ["Update available", state.automaticStatus].compactMap(\.self).joined(separator: " · ")
+                    : "Update available in Battle.net"
+                // A narrow window cuts the time off.
+                if state.automaticStatus != nil { detailTooltip = detail.stringValue }
                 detail.textColor = .systemOrange
             } else {
                 detail.stringValue = Self.summary(of: game, wowAccount: state.wowAccount)
@@ -213,7 +225,8 @@ final class GameCell: NSView {
         downloadDetailsView.details = downloadTooltip
         if downloadButtons != nil || DownloadButtons.haveAny(for: state.download, phase: state.phase) {
             let buttons = downloadButtons ?? makeDownloadButtons()
-            buttons.show(state.download, phase: state.phase, uid: game.id, model: model)
+            buttons.show(state.download, phase: state.phase, uid: game.id, model: model,
+                         offersResume: !state.waitsForSchedule)
         }
         status?.isHidden = true
         statusDot?.isHidden = true
@@ -241,6 +254,14 @@ final class GameCell: NSView {
                 showSpinner("Preparing Windows version…")
             case .launching:
                 showSpinner("Starting…")
+            case .paused where state.waitsForSchedule:
+                // The schedule paused it, not the person: finishing it now is
+                // what they'd want, where Update or Play would be, rather
+                // than a small icon beside Cancel, which skips the version.
+                if button.title != "Update Now" { button.title = "Update Now" }
+                button.bezelColor = .controlAccentColor
+                button.isEnabled = state.download.canResume
+                showsButton = true
             case .updating, .pausing, .paused:
                 break // The download buttons are showing.
             case .uninstalling(let step):
@@ -329,6 +350,9 @@ final class GameCell: NSView {
         let game = state.game
         switch state.phase {
         case .idle, .failed: break
+        case .paused where state.waitsForSchedule:
+            Task { await model.updateNow(uid: game.id) }
+            return
         default: return
         }
         if model.canResumeDownload(uid: game.id) {
@@ -352,9 +376,14 @@ final class GameCell: NSView {
         guard let state else { return false }
         switch state.phase {
         // A running game still has its folders to show.
-        case .idle, .failed: return state.game.isInstalled || (state.game.isSupported && !state.isRunning) || state.game.locationID != nil
-        default: return false
+        case .idle, .failed: return state.game.isInstalled || (state.game.isSupported && !state.isRunning) || state.game.locationID != nil || offersAutomaticUpdates
+        default: return offersAutomaticUpdates
         }
+    }
+
+    private var offersAutomaticUpdates: Bool {
+        guard let game = state?.game else { return false }
+        return (game.isInstalled || game.isOffline) && GameUpdate.canUpdate(game.install)
     }
 
     private func makeMenu() -> NSMenu? {
@@ -362,6 +391,23 @@ final class GameCell: NSView {
         let game = state.game
         let menu = NSMenu()
         menu.autoenablesItems = false
+        var automatic: NSMenuItem?
+        if offersAutomaticUpdates {
+            let item = ActionItem("Update Automatically") {
+                model.setAutomaticallyUpdates(!model.automaticallyUpdates(game), for: game)
+            }
+            item.state = model.automaticallyUpdates(game) ? .on : .off
+            automatic = item
+        }
+        // Keep the choice available while a download or a game is running,
+        // without exposing the other commands during an unfinished operation.
+        switch state.phase {
+        case .idle, .failed: break
+        default:
+            guard let automatic else { return nil }
+            menu.addItem(automatic)
+            return menu
+        }
         if game.isSupported, !state.isRunning {
             if model.availableUpdate(for: game) != nil {
                 menu.addItem(ActionItem("Play Without Updating") { Task { await model.play(game) } })
@@ -424,11 +470,17 @@ final class GameCell: NSView {
             menu.addItem(ActionItem("Sign In Again and Play") { Task { await model.play(game, forceSignIn: true) } })
             if GameUpdate.canUpdate(game.install) {
                 menu.addItem(.separator())
+                // With the other update commands; Play keeps the top slot.
+                if let automatic { menu.addItem(automatic) }
                 menu.addItem(ActionItem("Change Language…", enabled: state.canUpdate) { [weak self] in
                     self?.window?.contentViewController?.presentAsSheet(LanguageSheet(game: game, model: model))
                 })
                 menu.addItem(ActionItem("Verify Files", enabled: state.canUpdate) { Task { await model.update(game, verify: true) } })
             }
+        }
+        if let automatic, automatic.menu == nil {
+            if !menu.items.isEmpty { menu.addItem(.separator()) }
+            menu.addItem(automatic)
         }
         if game.isInstalled {
             if !menu.items.isEmpty { menu.addItem(.separator()) }
@@ -829,7 +881,9 @@ private final class DownloadButtons: NSObject {
         cancel.action = #selector(cancelDownload)
     }
 
-    func show(_ controls: DownloadControls, phase: AppModel.Phase, uid: String, model: AppModel) {
+    /// `offersResume`: false when the row's own button resumes instead.
+    func show(_ controls: DownloadControls, phase: AppModel.Phase, uid: String, model: AppModel,
+              offersResume: Bool = true) {
         self.uid = uid
         self.model = model
         var transfers = true
@@ -846,13 +900,16 @@ private final class DownloadButtons: NSObject {
         default:
             transfers = false
         }
-        pauseResume.isHidden = !transfers
+        let resumesElsewhere = if case .paused = phase { !offersResume } else { false }
+        pauseResume.isHidden = !transfers || resumesElsewhere
         keepAwake.isHidden = !transfers
         keepAwake.showKeepAwake(controls.keepsMacAwake)
         keepAwake.isEnabled = controls.canPause || controls.canResume
         cancel.isHidden = !controls.canCancel
         // An install asks what becomes of its data; anything else keeps it.
-        let help = model.isInstallDownload(uid: uid) ? "Stop this install" : "Stop this download. Downloaded data is kept for next time."
+        let help = model.isInstallDownload(uid: uid) ? "Stop this install"
+            : model.isAutomaticDownload(uid: uid) ? "Stop this download. Waypoint won’t download this version automatically."
+            : "Stop this download. Downloaded data is kept for next time."
         if cancel.toolTip != help { cancel.toolTip = help }
     }
 

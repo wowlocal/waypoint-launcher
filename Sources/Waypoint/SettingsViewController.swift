@@ -9,6 +9,7 @@ final class SettingsViewController: NSTabViewController {
         super.init(nibName: nil, bundle: nil)
         tabStyle = .toolbar
         add(GeneralSettings(model: model, updater: appUpdater), "General", symbol: "gearshape")
+        add(DownloadSettings(model: model), "Downloads", symbol: "arrow.down.circle")
         add(AccountSettings(model: model), "Account", symbol: "person.crop.circle")
         add(BackgroundSettings(services: backgroundServices), "Background", symbol: "menubar.rectangle")
     }
@@ -101,10 +102,6 @@ private final class GeneralSettings: SettingsPane {
     private let model: AppModel
     private let regionPopup = NSPopUpButton()
     private let artworkCheckbox = NSButton(checkboxWithTitle: "Show game artwork", target: nil, action: nil)
-    private let speedSlider = NSSlider(value: Double(DownloadSpeedLimit.choices.count - 1), minValue: 0,
-                                       maxValue: Double(DownloadSpeedLimit.choices.count - 1), target: nil, action: nil)
-    private let speedValue = NSTextField.label(.body, monospacedDigits: true)
-    private var defaultsObserver: NSObjectProtocol?
     private let updater: AppUpdater
     private let tipsCheckbox = NSButton(checkboxWithTitle: "Get tip builds", target: nil, action: nil)
     private let tipsStatus = NSTextField(wrappingLabelWithString: "")
@@ -130,19 +127,6 @@ private final class GeneralSettings: SettingsPane {
         artworkCheckbox.action = #selector(artworkChanged)
         section("Artwork", [artworkCheckbox, note("A picture behind each game, and icons for games that aren’t installed. Downloaded from Blizzard’s catalog (about 7 MB); turning this off deletes the downloaded files.")])
 
-        speedSlider.numberOfTickMarks = DownloadSpeedLimit.choices.count
-        speedSlider.allowsTickMarkValuesOnly = true
-        speedSlider.isContinuous = true
-        speedSlider.target = self
-        speedSlider.action = #selector(speedChanged)
-        speedSlider.setAccessibilityLabel("Download speed limit")
-        speedValue.alignment = .right
-        speedValue.widthAnchor.constraint(equalToConstant: 90).isActive = true
-        speedSlider.widthAnchor.constraint(equalToConstant: 260).isActive = true
-        let speedRow = NSStackView(views: [speedSlider, speedValue])
-        speedRow.spacing = 10
-        section("Download Speed", [speedRow, note("Total for all game downloads. Changes apply immediately.")])
-
         // Development builds don't update themselves: no choice to offer.
         if updater.canUpdate {
             tipsCheckbox.target = self
@@ -162,11 +146,6 @@ private final class GeneralSettings: SettingsPane {
 
         observeChanges { [weak self] in self?.renderRegion() }
         observeChanges { [weak self] in self?.renderArtwork() }
-        defaultsObserver = NotificationCenter.default.addObserver(
-            forName: UserDefaults.didChangeNotification, object: nil, queue: .main) { [weak self] _ in
-            MainActor.assumeIsolated { self?.renderSpeed() }
-        }
-        renderSpeed()
     }
 
     private func renderRegion() {
@@ -193,20 +172,6 @@ private final class GeneralSettings: SettingsPane {
     @objc private func tipsChanged() { updater.setReceivesTips(tipsCheckbox.state == .on) }
     @objc private func restart() { updater.restartToUpdate() }
     @objc private func artworkChanged() { model.showsArtwork = artworkCheckbox.state == .on }
-
-    private func renderSpeed() {
-        let limit = DownloadSpeedLimit.load()
-        speedSlider.integerValue = DownloadSpeedLimit.choices.firstIndex(of: limit)!
-        speedValue.stringValue = limit.label
-        speedSlider.setAccessibilityValueDescription(limit.label)
-        DownloadBandwidthLimiter.shared.bytesPerSecond = limit.bytesPerSecond
-    }
-
-    @objc private func speedChanged() {
-        let index = min(max(speedSlider.integerValue, 0), DownloadSpeedLimit.choices.count - 1)
-        DownloadSpeedLimit.choices[index].save()
-        renderSpeed()
-    }
 }
 
 // MARK: Account

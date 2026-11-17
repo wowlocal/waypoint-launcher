@@ -80,11 +80,18 @@ public struct UnfinishedDownload: Codable, Sendable, Equatable {
     public var progress: UpdateProgress?
     public var keepsMacAwake: Bool
     public var failure: String?
+    /// `true`: the scheduler owns this update. `false`: it was the
+    /// scheduler's until the person paused or resumed it, and automatic
+    /// updates wait for them to finish or cancel it. Missing in older
+    /// checkpoints, whose paused downloads keep waiting for an explicit Resume.
+    public var automaticUpdate: Bool?
 
-    public init(request: DownloadRequest, progress: UpdateProgress? = nil, keepsMacAwake: Bool = false, failure: String? = nil) {
+    public init(request: DownloadRequest, progress: UpdateProgress? = nil, keepsMacAwake: Bool = false,
+                failure: String? = nil, automaticUpdate: Bool = false) {
         self.request = request
         self.progress = progress
         self.keepsMacAwake = keepsMacAwake
         self.failure = failure
+        self.automaticUpdate = automaticUpdate && request.kind == .update ? true : nil
     }
 }

@@ -114,6 +114,11 @@ final class MenuBarItem: NSObject, NSMenuDelegate {
             return ActionItem("Pausing \(name)…", enabled: false) {}
         case .failed where !model.canResumeDownload(uid: uid):
             return nil
+        case .paused where model.isWaitingForSchedule(uid: uid):
+            // The row's Update Now, by the same name.
+            return ActionItem("Update \(name) Now", enabled: model.canResumeDownload(uid: uid)) { [model] in
+                Task { await model.updateNow(uid: uid) }
+            }
         case .paused, .failed:
             return ActionItem("Resume \(name)", enabled: model.canResumeDownload(uid: uid)) { [model] in
                 Task { await model.resumeDownload(uid: uid) }

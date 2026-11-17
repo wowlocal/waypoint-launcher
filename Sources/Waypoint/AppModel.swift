@@ -128,6 +128,16 @@ final class AppModel {
     @ObservationIgnored var updateChecked: ((Game, UpdateCheck) -> Void)?
     /// Game uid -> the latest build the background check confirmed on disk.
     @ObservationIgnored private var confirmedUpdates: [String: String] = [:]
+    private(set) var automaticUpdates = AutomaticUpdatePreferences.load()
+    @ObservationIgnored private var automaticUpdateTask: Task<Void, Never>?
+    @ObservationIgnored private var automaticUpdateTimer: Timer?
+    private(set) var isUpdatingAll = false
+    /// Games whose last version check failed. Their last known result stays
+    /// on screen for manual updates; automatic updates wait for a fresh one.
+    @ObservationIgnored private var unconfirmedUpdates: Set<String> = []
+    /// Whether the automatic-update hours are open, as of the last boundary,
+    /// wake or clock change: the rows' "Downloads at …" follows it.
+    private(set) var automaticHoursOpen = true
 
     /// nil = use the region each game was installed for.
     var regionOverride: Region? {
@@ -258,6 +268,7 @@ final class AppModel {
         // what was removed keeps it from listing the game again.
         try? library.stateStore.remove(game.install)
         updates.removeValue(forKey: game.id)
+        forgetAutomaticUpdates(for: game.id)
         locationsChanged()
     }
 
@@ -330,7 +341,15 @@ final class AppModel {
         let center = NSWorkspace.shared.notificationCenter
         for name in [NSWorkspace.didLaunchApplicationNotification, NSWorkspace.didTerminateApplicationNotification] {
             observers.append(center.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
-                MainActor.assumeIsolated { self?.refreshRunning() }
+                MainActor.assumeIsolated {
+                    self?.refreshRunning()
+                    Task { await self?.pauseAutomaticUpdatesForBattleNet() }
+                }
+            })
+        }
+        for name in [Notification.Name.NSSystemTimeZoneDidChange, NSNotification.Name.NSSystemClockDidChange] {
+            observers.append(NotificationCenter.default.addObserver(forName: name, object: nil, queue: .main) { [weak self] _ in
+                MainActor.assumeIsolated { self?.scheduleAutomaticUpdates() }
             })
         }
         // A drive connected or ejected: its remembered games come online or
@@ -550,6 +569,7 @@ final class AppModel {
         libraryOrder = LibraryOrder.moving(uid, before: target, in: games.map(\.install.uid), remembered: libraryOrder)
         games = LibraryOrder.sorted(games, by: libraryOrder, id: \.install.uid)
         Log.info(.library, "reordered", nil, ["uid": uid])
+        scheduleAutomaticUpdates()
     }
 
     func heroesEdition(_ platform: InstallPlatform) -> Game? {
@@ -587,8 +607,308 @@ final class AppModel {
 
     // MARK: Updates
 
+    func automaticallyUpdates(_ game: Game) -> Bool { automaticUpdates.enabledGames.contains(game.id) }
+
+    /// Opted in, and this build wasn't canceled or failed: Waypoint will
+    /// download it by itself, now or in the next allowed hours.
+    private func willUpdateAutomatically(_ game: Game, to build: String) -> Bool {
+        automaticallyUpdates(game) && automaticUpdates.skippedBuilds[game.id] != build
+    }
+
+    /// For the library row. A paused download the scheduler will pick up
+    /// again says so instead of a plain "Paused"; a waiting update says when
+    /// it downloads. Nil when there's nothing automatic to tell.
+    func automaticUpdateStatus(for game: Game) -> String? {
+        // Another download the person paused holds everything: no promise.
+        guard !automaticUpdatesHeld else { return nil }
+        if let job = downloads[game.id] {
+            guard job.isAutomaticUpdate, job.state == .paused else { return nil }
+            if !automaticHoursOpen { return "Resumes at \(automaticStartTime)" }
+            return isPlaying ? "Resumes when you stop playing" : "Resumes automatically"
+        }
+        guard let check = availableUpdate(for: game), willUpdateAutomatically(game, to: check.latest.buildConfig) else { return nil }
+        if !automaticHoursOpen { return "Downloads at \(automaticStartTime)" }
+        return isPlaying ? "Downloads when you stop playing" : nil
+    }
+
+    /// A game in the library is running: automatic updates wait until none
+    /// is, so a download doesn't slow the game down. The person can still
+    /// finish one now (`updateNow`). A launch that stalled ("Needs
+    /// attention") isn't play, and doesn't hold every other game's updates.
+    private var isPlaying: Bool {
+        running.contains { uid in
+            if case .failed = phases[uid] { false } else { true }
+        }
+    }
+
+    /// An automatic update the schedule paused (outside the hours, while
+    /// playing, or for Battle.net): its row offers Update Now.
+    func isWaitingForSchedule(uid: String) -> Bool {
+        downloads[uid].map { $0.isAutomaticUpdate && $0.state == .paused } ?? false
+    }
+
+    /// Update Now on an update the schedule paused: a Resume, which makes
+    /// the download the person's. Like the scheduler, it first makes sure
+    /// the checkpoint is not stale: if another launcher changed the game on
+    /// disk, or Blizzard has a newer build than it targets, the update starts
+    /// afresh (an ordinary one, as Update starts) rather than finishing an
+    /// older build over a newer one. Verified data is reused either way.
+    /// Without a version check yet (just launched, offline), it resumes.
+    func updateNow(uid: String) async {
+        guard isWaitingForSchedule(uid: uid), canResumeDownload(uid: uid), let job = downloads[uid],
+              let game = games.first(where: { $0.id == uid }) else { return }
+        let installChanged = job.request?.install != game.install
+        let liveBuildChanged = availableUpdate(for: game).map { $0.latest.buildConfig != job.request?.target?.buildConfig } ?? false
+        guard installChanged || liveBuildChanged else {
+            await resumeDownload(uid: uid)
+            return
+        }
+        Log.notice(.gameUpdate, "update_now_replans", nil, ["uid": uid, "installChanged": installChanged])
+        guard discardDownload(uid: uid) else { return }
+        // The last check was for the game as it was: ask again, so the
+        // fresh update never targets a build older than what's on disk. With
+        // no answer, the game is as on disk, and its row offers Update.
+        if availableUpdate(for: game) == nil { await checkForUpdates(force: true, announces: false) }
+        guard let current = games.first(where: { $0.id == uid }), availableUpdate(for: current) != nil else { return }
+        await update(current)
+    }
+
+    /// "2:00 AM" or "02:00", as the Mac's settings show times. The hours are
+    /// wall-clock times, so they're formatted in a fixed zone.
+    private var automaticStartTime: String {
+        let minute = automaticUpdates.startMinute
+        let date = Self.wallClock.calendar.date(from: DateComponents(year: 2001, month: 1, day: 15,
+                                                                    hour: minute / 60, minute: minute % 60))
+        return date.map(Self.wallClock.string(from:)) ?? ""
+    }
+
+    private static let wallClock: DateFormatter = {
+        var calendar = Calendar(identifier: .gregorian)
+        calendar.timeZone = TimeZone(identifier: "UTC")!
+        let formatter = DateFormatter()
+        formatter.calendar = calendar
+        formatter.timeZone = calendar.timeZone
+        formatter.dateStyle = .none
+        formatter.timeStyle = .short
+        return formatter
+    }()
+
+    func setAutomaticallyUpdates(_ enabled: Bool, for game: Game) {
+        var preferences = automaticUpdates
+        if enabled {
+            preferences.enabledGames.insert(game.id)
+            preferences.skippedBuilds.removeValue(forKey: game.id)
+        } else {
+            preferences.enabledGames.remove(game.id)
+        }
+        setAutomaticUpdates(preferences)
+    }
+
+    func setAutomaticUpdates(_ preferences: AutomaticUpdatePreferences) {
+        guard preferences != automaticUpdates else { return }
+        automaticUpdates = preferences
+        automaticUpdates.save()
+        // Turning a game off governs future updates: a download already
+        // under way finishes as an ordinary one, and no longer holds others.
+        for (uid, job) in downloads where (job.isAutomaticUpdate || job.isTakenOverFromSchedule)
+            && !preferences.enabledGames.contains(uid) {
+            takeManualControl(of: uid, byPerson: false)
+        }
+        // The scheduler checks the live build itself before it starts
+        // anything, so a settings change needs no network request of its own.
+        scheduleAutomaticUpdates()
+    }
+
+    /// An uninstalled or removed game takes its automatic-update choice with
+    /// it: installed again, it starts off like any new game.
+    private func forgetAutomaticUpdates(for uid: String) {
+        guard automaticUpdates.enabledGames.contains(uid) || automaticUpdates.skippedBuilds[uid] != nil else { return }
+        automaticUpdates.enabledGames.remove(uid)
+        automaticUpdates.skippedBuilds.removeValue(forKey: uid)
+        automaticUpdates.save()
+    }
+
+    /// The person paused or resumed an automatic update: no other one starts
+    /// until it finishes or they cancel it, just as Update All Games stops.
+    private var automaticUpdatesHeld: Bool { downloads.values.contains { $0.isTakenOverFromSchedule } }
+
+    /// Re-arm for wall-clock boundaries rather than waiting for the normal
+    /// thirty-minute update poll. Only scheduler-owned jobs may be resumed.
+    func scheduleAutomaticUpdates() {
+        automaticUpdateTimer?.invalidate()
+        automaticUpdateTimer = nil
+        guard !isPreparingToQuit else { return }
+        let hoursOpen = automaticUpdates.allowsDownloads()
+        if automaticHoursOpen != hoursOpen { automaticHoursOpen = hoursOpen }
+        if let boundary = automaticUpdates.nextBoundary() {
+            let timer = Timer(fire: boundary, interval: 0, repeats: false) { [weak self] _ in
+                Task { @MainActor in
+                    self?.scheduleAutomaticUpdates()
+                    await self?.checkForUpdatesInBackground()
+                }
+            }
+            automaticUpdateTimer = timer
+            RunLoop.main.add(timer, forMode: .common)
+        }
+        forgetObsoleteAutomaticCheckpoints()
+        for (uid, job) in downloads where job.isAutomaticUpdate {
+            let build = job.request?.target?.buildConfig ?? ""
+            let game = games.first { $0.id == uid }
+            if isPlaying || !automaticUpdates.allowsUpdate(gameID: uid, build: build)
+                || game.map({ !automaticFolderIsAvailable(for: $0) }) ?? true { job.pause() }
+        }
+        guard automaticUpdateTask == nil, !isUpdatingAll, !hasActiveDownloads, !automaticUpdatesHeld, !isPlaying,
+              !automaticUpdates.enabledGames.isEmpty, automaticUpdates.allowsDownloads() else { return }
+        automaticUpdateTask = Task { [weak self] in
+            guard let self else { return }
+            defer { self.automaticUpdateTask = nil }
+            await self.runAutomaticUpdates()
+        }
+    }
+
+    private func runAutomaticUpdates() async {
+        // This runs whenever the running apps change, so everything cheap
+        // comes first: the drives are read and Blizzard asked only when the
+        // last known results say an update could start now.
+        guard nextAutomaticUpdate() != nil, await Self.battleNetIsClosed() else { return }
+        // A new live build alone is not enough: another launcher may have
+        // installed it since our last scan. Re-read before planning any write.
+        scanOffMainThreadOnce()
+        await scansFinished()
+        guard await checkForUpdates(force: true, announces: false) else { return }
+        while !isPreparingToQuit, !isUpdatingAll, automaticUpdates.allowsDownloads(), !hasActiveDownloads {
+            guard await Self.battleNetIsClosed() else { return }
+            // Library order is also download priority, with no second list
+            // of priorities to maintain. New automatic work waits for manual downloads.
+            guard let selected = nextAutomaticUpdate(), let game = games.first(where: { $0.id == selected.id }) else { return }
+            let volume = await Self.volumeUUID(game.install.installPath)
+            guard !isPreparingToQuit, !isUpdatingAll, !hasActiveDownloads,
+                  let current = games.first(where: { $0.id == game.id }),
+                  current.install == game.install, let check = availableUpdate(for: current),
+                  automaticUpdates.allowsUpdate(gameID: current.id, build: check.latest.buildConfig),
+                  automaticFolderIsAvailable(for: current) else { return }
+            // Settings, priority, processes or downloads can change during
+            // the volume lookup. Select again before committing to this job.
+            guard nextAutomaticUpdate() == selected else { continue }
+            if let job = downloads[current.id] {
+                guard job.isAutomaticUpdate, job.state == .paused, canResumeDownload(uid: current.id) else { return }
+                // An interrupted download must never restore an older build
+                // after Blizzard or another launcher has moved the game on.
+                if job.request?.target?.buildConfig != check.latest.buildConfig || job.request?.install != current.install {
+                    do { try downloadQueue.remove(key: current.id) }
+                    catch { Log.warning(.cdn, "automatic_replan_failed", nil, ["uid": current.id, "error": error]); return }
+                } else {
+                    await runDownload(uid: current.id)
+                    continue
+                }
+            }
+            guard canUpdate(current), automaticFolderIsAvailable(for: current) else { return }
+            Log.info(.gameUpdate, "automatic_update_requested", nil, ["uid": current.id])
+            await startDownload(DownloadRequest(kind: .update, install: current.install,
+                product: InstallableProduct.forProduct(current.install.productCode), target: check.latest),
+                volumeUUID: volume, automaticUpdate: true)
+        }
+    }
+
+    private static func battleNetIsClosed() async -> Bool {
+        await Task.detached(priority: .utility) { BattleNet.running().isEmpty }.value
+    }
+
+    /// Another launcher may have finished a paused automatic update: its
+    /// checkpoint targets the build now installed. Forget only the
+    /// checkpoint; downloaded data is left untouched. One the person paused
+    /// goes too, or it would hold the other games' updates for nothing.
+    private func forgetObsoleteAutomaticCheckpoints() {
+        for game in games where game.isInstalled {
+            guard let job = downloads[game.id], job.isAutomaticUpdate || job.isTakenOverFromSchedule, job.state == .paused,
+                  let target = job.request?.target?.buildConfig, target == game.install.buildConfig else { continue }
+            do { try downloadQueue.remove(key: game.id) }
+            catch { Log.warning(.cdn, "automatic_checkpoint_cleanup_failed", nil, ["uid": game.id, "error": error]) }
+        }
+    }
+
+    private func nextAutomaticUpdate() -> AutomaticUpdateCandidate? {
+        guard !automaticUpdatesHeld else { return nil }
+        let candidates = games.compactMap { game -> AutomaticUpdateCandidate? in
+            guard !unconfirmedUpdates.contains(game.id), let check = availableUpdate(for: game) else { return nil }
+            let folderAvailable = automaticFolderIsAvailable(for: game)
+            let job = downloads[game.id]
+            return AutomaticUpdateCandidate(id: game.id, build: check.latest.buildConfig,
+                canStart: canUpdate(game) && folderAvailable,
+                canResume: job?.isAutomaticUpdate == true && job?.state == .paused
+                    && canResumeDownload(uid: game.id) && folderAvailable)
+        }
+        return AutomaticUpdateSelection.next(in: candidates, preferences: automaticUpdates,
+            hasActiveDownloads: hasActiveDownloads, isUpdatingAll: isUpdatingAll, isQuitting: isPreparingToQuit,
+            isPlaying: isPlaying)
+    }
+
+    private func pauseAutomaticUpdatesForBattleNet() async {
+        guard downloads.values.contains(where: { $0.isAutomaticUpdate && $0.canPause }) else { return }
+        guard await Task.detached(priority: .utility, operation: { !BattleNet.running().isEmpty }).value else { return }
+        for job in downloads.values where job.isAutomaticUpdate { job.pause() }
+    }
+
+    private func automaticFolderIsAvailable(for game: Game) -> Bool {
+        let folder = Self.folderKey(game.install.installPath)
+        // A paused sibling owns shared CASC storage too. Do not update a
+        // different WoW edition until that job is finished or cancelled.
+        return game.isInstalled && !isRunning(game) && !isPreparingToQuit
+            && !uninstallingFolders.contains(folder) && !cleaningFolders.contains(folder)
+            && !discoveredGames.contains { $0.id != game.id && Self.folderKey($0.install.installPath) == folder && (isRunning($0) || isBusy($0)) }
+            && !jobFolders.contains { $0.key != game.id && $0.value == folder }
+    }
+
+    var canUpdateAllGames: Bool {
+        !isPreparingToQuit && !isUpdatingAll && games.contains { availableUpdate(for: $0) != nil && canUpdate($0) }
+    }
+
+    func updateAllGames() async {
+        guard canUpdateAllGames else { return }
+        isUpdatingAll = true
+        defer {
+            isUpdatingAll = false
+            scheduleAutomaticUpdates()
+        }
+        // Let an already-running automatic update finish; no second batch
+        // starts alongside it. Paused or failed jobs still need manual Resume.
+        await automaticUpdateTask?.value
+        scanOffMainThreadOnce()
+        await scansFinished()
+        await checkForUpdates(force: true)
+        for uid in games.map(\.id) {
+            guard !isPreparingToQuit else { return }
+            guard let game = games.first(where: { $0.id == uid }), availableUpdate(for: game) != nil,
+                  canUpdate(game), automaticFolderIsAvailable(for: game) else { continue }
+            await update(game)
+            // A pause or a failure stops the batch, rather than silently
+            // beginning another large download after the person stopped one.
+            if downloads[uid] != nil { return }
+        }
+    }
+
+    /// A user Pause or Resume takes precedence over scheduling, including
+    /// after restarting: the scheduler no longer pauses or resumes this job.
+    private func takeManualControl(of uid: String, byPerson: Bool = true) {
+        do { try downloads[uid]?.makeManual(byPerson: byPerson) }
+        catch { Log.warning(.cdn, "automatic_control_save_failed", nil, ["uid": uid, "error": error]) }
+    }
+
+    /// Canceling an automatic update means "not this build": the scheduler
+    /// must not download it again right away. Only an explicit cancel of the
+    /// scheduler's own download says that; a manual one, Play, uninstalling
+    /// and pausing don't.
+    private func skipAutomaticUpdate(of uid: String) {
+        guard isAutomaticDownload(uid: uid), automaticUpdates.enabledGames.contains(uid),
+              let build = downloads[uid]?.request?.target?.buildConfig else { return }
+        automaticUpdates.skippedBuilds[uid] = build
+        automaticUpdates.save()
+    }
+
     func availableUpdate(for game: Game) -> UpdateCheck? {
-        guard let check = updates[game.id], check.isUpdateAvailable else { return nil }
+        guard let check = updates[game.id], check.isUpdateAvailable,
+              check.installedBuild == game.install.buildConfig,
+              check.installedVersion == game.install.version else { return nil }
         return check
     }
 
@@ -604,6 +924,7 @@ final class AppModel {
     /// more before it's announced.
     func checkForUpdatesInBackground() async {
         guard !isPreparingToQuit else { return }
+        defer { scheduleAutomaticUpdates() }
         guard UserDefaults.standard.bool(forKey: BackgroundPreferences.notificationsKey) else {
             await checkForUpdates()
             return
@@ -634,7 +955,10 @@ final class AppModel {
         while let scan = scanOffMainThread { await scan.value }
         guard !isPreparingToQuit,
               updateCheckSchedule.request(force: force, announces: announces) else { return false }
-        defer { updateCheckSchedule.cancel() }
+        defer {
+            updateCheckSchedule.cancel()
+            scheduleAutomaticUpdates()
+        }
         var announces = announces
         repeat {
             for game in discoveredGames where (game.family != .other || GameUpdate.canUpdate(game.install)) && game.isInstalled {
@@ -645,10 +969,20 @@ final class AppModel {
                           current.isInstalled, current.install.version == game.install.version,
                           current.install.buildConfig == game.install.buildConfig else { continue }
                     updates[game.id] = check
-                    if downloads[game.id] == nil, announces { updateChecked?(current, check) }
+                    unconfirmedUpdates.remove(game.id)
+                    // An update Waypoint is about to download itself needs no
+                    // notification; outside the hours, it's announced as usual.
+                    if downloads[game.id] == nil, announces,
+                       !(check.isUpdateAvailable && automaticUpdates.allowsDownloads()
+                         && willUpdateAutomatically(current, to: check.latest.buildConfig)) {
+                        updateChecked?(current, check)
+                    }
                     Log.info(.gameUpdate, "checked", nil, ["uid": game.id, "installed": game.install.version ?? "?",
                                                            "latest": check.latest.name, "update_available": check.isUpdateAvailable])
                 } catch {
+                    // Keep the last result: a check that fails right after
+                    // wake must not hide a waiting update or offer Play.
+                    unconfirmedUpdates.insert(game.id)
                     Log.warning(.gameUpdate, "check_failed", nil, ["uid": game.id, "error": error])
                 }
             }
@@ -865,17 +1199,26 @@ final class AppModel {
         return await Task.detached(priority: .userInitiated) { InstallVolume.volumeUUID(at: folder) }.value
     }
 
-    private func startDownload(_ request: DownloadRequest, volumeUUID: String?, keepsMacAwake: Bool = false) async {
+    private func startDownload(_ request: DownloadRequest, volumeUUID: String?, keepsMacAwake: Bool = false,
+                               automaticUpdate: Bool = false) async {
         var request = request
         request.volumeUUID = volumeUUID
         do {
-            try downloadQueue.enqueue(request, keepsMacAwake: keepsMacAwake)
+            try downloadQueue.enqueue(request, keepsMacAwake: keepsMacAwake, automaticUpdate: automaticUpdate)
             phases.removeValue(forKey: request.key)
             if request.kind == .install, request.install.productCode == "hero" { selectHeroesEdition(request.install.platform) }
             await runDownload(uid: request.key)
         } catch {
             Log.error(.cdn, "enqueue_failed", nil, ["uid": request.key, "error": error])
-            NSAlert(error: error).runModal()
+            if automaticUpdate {
+                // Background work reports in the row and logs, never in an
+                // alert that steals focus. Leave this build for manual retry.
+                phases[request.key] = .failed(errorMessage(error))
+                if let build = request.target?.buildConfig {
+                    automaticUpdates.skippedBuilds[request.key] = build
+                    automaticUpdates.save()
+                }
+            } else { NSAlert(error: error).runModal() }
         }
     }
 
@@ -962,8 +1305,15 @@ final class AppModel {
     }
 
     private func runDownload(uid: String) async {
+        defer { scheduleAutomaticUpdates() }
         let request = downloads[uid]?.request
-        if await downloadQueue.run(key: uid) == .completed {
+        let wasAutomatic = downloads[uid]?.isAutomaticUpdate == true
+        let result = await downloadQueue.run(key: uid)
+        if wasAutomatic, case .failed = result, let build = request?.target?.buildConfig {
+            automaticUpdates.skippedBuilds[uid] = build
+            automaticUpdates.save()
+        }
+        if result == .completed {
             if let request, request.kind == .install { await rememberInstallLocation(request.install) }
             reload()
             await checkForUpdates(force: true)
@@ -972,7 +1322,10 @@ final class AppModel {
 
     func canPauseDownload(uid: String) -> Bool { downloads[uid]?.canPause == true && !isUninstalling(uid: uid) }
 
-    func pauseDownload(uid: String) { downloads[uid]?.pause() }
+    func pauseDownload(uid: String) {
+        takeManualControl(of: uid)
+        downloads[uid]?.pause()
+    }
 
     func downloadBytesPerSecond(uid: String) -> Double? { downloads[uid]?.bytesPerSecond }
 
@@ -985,6 +1338,12 @@ final class AppModel {
 
     func canCancelDownload(uid: String) -> Bool { downloads[uid]?.canCancel == true && !isUninstalling(uid: uid) }
 
+    /// The scheduler's download, or one the person took over from it:
+    /// canceling it skips that version.
+    func isAutomaticDownload(uid: String) -> Bool {
+        downloads[uid].map { $0.isAutomaticUpdate || $0.isTakenOverFromSchedule } ?? false
+    }
+
     /// A new install's download, rather than an update of an installed game.
     func isInstallDownload(uid: String) -> Bool { downloads[uid]?.request?.kind == .install }
 
@@ -992,6 +1351,7 @@ final class AppModel {
     /// later install/update; no writer is active when canCancel is true.
     func cancelDownload(uid: String) {
         guard canCancelDownload(uid: uid) else { return }
+        skipAutomaticUpdate(of: uid)
         guard discardDownload(uid: uid) else { return }
         reload()
         phases.removeValue(forKey: uid)
@@ -1067,6 +1427,7 @@ final class AppModel {
 
     func resumeDownload(uid: String) async {
         guard canResumeDownload(uid: uid) else { return }
+        takeManualControl(of: uid)
         defer { ProcessMemory.releaseFreed() }
         Log.notice(.cdn, "resume_requested", nil, ["uid": uid])
         await runDownload(uid: uid)
@@ -1085,11 +1446,14 @@ final class AppModel {
 
     func prepareToQuit() async -> Bool {
         isPreparingToQuit = true
+        automaticUpdateTimer?.invalidate()
+        automaticUpdateTimer = nil
         do {
             try await downloadQueue.pauseAll()
             return true
         } catch {
             isPreparingToQuit = false
+            scheduleAutomaticUpdates()
             NSAlert(error: error).runModal()
             return false
         }
@@ -1146,7 +1510,10 @@ final class AppModel {
                 // No row can say it: the game is gone all the same (putting it
                 // back failed), or its row shows a failed download's message.
                 phases.removeValue(forKey: game.id)
-                if gone { discardDownload(uid: game.id) }
+                if gone {
+                    discardDownload(uid: game.id)
+                    forgetAutomaticUpdates(for: game.id)
+                }
                 NSAlert(error: error).runModal()
             }
             return
@@ -1170,6 +1537,7 @@ final class AppModel {
         }
         phases.removeValue(forKey: game.id)
         updates.removeValue(forKey: game.id)
+        forgetAutomaticUpdates(for: game.id)
         // Its place in the library goes with it: installed again, it comes
         // last like any new game. HotS keeps it while its other edition stays.
         if !discoveredGames.contains(where: { $0.install.uid == game.install.uid && $0.id != game.id }) {
@@ -1304,6 +1672,8 @@ final class AppModel {
                     ? "The game has not opened a window. If its process is still running, quit it in Activity Monitor before trying again."
                     : "The game exited before opening a window.")
                 if result == .stalled { watchForLateWindowsWindow(game, title: title, session: session) }
+                // A stalled launch isn't play (`isPlaying`): updates go on.
+                scheduleAutomaticUpdates()
                 return
             }
             // Keep "launching" until the game shows up in the running list.
@@ -1804,6 +2174,7 @@ final class AppModel {
         for game in windowsGames {
             for pid in windowsProcesses[game.id] ?? [] { observeWindowsExit(pid: pid, game: game) }
         }
+        scheduleAutomaticUpdates()
     }
 
     private func observeWindowsExit(pid: Int32, game: Game) {
@@ -1888,6 +2259,8 @@ final class AppModel {
                     guard case .failed = self.phases[game.id] else { return }
                     if self.hasWindowsWindow(game, title: title) {
                         self.phases[game.id] = .idle
+                        // Now it's play: automatic updates wait.
+                        self.scheduleAutomaticUpdates()
                         Log.info(.launch, "window_created_late", nil, ["uid": game.id])
                         return
                     }

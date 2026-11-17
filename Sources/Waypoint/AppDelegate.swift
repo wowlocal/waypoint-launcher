@@ -148,6 +148,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
         appUpdater.restartToUpdate()
     }
 
+    @objc func updateAllGames(_ sender: Any?) {
+        Task { await model.updateAllGames() }
+    }
+
     /// Asks in a sheet on the library window, which comes forward for it.
     @objc func locateInstalledGames(_ sender: Any?) {
         showLibrary(nil)
@@ -220,6 +224,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate, NSWindowDelegate, NSMe
     func validateMenuItem(_ item: NSMenuItem) -> Bool {
         switch item.action {
         case #selector(checkForUpdates(_:)): true
+        case #selector(updateAllGames(_:)): model.canUpdateAllGames
         case #selector(addAccount(_:)), #selector(signInAgain(_:)), #selector(signOut(_:)): !model.isSigningIn
         case #selector(locateInstalledGames(_:)): !model.isLocatingGames
         default: true

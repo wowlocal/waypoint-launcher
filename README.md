@@ -36,6 +36,7 @@ The launcher runs on Apple silicon. Mac games use their own executables; support
 - **Your library in one window.** Installed games appear above a collapsible **Available Games** list, where you install more. It starts open while nothing is installed. Pictures and icons come from Blizzard's catalog; turn off **Show game artwork** in Settings to remove them and delete the downloaded artwork.
 - **Install, update and repair.** Download directly from Blizzard, update games installed by either launcher, and use **Verify Files** to repair missing or corrupt content. Existing optional content, such as WoW's HighRes textures, is preserved.
 - **Downloads you can leave and resume.** Installs, updates and language changes survive quitting, crashes and Waypoint updates. Pause and resume in the game's row, set a shared speed limit, or keep the Mac awake for a download. Hover over progress for speed, exact sizes and estimated time left.
+- **Optional automatic game updates.** Turn on **Update Automatically** per game, and optionally choose hours in **Settings → Downloads**. Updates download one at a time, top of the library first. **File → Update All Games** updates every game with one command.
 - **Sign in once per game.** Use the official Battle.net web login, including two-factor authentication. Each saved account keeps its own sign-ins. Switch accounts or use **Play As** for a single launch; optionally save a login in Keychain.
 - **Choose a WoW account.** Pick a WoW account (WoW1, WoW2) under **WoW Account** in a WoW game's menu; each edition remembers its own. With a single license, it's picked for you. Americas only for now. [Details](docs/wow-accounts.md).
 - **Windows Heroes of the Storm.** The Windows edition is recommended on supported Macs, with the macOS edition selectable in the same row. It uses a free Wine component; CrossOver is not required. Windows HotS needs Rosetta and macOS 15+.
@@ -157,6 +158,14 @@ The cup button keeps the Mac awake while that download runs, while allowing the 
 Use **✕** on a paused or failed download to stop tracking it. An unfinished installation offers **Keep Downloaded Data** or **Move to Trash** when cleanup is safe. Installed games and shared data are protected; cancelling an update keeps its downloaded data. Keeping data lets a later install into the same folder reuse it.
 
 **Settings** (⌘,) offers a combined download limit from **250 KB/s** to **100 MB/s**, or **Unlimited**. It also controls game artwork and the optional menu bar item. Turning artwork off removes its downloaded files; turning it on downloads them again (about 7 MB).
+
+**Automatic updates** are off until you choose **Update Automatically** in a game’s **…** menu. Waypoint then downloads that game’s updates one at a time, top of the library first; drag a game higher to update it sooner. Waypoint must be open and the Mac awake; it never wakes the Mac. With notifications on, their updates aren’t announced during the hours Waypoint downloads them itself.
+
+While you play any game in your library, automatic updates wait and continue after you quit, so they don't slow the game down. To keep them to certain hours as well, turn on **Only update automatically during these hours** in **Settings → Downloads**; the same start and end time means all day. A download still running when the hours end pauses, and its row says when it continues. Click **Update Now** to finish a paused one straight away. Updates you start yourself run at any time.
+
+Pause or resume an automatic download (Update Now counts as resuming) and Waypoint leaves it as you set it, and starts no other automatic update until it finishes or you cancel it. Cancel one and that version is skipped; the next version updates automatically again. A failed one waits for you to retry. Turn **Update Automatically** off and a download already under way carries on as an ordinary one. Uninstalling a game turns its automatic updates off.
+
+**File → Update All Games** downloads every available update now, one at a time, whatever the hours. It skips games that are running, disconnected or already downloading, and stops if you pause a download or one fails. Updates need Battle.net closed.
 
 **The game's … menu** also offers:
 
