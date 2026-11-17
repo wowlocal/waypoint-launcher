@@ -623,11 +623,54 @@ final class AppModel {
         guard !automaticUpdatesHeld else { return nil }
         if let job = downloads[game.id] {
             guard job.isAutomaticUpdate, job.state == .paused else { return nil }
-            return automaticHoursOpen ? "Resumes automatically" : "Resumes at \(automaticStartTime)"
+            if !automaticHoursOpen { return "Resumes at \(automaticStartTime)" }
+            return isPlaying ? "Resumes when you stop playing" : "Resumes automatically"
         }
-        guard !automaticHoursOpen, let check = availableUpdate(for: game),
-              willUpdateAutomatically(game, to: check.latest.buildConfig) else { return nil }
-        return "Downloads at \(automaticStartTime)"
+        guard let check = availableUpdate(for: game), willUpdateAutomatically(game, to: check.latest.buildConfig) else { return nil }
+        if !automaticHoursOpen { return "Downloads at \(automaticStartTime)" }
+        return isPlaying ? "Downloads when you stop playing" : nil
+    }
+
+    /// A game in the library is running: automatic updates wait until none
+    /// is, so a download doesn't slow the game down. The person can still
+    /// finish one now (`updateNow`). A launch that stalled ("Needs
+    /// attention") isn't play, and doesn't hold every other game's updates.
+    private var isPlaying: Bool {
+        running.contains { uid in
+            if case .failed = phases[uid] { false } else { true }
+        }
+    }
+
+    /// An automatic update the schedule paused (outside the hours, while
+    /// playing, or for Battle.net): its row offers Update Now.
+    func isWaitingForSchedule(uid: String) -> Bool {
+        downloads[uid].map { $0.isAutomaticUpdate && $0.state == .paused } ?? false
+    }
+
+    /// Update Now on an update the schedule paused: a Resume, which makes
+    /// the download the person's. Like the scheduler, it first makes sure
+    /// the checkpoint is not stale: if another launcher changed the game on
+    /// disk, or Blizzard has a newer build than it targets, the update starts
+    /// afresh (an ordinary one, as Update starts) rather than finishing an
+    /// older build over a newer one. Verified data is reused either way.
+    /// Without a version check yet (just launched, offline), it resumes.
+    func updateNow(uid: String) async {
+        guard isWaitingForSchedule(uid: uid), canResumeDownload(uid: uid), let job = downloads[uid],
+              let game = games.first(where: { $0.id == uid }) else { return }
+        let installChanged = job.request?.install != game.install
+        let liveBuildChanged = availableUpdate(for: game).map { $0.latest.buildConfig != job.request?.target?.buildConfig } ?? false
+        guard installChanged || liveBuildChanged else {
+            await resumeDownload(uid: uid)
+            return
+        }
+        Log.notice(.gameUpdate, "update_now_replans", nil, ["uid": uid, "installChanged": installChanged])
+        guard discardDownload(uid: uid) else { return }
+        // The last check was for the game as it was: ask again, so the
+        // fresh update never targets a build older than what's on disk. With
+        // no answer, the game is as on disk, and its row offers Update.
+        if availableUpdate(for: game) == nil { await checkForUpdates(force: true, announces: false) }
+        guard let current = games.first(where: { $0.id == uid }), availableUpdate(for: current) != nil else { return }
+        await update(current)
     }
 
     /// "2:00 AM" or "02:00", as the Mac's settings show times. The hours are
@@ -711,10 +754,10 @@ final class AppModel {
         for (uid, job) in downloads where job.isAutomaticUpdate {
             let build = job.request?.target?.buildConfig ?? ""
             let game = games.first { $0.id == uid }
-            if !automaticUpdates.allowsUpdate(gameID: uid, build: build)
+            if isPlaying || !automaticUpdates.allowsUpdate(gameID: uid, build: build)
                 || game.map({ !automaticFolderIsAvailable(for: $0) }) ?? true { job.pause() }
         }
-        guard automaticUpdateTask == nil, !isUpdatingAll, !hasActiveDownloads, !automaticUpdatesHeld,
+        guard automaticUpdateTask == nil, !isUpdatingAll, !hasActiveDownloads, !automaticUpdatesHeld, !isPlaying,
               !automaticUpdates.enabledGames.isEmpty, automaticUpdates.allowsDownloads() else { return }
         automaticUpdateTask = Task { [weak self] in
             guard let self else { return }
@@ -796,7 +839,8 @@ final class AppModel {
                     && canResumeDownload(uid: game.id) && folderAvailable)
         }
         return AutomaticUpdateSelection.next(in: candidates, preferences: automaticUpdates,
-            hasActiveDownloads: hasActiveDownloads, isUpdatingAll: isUpdatingAll, isQuitting: isPreparingToQuit)
+            hasActiveDownloads: hasActiveDownloads, isUpdatingAll: isUpdatingAll, isQuitting: isPreparingToQuit,
+            isPlaying: isPlaying)
     }
 
     private func pauseAutomaticUpdatesForBattleNet() async {
@@ -1628,6 +1672,8 @@ final class AppModel {
                     ? "The game has not opened a window. If its process is still running, quit it in Activity Monitor before trying again."
                     : "The game exited before opening a window.")
                 if result == .stalled { watchForLateWindowsWindow(game, title: title, session: session) }
+                // A stalled launch isn't play (`isPlaying`): updates go on.
+                scheduleAutomaticUpdates()
                 return
             }
             // Keep "launching" until the game shows up in the running list.
@@ -2213,6 +2259,8 @@ final class AppModel {
                     guard case .failed = self.phases[game.id] else { return }
                     if self.hasWindowsWindow(game, title: title) {
                         self.phases[game.id] = .idle
+                        // Now it's play: automatic updates wait.
+                        self.scheduleAutomaticUpdates()
                         Log.info(.launch, "window_created_late", nil, ["uid": game.id])
                         return
                     }

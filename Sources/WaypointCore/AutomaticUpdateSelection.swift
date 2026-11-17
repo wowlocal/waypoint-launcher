@@ -20,10 +20,12 @@ public struct AutomaticUpdateCandidate: Equatable, Sendable {
 /// Choose one job in library order, reusing the same decision after an
 /// asynchronous preflight. Starting a job changes the facts for the next pass.
 public enum AutomaticUpdateSelection {
+    /// `isPlaying`: a game in the library is running. Automatic updates wait
+    /// until none is, so a download doesn't slow the game down.
     public static func next(in ordered: [AutomaticUpdateCandidate], preferences: AutomaticUpdatePreferences,
-                            hasActiveDownloads: Bool, isUpdatingAll: Bool, isQuitting: Bool,
+                            hasActiveDownloads: Bool, isUpdatingAll: Bool, isQuitting: Bool, isPlaying: Bool,
                             at date: Date = Date(), calendar: Calendar = .current) -> AutomaticUpdateCandidate? {
-        guard !hasActiveDownloads, !isUpdatingAll, !isQuitting else { return nil }
+        guard !hasActiveDownloads, !isUpdatingAll, !isQuitting, !isPlaying else { return nil }
         return ordered.first { candidate in
             (candidate.canStart || candidate.canResume)
                 && preferences.allowsUpdate(gameID: candidate.id, build: candidate.build, at: date, calendar: calendar)

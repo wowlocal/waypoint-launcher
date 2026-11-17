@@ -51,9 +51,20 @@ finish. Dragging games in the library changes this priority. Running the
 scheduler is cheap: it rescans the drives and asks for the current build only
 when the last known results say an update could start now. A game whose last
 version check failed waits for a successful one (its Update button stays).
-Running games, shared WoW folders in use, disconnected drives, Battle.net and
-its Agent prevent automatic work. An already-started final commit may finish
-after a pause request.
+While any game in the library is running, automatic updates wait, so a
+download doesn't slow the game down: one under way pauses when a game starts
+and resumes when the last one quits (“Resumes when you stop playing”). A
+launch that stalled (“Needs attention”) doesn't count as playing. Shared
+WoW folders in use, disconnected drives, Battle.net and its Agent prevent
+automatic work too. An already-started final commit may finish after a pause
+request.
+
+A paused automatic update shows **Update Now** where Play would be, so the way
+to finish it now is plain and isn't confused with Cancel, which skips the
+version. Update Now is a Resume: the download becomes the person's. If the
+game on disk or the live build has moved on since the download paused, Update
+Now starts a fresh, ordinary update to the live build instead, as Update
+would, reusing what was verified.
 
 Only scheduler-owned updates resume automatically, including after a restart;
 older unfinished downloads stay manual. A person's Pause or Resume ends

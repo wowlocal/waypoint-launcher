@@ -19,6 +19,8 @@ struct GameRowState {
     var banner: URL?
     /// When an automatic update resumes or downloads, if one is waiting.
     var automaticStatus: String? = nil
+    /// The schedule paused this game's automatic update: Update Now shows.
+    var waitsForSchedule = false
 }
 
 extension GameRowState {
@@ -30,7 +32,8 @@ extension GameRowState {
                   wowAccount: model.shownWoWAccount(for: game)?.name,
                   download: DownloadControls(uid: game.id, model: model),
                   banner: model.artwork(productCode: game.install.productCode).picture,
-                  automaticStatus: model.automaticUpdateStatus(for: game))
+                  automaticStatus: model.automaticUpdateStatus(for: game),
+                  waitsForSchedule: model.isWaitingForSchedule(uid: game.id))
     }
 }
 
@@ -222,7 +225,8 @@ final class GameCell: NSView {
         downloadDetailsView.details = downloadTooltip
         if downloadButtons != nil || DownloadButtons.haveAny(for: state.download, phase: state.phase) {
             let buttons = downloadButtons ?? makeDownloadButtons()
-            buttons.show(state.download, phase: state.phase, uid: game.id, model: model)
+            buttons.show(state.download, phase: state.phase, uid: game.id, model: model,
+                         offersResume: !state.waitsForSchedule)
         }
         status?.isHidden = true
         statusDot?.isHidden = true
@@ -250,6 +254,14 @@ final class GameCell: NSView {
                 showSpinner("Preparing Windows version…")
             case .launching:
                 showSpinner("Starting…")
+            case .paused where state.waitsForSchedule:
+                // The schedule paused it, not the person: finishing it now is
+                // what they'd want, where Update or Play would be, rather
+                // than a small icon beside Cancel, which skips the version.
+                if button.title != "Update Now" { button.title = "Update Now" }
+                button.bezelColor = .controlAccentColor
+                button.isEnabled = state.download.canResume
+                showsButton = true
             case .updating, .pausing, .paused:
                 break // The download buttons are showing.
             case .uninstalling(let step):
@@ -338,6 +350,9 @@ final class GameCell: NSView {
         let game = state.game
         switch state.phase {
         case .idle, .failed: break
+        case .paused where state.waitsForSchedule:
+            Task { await model.updateNow(uid: game.id) }
+            return
         default: return
         }
         if model.canResumeDownload(uid: game.id) {
@@ -866,7 +881,9 @@ private final class DownloadButtons: NSObject {
         cancel.action = #selector(cancelDownload)
     }
 
-    func show(_ controls: DownloadControls, phase: AppModel.Phase, uid: String, model: AppModel) {
+    /// `offersResume`: false when the row's own button resumes instead.
+    func show(_ controls: DownloadControls, phase: AppModel.Phase, uid: String, model: AppModel,
+              offersResume: Bool = true) {
         self.uid = uid
         self.model = model
         var transfers = true
@@ -883,7 +900,8 @@ private final class DownloadButtons: NSObject {
         default:
             transfers = false
         }
-        pauseResume.isHidden = !transfers
+        let resumesElsewhere = if case .paused = phase { !offersResume } else { false }
+        pauseResume.isHidden = !transfers || resumesElsewhere
         keepAwake.isHidden = !transfers
         keepAwake.showKeepAwake(controls.keepsMacAwake)
         keepAwake.isEnabled = controls.canPause || controls.canResume

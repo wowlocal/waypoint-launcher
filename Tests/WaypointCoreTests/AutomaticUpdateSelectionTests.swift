@@ -7,11 +7,11 @@ private let classicUpdate = AutomaticUpdateCandidate(id: "wow_classic", build: "
 
 private func selectAutomaticUpdate(_ ordered: [AutomaticUpdateCandidate], preferences: AutomaticUpdatePreferences,
                                    active: Bool = false, batch: Bool = false, quitting: Bool = false,
-                                   at date: Date = Date()) -> AutomaticUpdateCandidate? {
+                                   playing: Bool = false, at date: Date = Date()) -> AutomaticUpdateCandidate? {
     var calendar = Calendar(identifier: .gregorian)
     calendar.timeZone = TimeZone(secondsFromGMT: 0)!
     return AutomaticUpdateSelection.next(in: ordered, preferences: preferences, hasActiveDownloads: active,
-                                          isUpdatingAll: batch, isQuitting: quitting, at: date, calendar: calendar)
+                                          isUpdatingAll: batch, isQuitting: quitting, isPlaying: playing, at: date, calendar: calendar)
 }
 
 @Test func automaticUpdatePriorityFollowsLibraryOrderAndStartsOneAtATime() {
@@ -32,6 +32,20 @@ private func selectAutomaticUpdate(_ ordered: [AutomaticUpdateCandidate], prefer
     #expect(selectAutomaticUpdate([retailUpdate], preferences: preferences, batch: true) == nil)
     #expect(selectAutomaticUpdate([retailUpdate], preferences: preferences, quitting: true) == nil)
     #expect(selectAutomaticUpdate([retailUpdate], preferences: preferences) == retailUpdate)
+}
+
+@Test func automaticUpdatesWaitWhileAnyGameIsPlayed() {
+    var preferences = AutomaticUpdatePreferences()
+    preferences.enabledGames = [retailUpdate.id, classicUpdate.id]
+    var paused = retailUpdate
+    paused.canStart = false
+    paused.canResume = true
+    // Any game running holds every automatic update, not just its own:
+    // neither a new one nor a paused one starts.
+    #expect(selectAutomaticUpdate([retailUpdate, classicUpdate], preferences: preferences, playing: true) == nil)
+    #expect(selectAutomaticUpdate([paused], preferences: preferences, playing: true) == nil)
+    // Once every game has quit, the paused one picks up where it stopped.
+    #expect(selectAutomaticUpdate([paused, classicUpdate], preferences: preferences) == paused)
 }
 
 @Test func automaticUpdatesLeaveManualPausesAloneAndResumeSchedulerPauses() {
