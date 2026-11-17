@@ -17,6 +17,8 @@ struct GameRowState {
     var download: DownloadControls
     /// The game's picture, once it has been downloaded.
     var banner: URL?
+    /// When an automatic update resumes or downloads, if one is waiting.
+    var automaticStatus: String? = nil
 }
 
 extension GameRowState {
@@ -27,7 +29,8 @@ extension GameRowState {
                     (WindowsHeroes.isAvailable || model.heroesEdition(.windows) != nil),
                   wowAccount: model.shownWoWAccount(for: game)?.name,
                   download: DownloadControls(uid: game.id, model: model),
-                  banner: model.artwork(productCode: game.install.productCode).picture)
+                  banner: model.artwork(productCode: game.install.productCode).picture,
+                  automaticStatus: model.automaticUpdateStatus(for: game))
     }
 }
 
@@ -186,8 +189,10 @@ final class GameCell: NSView {
         case .pausing(let update), .paused(let update):
             fraction = update?.fraction ?? 0
             let pausing = if case .pausing = state.phase { true } else { false }
-            detail.stringValue = downloadStatus(update, label: pausing ? "Pausing…" : "Paused")
-            downloadTooltip = { downloadDetails(update, bytesPerSecond: nil, status: pausing ? "Pausing…" : "Paused") }
+            // A download the schedule paused says when it continues.
+            let label = pausing ? "Pausing…" : state.automaticStatus ?? "Paused"
+            detail.stringValue = downloadStatus(update, label: label)
+            downloadTooltip = { downloadDetails(update, bytesPerSecond: nil, status: label) }
         case .uninstalling(let step):
             detail.stringValue = step
         case .failed(let message) where !game.isOffline:
@@ -199,7 +204,11 @@ final class GameCell: NSView {
             if game.isOffline {
                 detail.stringValue = "Drive not connected"
             } else if state.update != nil, !state.isRunning {
-                detail.stringValue = GameUpdate.canUpdate(game.install) ? "Update available" : "Update available in Battle.net"
+                detail.stringValue = GameUpdate.canUpdate(game.install)
+                    ? ["Update available", state.automaticStatus].compactMap(\.self).joined(separator: " · ")
+                    : "Update available in Battle.net"
+                // A narrow window cuts the time off.
+                if state.automaticStatus != nil { detailTooltip = detail.stringValue }
                 detail.textColor = .systemOrange
             } else {
                 detail.stringValue = Self.summary(of: game, wowAccount: state.wowAccount)
@@ -367,20 +376,23 @@ final class GameCell: NSView {
         let game = state.game
         let menu = NSMenu()
         menu.autoenablesItems = false
-        // Keep the opt-out available while a download or a game is running,
-        // without exposing the other commands during an unfinished operation.
+        var automatic: NSMenuItem?
         if offersAutomaticUpdates {
-            let automatic = ActionItem("Keep Updated Automatically") {
+            let item = ActionItem("Update Automatically") {
                 model.setAutomaticallyUpdates(!model.automaticallyUpdates(game), for: game)
             }
-            automatic.state = model.automaticallyUpdates(game) ? .on : .off
-            menu.addItem(automatic)
+            item.state = model.automaticallyUpdates(game) ? .on : .off
+            automatic = item
         }
+        // Keep the choice available while a download or a game is running,
+        // without exposing the other commands during an unfinished operation.
         switch state.phase {
         case .idle, .failed: break
-        default: return menu.items.isEmpty ? nil : menu
+        default:
+            guard let automatic else { return nil }
+            menu.addItem(automatic)
+            return menu
         }
-        if !menu.items.isEmpty, game.isSupported, !state.isRunning { menu.addItem(.separator()) }
         if game.isSupported, !state.isRunning {
             if model.availableUpdate(for: game) != nil {
                 menu.addItem(ActionItem("Play Without Updating") { Task { await model.play(game) } })
@@ -443,11 +455,17 @@ final class GameCell: NSView {
             menu.addItem(ActionItem("Sign In Again and Play") { Task { await model.play(game, forceSignIn: true) } })
             if GameUpdate.canUpdate(game.install) {
                 menu.addItem(.separator())
+                // With the other update commands; Play keeps the top slot.
+                if let automatic { menu.addItem(automatic) }
                 menu.addItem(ActionItem("Change Language…", enabled: state.canUpdate) { [weak self] in
                     self?.window?.contentViewController?.presentAsSheet(LanguageSheet(game: game, model: model))
                 })
                 menu.addItem(ActionItem("Verify Files", enabled: state.canUpdate) { Task { await model.update(game, verify: true) } })
             }
+        }
+        if let automatic, automatic.menu == nil {
+            if !menu.items.isEmpty { menu.addItem(.separator()) }
+            menu.addItem(automatic)
         }
         if game.isInstalled {
             if !menu.items.isEmpty { menu.addItem(.separator()) }
@@ -871,7 +889,9 @@ private final class DownloadButtons: NSObject {
         keepAwake.isEnabled = controls.canPause || controls.canResume
         cancel.isHidden = !controls.canCancel
         // An install asks what becomes of its data; anything else keeps it.
-        let help = model.isInstallDownload(uid: uid) ? "Stop this install" : "Stop this download. Downloaded data is kept for next time."
+        let help = model.isInstallDownload(uid: uid) ? "Stop this install"
+            : model.isAutomaticDownload(uid: uid) ? "Stop this download. Waypoint won’t download this version automatically."
+            : "Stop this download. Downloaded data is kept for next time."
         if cancel.toolTip != help { cancel.toolTip = help }
     }
 

@@ -78,17 +78,65 @@ import Testing
         try first!.enqueue(request, automaticUpdate: true)
         let run = Task { [queue = first!] in await queue.run(key: request.key) }
         await starts.next()
-        try first!.jobs[request.key]!.makeManual()
+        try first!.jobs[request.key]!.makeManual(byPerson: true)
         first!.jobs[request.key]!.pause()
         #expect(await run.value == .paused)
         #expect(first!.jobs[request.key]?.isAutomaticUpdate == false)
+        #expect(first!.jobs[request.key]?.isTakenOverFromSchedule == true)
         let saved = try store.read(store.file(for: request.key))
-        #expect(saved.automaticUpdate == nil)
+        #expect(saved.automaticUpdate == false)
         #expect(saved.progress?.completedBytes == 37)
         first = nil
+        // The hold on other automatic updates survives a restart.
         let second = DownloadQueue(store: store)
         #expect(second.jobs[request.key]?.isAutomaticUpdate == false)
+        #expect(second.jobs[request.key]?.isTakenOverFromSchedule == true)
         #expect(second.jobs[request.key]?.progress == saved.progress)
+    }
+
+    @Test func turningAGameOffMakesAnOrdinaryDownload() throws {
+        let directory = try directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = DownloadStore(directory: directory.appendingPathComponent("queue"))
+        let request = request(at: directory)
+        let queue = DownloadQueue(store: store)
+        try queue.enqueue(request, automaticUpdate: true)
+        try queue.jobs[request.key]!.makeManual(byPerson: false)
+        #expect(queue.jobs[request.key]?.isAutomaticUpdate == false)
+        #expect(queue.jobs[request.key]?.isTakenOverFromSchedule == false)
+        #expect(try store.read(store.file(for: request.key)).automaticUpdate == nil)
+    }
+
+    @Test func turningAGameOffEndsAPersonsHold() throws {
+        let directory = try directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = DownloadStore(directory: directory.appendingPathComponent("queue"))
+        let request = request(at: directory)
+        let queue = DownloadQueue(store: store)
+        try queue.enqueue(request, automaticUpdate: true)
+        let job = try #require(queue.jobs[request.key])
+        try job.makeManual(byPerson: true)
+        #expect(job.isTakenOverFromSchedule)
+        // A second Pause or Resume by the person changes nothing.
+        try job.makeManual(byPerson: true)
+        #expect(try store.read(store.file(for: request.key)).automaticUpdate == false)
+        try job.makeManual(byPerson: false)
+        #expect(!job.isTakenOverFromSchedule && !job.isAutomaticUpdate)
+        #expect(try store.read(store.file(for: request.key)).automaticUpdate == nil)
+    }
+
+    @Test func aFailedTakenOverUpdateNoLongerHoldsTheSchedule() async throws {
+        let directory = try directory()
+        defer { try? FileManager.default.removeItem(at: directory) }
+        let store = DownloadStore(directory: directory.appendingPathComponent("queue"))
+        let request = request(at: directory)
+        let queue = DownloadQueue(store: store) { _, _ in throw URLError(.networkConnectionLost) }
+        try queue.enqueue(request, automaticUpdate: true)
+        try queue.jobs[request.key]!.makeManual(byPerson: true)
+        #expect(queue.jobs[request.key]?.isTakenOverFromSchedule == true)
+        #expect(await queue.run(key: request.key) == .failed("The connection was lost. Try again to continue."))
+        #expect(queue.jobs[request.key]?.isTakenOverFromSchedule == false)
+        #expect(try store.read(store.file(for: request.key)).automaticUpdate == nil)
     }
 
     @Test func failedAutomaticUpdateWaitsForManualRetry() async throws {
@@ -100,6 +148,7 @@ import Testing
         try first!.enqueue(request, automaticUpdate: true)
         #expect(await first!.run(key: request.key) == .failed("The connection was lost. Try again to continue."))
         #expect(first!.jobs[request.key]?.isAutomaticUpdate == false)
+        #expect(first!.jobs[request.key]?.isTakenOverFromSchedule == false)
         let saved = try store.read(store.file(for: request.key))
         #expect(saved.automaticUpdate == nil)
         #expect(saved.failure != nil)
@@ -140,15 +189,15 @@ import Testing
         let displaced = directory.appendingPathComponent("displaced")
         try FileManager.default.moveItem(at: queueDirectory, to: displaced)
         try Data().write(to: queueDirectory)
-        #expect(throws: (any Error).self) { try job.makeManual() }
+        #expect(throws: (any Error).self) { try job.makeManual(byPerson: true) }
         #expect(job.isAutomaticUpdate)
         #expect(job.progress == progress)
         try FileManager.default.removeItem(at: queueDirectory)
         try FileManager.default.moveItem(at: displaced, to: queueDirectory)
         #expect(try store.read(store.file(for: request.key)).automaticUpdate == true)
-        try job.makeManual()
+        try job.makeManual(byPerson: true)
         #expect(!job.isAutomaticUpdate)
         #expect(try store.read(store.file(for: request.key)).progress == progress)
-        #expect(try store.read(store.file(for: request.key)).automaticUpdate == nil)
+        #expect(try store.read(store.file(for: request.key)).automaticUpdate == false)
     }
 }
