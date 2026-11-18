@@ -109,6 +109,12 @@ No. Waypoint needs an Apple Silicon Mac with macOS 14 or later.
 
 Get **Waypoint-x.y.z.dmg** from [Releases](https://github.com/wowlocal/waypoint-launcher/releases/latest), open it, and drag Waypoint to Applications. Releases are signed with a Developer ID and notarized by Apple, so the app opens without warnings.
 
+Or install it with [Homebrew](https://brew.sh):
+
+```sh
+brew install --cask wowlocal/tap/waypoint
+```
+
 Requires an Apple Silicon Mac with macOS 14 or later.
 
 ## Build

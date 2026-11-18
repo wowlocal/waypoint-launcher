@@ -8,6 +8,7 @@
 #   scripts/release.sh 0.2.0 --publish   # …tag v0.2.0, upload to S3, create the GitHub release
 #   scripts/release.sh tip --publish     # a tip build of this branch, on the tip feed
 #   scripts/release.sh 0.2.0 --tip-feed  # after a release: (again) add it to the tip feed
+#   scripts/release.sh 0.2.0 --homebrew  # after a release: (again) point the Homebrew cask at it
 #
 # Tip builds (like Ghostty's) are for trying what's next: experimental work
 # that may live on a branch. A tip is built from the checked-out branch,
@@ -56,11 +57,13 @@ mode="${2:-}"
 [[ "$mode" == "--publish" || "$mode" == "--publish-only" ]] && publish=1
 tip_feed_only=0
 [[ "$mode" == "--tip-feed" ]] && tip_feed_only=1
+homebrew_only=0
+[[ "$mode" == "--homebrew" ]] && homebrew_only=1
 channel=stable
 [[ "$version" == "tip" ]] && channel=tip
 [[ ( "$channel" == "tip" || "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ ) && ( -z "$mode" || "$mode" == "--publish" || "$mode" == "--publish-only" ) ]] \
-    || [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && "$mode" == "--tip-feed" ]] \
-    || fail "usage: scripts/release.sh <x.y.z|tip> [--publish|--publish-only] | <x.y.z> --tip-feed"
+    || [[ "$version" =~ ^[0-9]+\.[0-9]+\.[0-9]+$ && ( "$mode" == "--tip-feed" || "$mode" == "--homebrew" ) ]] \
+    || fail "usage: scripts/release.sh <x.y.z|tip> [--publish|--publish-only] | <x.y.z> --tip-feed|--homebrew"
 
 tag="v$version"
 repo_url="https://github.com/wowlocal/waypoint-launcher"
@@ -206,6 +209,33 @@ add_release_to_tip_feed() {
     print -P "%F{green}Tip feed offers it too:%f $tip_feed"
 }
 
+# After a release: point the Homebrew cask (brew install --cask
+# wowlocal/tap/waypoint) at it. Only the latest release, so a rerun for an
+# older tag can't move brew back. The checksum is GitHub's own digest of the
+# DMG asset, the file brew downloads.
+update_homebrew_cask() {
+    local cask_repo="wowlocal/homebrew-tap" cask_path="Casks/waypoint.rb" sha blob current updated
+    [[ "$(gh release view --json tagName --jq .tagName 2>/dev/null)" == "$tag" ]] \
+        || fail "$tag isn't the latest published GitHub release"
+    sha="$(gh release view "$tag" --json assets --jq ".assets[] | select(.name == \"Waypoint-$version.dmg\") | .digest")"
+    sha="${sha#sha256:}"
+    [[ "$sha" =~ ^[0-9a-f]{64}$ ]] || fail "can't read the checksum of $tag's DMG from GitHub"
+    [[ ! -f "$dist/Waypoint-$version.dmg.sha256" || "$(awk '{print $1}' "$dist/Waypoint-$version.dmg.sha256")" == "$sha" ]] \
+        || fail "GitHub's checksum for $tag differs from dist/Waypoint-$version.dmg.sha256"
+    blob="$(gh api "repos/$cask_repo/contents/$cask_path" --jq .sha)" || fail "can't read $cask_repo/$cask_path"
+    current="$(gh api "repos/$cask_repo/contents/$cask_path" -H 'Accept: application/vnd.github.raw')" \
+        || fail "can't read $cask_repo/$cask_path"
+    updated="$(print -r -- "$current" | sed -E "s/^(  version )\"[^\"]*\"/\1\"$version\"/; s/^(  sha256 )\"[0-9a-f]{64}\"/\1\"$sha\"/")"
+    [[ "$updated" == *$'\n  version "'"$version"$'"\n'* && "$updated" == *$'\n  sha256 "'"$sha"$'"\n'* ]] \
+        || fail "$cask_path doesn't have the expected version and sha256 lines"
+    if [[ "$updated" != "$current" ]]; then
+        gh api -X PUT "repos/$cask_repo/contents/$cask_path" -f message="Update Waypoint to $version" \
+            -f content="$(print -r -- "$updated" | base64)" -f sha="$blob" >/dev/null \
+            || fail "can't update $cask_repo/$cask_path"
+    fi
+    print -P "%F{green}Homebrew cask:%f $version"
+}
+
 if [[ -f scripts/release.env ]]; then
     set -a
     source scripts/release.env
@@ -222,6 +252,10 @@ if (( tip_feed_only )); then
         || fail "dist/appcast.xml isn't $version's; publish the release first"
     command -v aws >/dev/null || fail "aws CLI not found (brew install awscli)"
     add_release_to_tip_feed
+    exit 0
+fi
+if (( homebrew_only )); then
+    update_homebrew_cask
     exit 0
 fi
 dmg="$dist/Waypoint-$version.dmg"
@@ -436,5 +470,10 @@ PY
     curl -fs "$feed_url" | cmp -s - "$dist/appcast.xml" || fail "the public feed at $feed_url doesn't match the new appcast"
     gh release edit "$tag" --draft=false --latest
     print -P "%F{green}Live:%f $feed_url"
-    add_release_to_tip_feed || fail "the release is live, but the tip feed wasn't updated; run: scripts/release.sh $version --tip-feed"
+    # Subshells, so a failure in one (fail exits) still runs the other and
+    # ends with the commands that finish the job.
+    followups=()
+    ( add_release_to_tip_feed ) || followups+=("scripts/release.sh $version --tip-feed")
+    ( update_homebrew_cask ) || followups+=("scripts/release.sh $version --homebrew")
+    (( ${#followups} == 0 )) || fail "the release is live, but not everywhere yet; run: ${(j: and :)followups}"
 fi

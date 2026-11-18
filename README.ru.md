@@ -108,6 +108,12 @@ Waypoint — такой лаунчер: неофициальный, с откр�
 
 Скачай **Waypoint-x.y.z.dmg** из [Releases](https://github.com/wowlocal/waypoint-launcher/releases/latest), открой и перетащи Waypoint в «Программы». Релизы подписаны Developer ID и нотаризованы Apple, поэтому приложение открывается без предупреждений.
 
+Или установи через [Homebrew](https://brew.sh):
+
+```sh
+brew install --cask wowlocal/tap/waypoint
+```
+
 Нужен Mac на Apple Silicon и macOS 14 или новее.
 
 ## Сборка
