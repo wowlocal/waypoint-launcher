@@ -161,6 +161,11 @@ final class AppModel {
     private var autoLoginStates = AutoLoginState.load() {
         didSet { AutoLoginState.save(autoLoginStates) }
     }
+    @ObservationIgnored private var hearthstoneLoginCheck: Task<Void, Never>?
+    @ObservationIgnored private var hearthstoneLoginRecovery = HearthstoneLoginRecovery.load() {
+        didSet { if oldValue != hearthstoneLoginRecovery { hearthstoneLoginRecovery.save() } }
+    }
+    private var hearthstoneSignInFailure: (uid: String, pid: pid_t)?
     private var wowAccountStore = WoWAccountStore.load() {
         didSet { wowAccountStore.save() }
     }
@@ -1634,12 +1639,53 @@ final class AppModel {
                 }
             }
             phases[game.id] = .signingIn
-            guard let token = await token(for: plan, gameName: game.displayName, account: account,
-                                          activate: accountID == nil, forceSignIn: forceSignIn) else {
-                Log.notice(.auth, "sign_in_cancelled", nil, ["uid": game.id])
-                phases[game.id] = .idle
-                return
+            let isHearthstone = !plan.isWindows && plan.codename == InstallableProduct.hearthstone.codename
+            if isHearthstone {
+                // The previous game may have quit just after writing its
+                // last log line. Apply its result before reading the vault.
+                await hearthstoneLoginCheck?.value
+                guard !isPreparingToQuit, !Task.isCancelled else {
+                    phases[game.id] = .idle
+                    return
+                }
             }
+            let cached = forceSignIn ? nil : account.flatMap { tokenVault.token(account: $0.id, codename: plan.codename) }
+            let choice: HearthstoneLoginRecovery.Play = isHearthstone
+                ? hearthstoneLoginRecovery.nextPlay(cached: cached, region: plan.region)
+                : cached.map(HearthstoneLoginRecovery.Play.useCached) ?? .signIn(replacing: nil)
+            let signIn: LaunchSignIn
+            let rejected: LoginToken?
+            let usedCache: Bool
+            switch choice {
+            case .signInAgain:
+                phases[game.id] = .failed(hearthstoneSignInHint(for: account))
+                return
+            case .useCached(let cached):
+                Log.info(.auth, "token", nil, ["source": "keychain", "codename": plan.codename])
+                signIn = LaunchSignIn(token: cached, saved: true)
+                rejected = nil
+                usedCache = true
+            case .signIn(let replacing):
+                rejected = replacing
+                usedCache = false
+                let reauthenticate = forceSignIn || replacing != nil
+                guard let fresh = await signInForLaunch(plan, game: game, account: account,
+                                                        activate: accountID == nil, forceSignIn: reauthenticate,
+                                                        requireSameAccount: isHearthstone && reauthenticate) else {
+                    if phases[game.id] == .signingIn {
+                        Log.notice(.auth, "sign_in_cancelled", nil, ["uid": game.id])
+                        phases[game.id] = .idle
+                    }
+                    return
+                }
+                if fresh.token == replacing {
+                    hearthstoneLoginRecovery.reject(fresh.token, region: plan.region, needsManualSignIn: true)
+                    phases[game.id] = .failed(hearthstoneSignInHint(for: account))
+                    return
+                }
+                signIn = fresh
+            }
+            let token = signIn.token
             if plan.codename == "WoW", !plan.isWindows {
                 plan.gameAccount = wowAccountStore.launchAccount(for: token, uid: game.id, region: plan.region)
                 plan.keepsStoredGameAccount = plan.gameAccount == nil
@@ -1656,7 +1702,20 @@ final class AppModel {
                 observeWindowsExit(pid: pid, game: game)
                 Task { [weak self] in await self?.revealWindowsGame(game) }
             } else {
-                try GameLauncher.launch(plan, token: token, gameName: game.displayName)
+                let otherLauncher = if isHearthstone {
+                    await Task.detached(priority: .utility) { Self.hasOtherBattleNetLauncher() }.value
+                } else { false }
+                if isHearthstone, isPreparingToQuit || Task.isCancelled {
+                    phases[game.id] = .idle
+                    return
+                }
+                let launchedAt = Date()
+                let pid = try GameLauncher.launch(plan, token: token, gameName: game.displayName)
+                if isHearthstone {
+                    if hearthstoneSignInFailure != nil { hearthstoneSignInFailure = nil }
+                    observeHearthstoneLogin(pid: pid, game: game, plan: plan, launchedAt: launchedAt, signIn: signIn,
+                                            usedCache: usedCache, replacing: rejected, otherLauncherAtHandoff: otherLauncher)
+                }
             }
             UserDefaults.standard.set(game.id, forKey: Self.lastPlayedKey)
             if let title = WindowsTitle.forInstall(game.install), title != .heroes, let session {
@@ -1684,6 +1743,57 @@ final class AppModel {
         } catch {
             Log.error(.launch, "failed", nil, ["uid": game.id, "error": error])
             phases[game.id] = .failed(errorMessage(error))
+        }
+    }
+
+    private func hearthstoneSignInHint(for account: Account?) -> String {
+        guard let account, activeAccount?.id != account.id else {
+            return "Choose Sign In Again and Play from the game menu."
+        }
+        return "Switch to \(account.displayName), then choose Sign In Again and Play."
+    }
+
+    func showsHearthstoneSignInFailure(for game: Game) -> Bool {
+        hearthstoneSignInFailure?.uid == game.id && isRunning(game)
+    }
+
+    private nonisolated static func hasOtherBattleNetLauncher() -> Bool {
+        let processes = RunningProcesses.executables()
+        if !BattleNet.running(in: processes).isEmpty || processes.contains(where: { $0.path.hasSuffix("/waypoint-cli") }) {
+            return true
+        }
+        var bundleIDs: Set = ["dev.waypoint.launcher", "dev.waypoint.windows-preview"]
+        if let current = Bundle.main.bundleIdentifier { bundleIDs.insert(current) }
+        return bundleIDs.contains { bundleID in
+            NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).contains {
+                $0.processIdentifier != getpid()
+            }
+        }
+    }
+
+    private func observeHearthstoneLogin(pid: pid_t, game: Game, plan: LaunchPlan, launchedAt: Date, signIn: LaunchSignIn,
+                                         usedCache: Bool, replacing rejected: LoginToken?, otherLauncherAtHandoff: Bool) {
+        let token = signIn.token
+        hearthstoneLoginCheck = Task { [weak self] in
+            let observation = await Task.detached(priority: .utility) {
+                await HearthstoneLogin.check(pid: pid, in: plan.workingDirectory, launchedAt: launchedAt,
+                                             options: LaunchOptions(gameKey: plan.codename), token: token, region: plan.region,
+                                             otherLauncherAtHandoff: otherLauncherAtHandoff,
+                                             hasOtherLauncher: Self.hasOtherBattleNetLauncher)
+            }.value
+            var fields: [String: Any] = [
+                "region": plan.region.rawValue, "pid": pid, "game_build": game.install.version ?? "?",
+                "outcome": observation.outcome?.rawValue ?? "inconclusive", "cached": usedCache,
+                "recovery_eligible": observation.permitsRecovery,
+            ]
+            if let matches = observation.handoffMatches { fields["handoff_matches"] = matches }
+            if let other = observation.otherLauncher { fields["other_launcher"] = other }
+            Log.info(.auth, "hearthstone_login_observed", nil, fields)
+
+            guard let self, self.accountList[token.accountID] != nil else { return }
+            self.hearthstoneLoginRecovery.record(observation, for: token, region: plan.region, usedCache: usedCache,
+                                                 saved: signIn.saved, replacing: rejected)
+            if observation.permitsRecovery { self.hearthstoneSignInFailure = (game.id, pid) }
         }
     }
 
@@ -1891,6 +2001,7 @@ final class AppModel {
         }
         autoLoginStates.removeValue(forKey: account.id)
         wowAccountStore.remove(owner: account.id)
+        hearthstoneLoginRecovery.remove(owner: account.id)
         accountList.remove(account.id)
         tokenVault.removeAll(account: account.id)
         for codename in Set(InstallableProduct.all.map(\.codename)) {
@@ -2003,26 +2114,19 @@ final class AppModel {
         }
     }
 
-    /// The account's token for the game, from the keychain. Without one (or
-    /// when forced), signs in once with the saved password when opted in, then
-    /// opens the login window; a rejected saved login goes to the interactive
-    /// window instead. `activate`: whether whoever signs in becomes the
-    /// active account.
-    private func token(for plan: LaunchPlan, gameName: String, account: Account?, activate: Bool,
-                       forceSignIn: Bool) async -> LoginToken? {
+    private struct LaunchSignIn {
+        var token: LoginToken
+        var saved: Bool
+    }
+
+    /// Gets a token when Play can't use a saved one. A forced sign-in uses a
+    /// fresh web session and skips the WoW ticket exchange.
+    private func signInForLaunch(_ plan: LaunchPlan, game: Game, account: Account?, activate: Bool,
+                                 forceSignIn: Bool, requireSameAccount: Bool) async -> LaunchSignIn? {
+        let gameName = game.displayName
         // Only where the token came from is logged, never the token.
         let url = BattleNetLogin.url(codename: plan.codename, region: plan.region)
         let title = "Sign in to play \(gameName)" + (activate ? "" : account.map { " as \($0.displayName)" } ?? "")
-        // Only tokens Waypoint got itself. The one Battle.net leaves in the
-        // game's Launch Options can be long expired: the game then shows
-        // "Closed" and Waypoint can't tell, so it would keep handing it over.
-        // Nothing is refreshed first: Battle.net's login page keeps no session
-        // that signs in again without the form, and a token lasts for months.
-        if !forceSignIn, let account, let token = tokenVault.token(account: account.id, codename: plan.codename) {
-            Log.info(.auth, "token", nil, ["source": "keychain", "codename": plan.codename])
-            return token
-        }
-
         // Hearthstone and Diablo IV can get their ticket from the saved WoW
         // login instead of a sign-in of their own. Whatever stops that, the
         // usual sign-in below follows, without a word about it. Not while WoW
@@ -2036,7 +2140,7 @@ final class AppModel {
                              account: account.id, region: plan.region),
            accountList[account.id] != nil {
             Log.info(.auth, "token", nil, ["source": "shared_sign_in", "codename": plan.codename])
-            return issued
+            return LaunchSignIn(token: issued, saved: false)
         }
         // Cancelled meanwhile: nobody is waiting for a login window.
         guard !Task.isCancelled else { return nil }
@@ -2063,14 +2167,14 @@ final class AppModel {
                     state.requiresSignIn()
                     autoLoginStates[account.id] = state
                     if session != account.session { await WebSession.delete(session) }
-                    showWrongSavedAccount(account)
+                    showWrongSavedAccount(account, asSheet: requireSameAccount, game: game)
                     return nil
                 }
                 state.succeeded()
                 autoLoginStates[account.id] = state
                 Log.info(.auth, "token", nil, ["source": "saved_login", "codename": plan.codename])
-                await adopt(token, codename: plan.codename, session: session, activate: activate)
-                return token
+                let saved = await adopt(token, codename: plan.codename, session: session, activate: activate)
+                return LaunchSignIn(token: token, saved: saved)
             case .interaction(let view):
                 state.requiresSignIn()
                 autoLoginStates[account.id] = state
@@ -2084,13 +2188,13 @@ final class AppModel {
                 }
                 guard token.accountID == account.id else {
                     if session != account.session { await WebSession.delete(session) }
-                    showWrongSavedAccount(account)
+                    showWrongSavedAccount(account, asSheet: requireSameAccount, game: game)
                     return nil
                 }
                 // Manual sign-in may have used another password: only an
                 // explicit Update Saved Login re-enables these credentials.
-                await adoptFromLoginWindow(token, codename: plan.codename, session: session, activate: activate)
-                return token
+                let saved = await adoptFromLoginWindow(token, codename: plan.codename, session: session, activate: activate)
+                return LaunchSignIn(token: token, saved: saved)
             case .failed:
                 state.failedTemporarily()
                 autoLoginStates[account.id] = state
@@ -2117,19 +2221,20 @@ final class AppModel {
             await WebSession.delete(session)
             return nil
         }
-        // Play As names the account; launching another one would surprise.
-        if !activate, let account, token.accountID != account.id {
+        // A recovery or Play As must launch the requested account even if the
+        // embedded form returns a token for someone else.
+        if (!activate || requireSameAccount), let account, token.accountID != account.id {
             await WebSession.delete(session)
             Log.warning(.auth, "play_as_other_account")
             let alert = NSAlert()
             alert.messageText = "That’s a different account"
             alert.informativeText = "You signed in to a different Battle.net account than \(account.displayName), so \(gameName) wasn’t started. Try again and sign in as \(account.displayName)."
-            alert.runModal()
+            presentWrongAccountAlert(alert, asSheet: requireSameAccount, game: game)
             return nil
         }
         Log.info(.auth, "token", nil, ["source": "login_window", "codename": plan.codename])
-        await adoptFromLoginWindow(token, codename: plan.codename, session: session, activate: activate)
-        return token
+        let saved = await adoptFromLoginWindow(token, codename: plan.codename, session: session, activate: activate)
+        return LaunchSignIn(token: token, saved: saved)
     }
 
     /// Where to fix an account's saved login: the menus act on the active one.
@@ -2139,12 +2244,24 @@ final class AppModel {
             : "switch to \(account.displayName), then use Update Saved Login in the account menu or Settings"
     }
 
-    private func showWrongSavedAccount(_ account: Account) {
+    private func showWrongSavedAccount(_ account: Account, asSheet: Bool, game: Game) {
         Log.warning(.auth, "saved_login_other_account")
         let alert = NSAlert()
         alert.messageText = "The saved login belongs to a different account"
         alert.informativeText = "Automatic login is paused. To enter this account’s login and password, \(updateSavedLoginHint(account))."
-        alert.runModal()
+        presentWrongAccountAlert(alert, asSheet: asSheet, game: game)
+    }
+
+    private func presentWrongAccountAlert(_ alert: NSAlert, asSheet: Bool, game: Game) {
+        if asSheet {
+            if let window = NSApp.mainWindow {
+                alert.beginSheetModal(for: window)
+            } else {
+                phases[game.id] = .failed(alert.informativeText)
+            }
+        } else {
+            alert.runModal()
+        }
     }
 
     /// Which games are running, by their processes: a Mac game's run its
@@ -2157,6 +2274,9 @@ final class AppModel {
         // knows the running apps too, but telling where each one is costs a
         // round trip per app, on every return to Waypoint.
         let processes = processes ?? RunningProcesses.executables()
+        if let failure = hearthstoneSignInFailure, !processes.contains(where: { $0.pid == failure.pid }) {
+            hearthstoneSignInFailure = nil
+        }
         let windowsGames = discoveredGames.filter {
             $0.install.platform == .windows && WindowsTitle.forInstall($0.install)?.isEnabled == true
         }

@@ -7,7 +7,7 @@ import Foundation
 /// under `Launch Options/<GAME>/…`, and the game reads them back on startup
 /// (see the client's `RegistryDarwin`). We write the same values, so the game
 /// can't tell who launched it.
-public struct LaunchOptions {
+public struct LaunchOptions: Sendable {
     public static var domain: CFString { "net.battle" as CFString }
     /// Waypoint's own notes about the handoff. Kept out of `net.battle`, which
     /// belongs to Battle.net, and fixed rather than the bundle identifier so
@@ -57,6 +57,13 @@ public struct LaunchOptions {
 
     public func storedGameAccount() -> String? {
         value(gameAccountKey) as? String
+    }
+
+    /// A read-back can rule out a changed or missing handoff. The client
+    /// doesn't acknowledge that it read the values which are there now.
+    public func matchesHandoff(token: LoginToken, region: Region) -> Bool {
+        CFPreferencesAppSynchronize(preferencesDomain as CFString)
+            && (try? storedToken()) == token.value && storedRegion() == region.launchOptionValue
     }
 
     /// Whether the `GAME_ACCOUNT` there now may go out again with `token`:

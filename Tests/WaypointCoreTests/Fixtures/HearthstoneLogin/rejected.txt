@@ -1,0 +1,18 @@
+I 22:06:34.4079680 Beginning processing login challenges
+I 22:06:39.9674290 Processing challenge, previous login challenge attempts 0
+I 22:06:39.9674290 LoginService LoginService.UpdateStatus:Success
+I 22:06:40.3340120 Processing challenge, previous login challenge attempts 1
+I 22:06:40.3340120 LoginService LoginService.UpdateStatus:Success
+I 22:06:40.8507600 Multiple attempts likely failed with same auth token, clearing authentication data
+I 22:06:40.8507600 Processing challenge, previous login challenge attempts 2
+I 22:06:40.8507600 A repeated token was retrieved when disallowed. Setting to null token for failure
+I 22:06:40.8507600 LoginService LoginService.UpdateStatus:Failure
+I 22:06:40.8711410 A repeated token was retrieved when disallowed. Setting to null token for failure
+I 22:06:40.8711410 LoginService LoginService.UpdateStatus:Failure
+I 22:06:40.8787560 A repeated token was retrieved when disallowed. Setting to null token for failure
+I 22:06:40.8787560 LoginService LoginService.UpdateStatus:Failure
+I 22:06:40.8862240 A repeated token was retrieved when disallowed. Setting to null token for failure
+I 22:06:40.8862240 LoginService LoginService.UpdateStatus:Failure
+I 22:06:40.8967260 A repeated token was retrieved when disallowed. Setting to null token for failure
+I 22:06:40.8967260 LoginService LoginService.UpdateStatus:Failure
+E 22:06:40.9015560 Failed to get token to respond to login challenge

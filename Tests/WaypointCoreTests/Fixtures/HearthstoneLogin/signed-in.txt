@@ -1,0 +1,3 @@
+I 22:07:11.6692500 Beginning processing login challenges
+I 22:07:13.9261310 We are now logged in, stopping processing challenges
+I 22:08:05.2092000 Initial download done, Waiting Intro popup...

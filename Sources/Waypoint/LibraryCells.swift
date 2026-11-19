@@ -8,6 +8,7 @@ struct GameRowState {
     var game: Game
     var phase: AppModel.Phase
     var isRunning: Bool
+    var showsSignInFailure = false
     var update: UpdateCheck?
     var canPlay: Bool
     var canUpdate: Bool
@@ -26,6 +27,7 @@ struct GameRowState {
 extension GameRowState {
     @MainActor init(_ game: Game, model: AppModel) {
         self.init(game: game, phase: model.phase(of: game), isRunning: model.isRunning(game),
+                  showsSignInFailure: model.showsHearthstoneSignInFailure(for: game),
                   update: model.availableUpdate(for: game), canPlay: model.canPlay(game),
                   canUpdate: model.canUpdate(game), showsEdition: game.install.productCode == "hero" &&
                     (WindowsHeroes.isAvailable || model.heroesEdition(.windows) != nil),
@@ -206,6 +208,9 @@ final class GameCell: NSView {
         default:
             if game.isOffline {
                 detail.stringValue = "Drive not connected"
+            } else if state.showsSignInFailure {
+                detail.stringValue = "Sign-in failed. Quit Hearthstone to retry."
+                detailTooltip = detail.stringValue
             } else if state.update != nil, !state.isRunning {
                 detail.stringValue = GameUpdate.canUpdate(game.install)
                     ? ["Update available", state.automaticStatus].compactMap(\.self).joined(separator: " · ")

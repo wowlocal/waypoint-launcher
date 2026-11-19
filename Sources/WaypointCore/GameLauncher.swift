@@ -91,8 +91,11 @@ public enum GameLauncher {
     /// Hands the token to the game and starts it. The game outlives us.
     @discardableResult
     public static func launch(_ plan: LaunchPlan, token: LoginToken, gameName: String) throws -> Int32 {
+        try launch(plan, token: token, gameName: gameName, options: LaunchOptions(gameKey: plan.codename))
+    }
+
+    static func launch(_ plan: LaunchPlan, token: LoginToken, gameName: String, options: LaunchOptions) throws -> Int32 {
         guard !plan.isWindows else { throw LaunchError.unsupported("Launch Windows games from Waypoint") }
-        let options = LaunchOptions(gameKey: plan.codename)
         let kept = try options.write(token: token.value, region: plan.region, locale: plan.locale, gameAccount: plan.gameAccount,
                                      keepingStoredGameAccount: plan.keepsStoredGameAccount)
         var fields: [String: Any] = ["codename": plan.codename, "region": plan.region.rawValue, "locale": plan.locale ?? "-"]

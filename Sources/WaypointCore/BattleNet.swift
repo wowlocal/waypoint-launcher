@@ -23,7 +23,11 @@ public enum BattleNet {
     }
 
     public static func running() -> Set<Process> {
-        Set(RunningProcesses.executables().compactMap { kind(ofExecutable: $0.path) })
+        running(in: RunningProcesses.executables())
+    }
+
+    public static func running(in processes: [(pid: pid_t, path: String)]) -> Set<Process> {
+        Set(processes.compactMap { kind(ofExecutable: $0.path) })
     }
 
     /// Throws while Battle.net or its Agent is running.
