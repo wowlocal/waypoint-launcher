@@ -1171,8 +1171,10 @@ public enum CASCStorageCleaner {
                              isCurrent: () -> Bool = { true }, isLive: (Key9) -> Bool) throws -> Result {
         let fm = FileManager.default
         guard fm.fileExists(atPath: directory.path) else { return Result() }
-        let lock = try StorageLock(directory)
-        defer { lock.release() }
+        // Counting only reads: it mustn't keep a real clean (or a writer)
+        // waiting, as when the Uninstall sheet measures while it's open.
+        let lock = dryRun ? nil : try StorageLock(directory)
+        defer { lock?.release() }
         guard !fm.fileExists(atPath: directory.appendingPathComponent(CASCStorageWriter.journalName).path) else {
             throw TACTError.unsupported("cleaning a storage with an unfinished install or update")
         }

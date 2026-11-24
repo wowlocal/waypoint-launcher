@@ -387,8 +387,32 @@ public struct GameUninstaller: Sendable {
     /// versions' build configs and encoding tables, so it needs the network;
     /// if it fails, the next update of one of them does it.
     public func cleanSharedStorage() async throws -> CASCStorageCleaner.Result {
+        try await sharedStorageInstaller().cleanStorage()
+    }
+
+    /// What uninstalling frees in the storage this WoW version shares with
+    /// others: what only it uses there, and its old CDN indexes. Counts
+    /// without changing anything, as if it were gone. Reads the other
+    /// versions' build configs and encoding tables (seconds of work, and the
+    /// network for any not on disk), so it runs off the main thread.
+    public func sharedStorageSavings() async throws -> UInt64 {
+        // The cleanup gives space back by punching holes in the archives,
+        // which only APFS does: elsewhere little of this would come back.
+        let storage = root.appendingPathComponent("Data/data", isDirectory: true)
+        guard (try? storage.resourceValues(forKeys: [.volumeSupportsSparseFilesKey]).volumeSupportsSparseFiles) == true else {
+            throw TACTError.unsupported("measuring what cleaning frees on a volume without sparse files")
+        }
+        let mine: Set = [install.productCode, install.uid]
+        let result = try await sharedStorageInstaller(excluding: mine).cleanStorage(dryRun: true, without: mine)
+        return result.removedBytes + result.removedIndexBytes
+    }
+
+    /// The storage's cleaner, as one of the versions that stay (with
+    /// `excluding`, one of the others when there is one: it only supplies
+    /// the folder, as each row's build is fetched as that row's product).
+    private func sharedStorageInstaller(excluding: Set<String> = []) async throws -> CASCInstaller {
         // The versions still installed first: the one that's gone may no longer be served.
-        let candidates = Self.buildInfoProducts(in: root) + [install.productCode]
+        let candidates = Self.buildInfoProducts(in: root).filter { !excluding.contains($0) } + [install.productCode]
         guard let product = candidates.lazy.compactMap(InstallableProduct.forProduct).first else {
             throw UpdateError.unsupported(install.productCode)
         }
@@ -396,7 +420,7 @@ public struct GameUninstaller: Sendable {
         let owner = ProductInstall(uid: product.uid, productCode: product.productCode, installPath: install.installPath,
                                    region: install.region, platform: install.platform)
         let config = try await versions.productConfig(product: product.productCode, region: region, platform: install.platform)
-        return try await CASCInstaller(product: product, install: owner, config: config, versions: versions, store: store).cleanStorage()
+        return CASCInstaller(product: product, install: owner, config: config, versions: versions, store: store)
     }
 
     // MARK: Pieces

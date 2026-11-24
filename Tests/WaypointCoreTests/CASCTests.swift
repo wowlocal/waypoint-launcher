@@ -1056,7 +1056,11 @@ private func allocated(_ url: URL) -> UInt64 {
     let live = Set((0..<40).filter { $0 % 2 == 0 || $0 >= 30 }.map { storageKey($0).prefix(9) }) // dead: odd ones below 30
     let isLive: (Key9) -> Bool = { live.contains($0.data) }
 
+    // Counting doesn't wait for the storage's lock: the Uninstall sheet
+    // measures while a real clean may be about to run.
+    let held = try StorageLock(dir)
     let preview = try CASCStorageCleaner.clean(dir, dryRun: true, isLive: isLive)
+    held.release()
     #expect(preview.removedFiles == 15 && preview.reclaimedBytes == 0)
     #expect(try fm.contentsOfDirectory(atPath: dir.path).filter { $0.hasSuffix(".idx") }.allSatisfy { $0.hasSuffix("00000001.idx") })
 

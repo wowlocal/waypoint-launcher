@@ -53,7 +53,7 @@ func resolveInstall(_ args: [String], usage: String) -> (ProductInstall, Install
     var positional: [String] = []
     var i = 0
     while i < args.count {
-        if ["--path", "--state", "--language", "--speech"].contains(args[i]) { i += 2; continue }
+        if ["--path", "--state", "--language", "--speech", "--without"].contains(args[i]) { i += 2; continue }
         if !args[i].hasPrefix("--") { positional.append(args[i]) }
         i += 1
     }
@@ -71,17 +71,24 @@ func resolveInstall(_ args: [String], usage: String) -> (ProductInstall, Install
     return (game.install, store)
 }
 
-/// `cleanup <uid> [--path root] [--state file] [--dry-run]`: removes from the
-/// game's storage what no installed build needs, and gives the space back.
+/// `cleanup <uid> [--path root] [--state file] [--dry-run [--without product]]`:
+/// removes from the game's storage what no installed build needs, and gives
+/// the space back. `--without` counts as if that product were uninstalled.
 func cleanup(_ args: [String]) async {
-    let (install, store) = resolveInstall(args, usage: "usage: waypoint-cli cleanup <uid> [--path install-root] [--state file] [--dry-run]")
+    let usage = "usage: waypoint-cli cleanup <uid> [--path install-root] [--state file] [--dry-run [--without product]]"
+    let (install, store) = resolveInstall(args, usage: usage)
+    var without: Set<String> = []
+    if let i = args.firstIndex(of: "--without") {
+        guard args.contains("--dry-run"), i + 1 < args.count else { fail(usage) }
+        without.insert(args[i + 1])
+    }
     guard let product = InstallableProduct.forProduct(install.productCode) else { fail("\(install.productCode) has no local storage Waypoint knows") }
     let region = install.region.flatMap(Region.init(rawValue:)) ?? .us
     do {
         let config = try await VersionService().productConfig(product: install.productCode, region: region, platform: install.platform)
         guard !config.isContainerless else { fail("\(product.displayName) keeps no local storage") }
         let result = try await CASCInstaller(product: product, install: install, config: config, store: store)
-            .cleanStorage(dryRun: args.contains("--dry-run"), log: log)
+            .cleanStorage(dryRun: args.contains("--dry-run"), without: without, log: log)
         print("\(args.contains("--dry-run") ? "would remove" : "removed") \(result.removedFiles) files (\(byteString(result.removedBytes)))"
               + (args.contains("--dry-run") ? "" : ", gave back \(byteString(result.reclaimedBytes)) of disk")
               + "; old CDN indexes: \(byteString(result.removedIndexBytes))")

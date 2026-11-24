@@ -495,14 +495,21 @@ public struct CASCInstaller: Sendable {
     /// `CASCStorageCleaner`. A key stays if any listed build's encoding table
     /// or build config names it, which covers every file of those builds
     /// whatever their tags. Nothing is removed unless every build loads.
-    public func cleanStorage(dryRun: Bool = false, log: @Sendable (String) -> Void = { _ in }) async throws -> CASCStorageCleaner.Result {
-        guard RunningProcesses.inside(root).isEmpty else { throw UpdateError.gameRunning }
-        try BattleNet.ensureNotRunning()
+    /// With `without` (a dry run only), counts as if those products were
+    /// gone: what uninstalling them would free.
+    public func cleanStorage(dryRun: Bool = false, without: Set<String> = [],
+                             log: @Sendable (String) -> Void = { _ in }) async throws -> CASCStorageCleaner.Result {
+        guard dryRun || without.isEmpty else { throw TACTError.unsupported("cleaning a storage as if products were gone") }
+        // A dry run changes nothing, so a running game or Battle.net is no reason to stop it.
+        if !dryRun {
+            guard RunningProcesses.inside(root).isEmpty else { throw UpdateError.gameRunning }
+            try BattleNet.ensureNotRunning()
+        }
         let storageDir = dataRoot.appendingPathComponent("data", isDirectory: true)
         guard let stored = try StoredKeys.load(storageDir) else { return .init() }
         let buildInfoURL = root.appendingPathComponent(".build.info")
         let buildInfo = try String(contentsOf: buildInfoURL, encoding: .utf8)
-        let rows = BPSV(buildInfo).rows
+        let rows = BPSV(buildInfo).rows.filter { !without.contains($0["Product"] ?? "") }
         guard !rows.isEmpty else { throw TACTError.malformed(".build.info") }
 
         var live = stored.buckets.map { [Bool](repeating: false, count: $0.count) }
@@ -516,6 +523,7 @@ public struct CASCInstaller: Sendable {
             let cdn = try await versions.cdn(product: product, region: rowRegion)
             // The installed build, and one the Agent may be downloading ahead.
             for buildKey in [row["Build Key"], row["BGDL Key"]].compactMap({ $0 }).filter({ $0.count == 32 }) {
+                try Task.checkCancellation()
                 let configData = try await cdn.cached(.config, buildKey, localCopy: configURL(buildKey))
                 let config = String(decoding: configData, as: UTF8.self)
                 for word in config.split(whereSeparator: { $0 == " " || $0.isNewline }) where word.count == 32 {
@@ -540,8 +548,11 @@ public struct CASCInstaller: Sendable {
         // Everything above came from the network and can take minutes. A game
         // or Battle.net started meanwhile keeps the storage as it is, and so
         // does another update's write (the cleaner checks, under the storage lock).
-        guard RunningProcesses.inside(root).isEmpty else { throw UpdateError.gameRunning }
-        try BattleNet.ensureNotRunning()
+        try Task.checkCancellation()
+        if !dryRun {
+            guard RunningProcesses.inside(root).isEmpty else { throw UpdateError.gameRunning }
+            try BattleNet.ensureNotRunning()
+        }
         let isCurrent = { (try? String(contentsOf: buildInfoURL, encoding: .utf8)) == buildInfo }
         var result = try CASCStorageCleaner.clean(storageDir, dryRun: dryRun, unchangedSince: stored, isCurrent: isCurrent) { key in
             stored.position(of: key).map { live[key.bucket][$0] } ?? false
