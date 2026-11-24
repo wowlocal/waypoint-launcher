@@ -352,6 +352,111 @@ private func expectStored(_ keys: Range<Int>, in dir: URL, version: UInt32) thro
     #expect(after.count == before.count + (10..<20).reduce(0) { $0 + 30 + storageBlob($1).count })
 }
 
+/// Cancelling a WoW version's install into a shared storage: what it
+/// appended goes, and the storage is exactly what the other versions had.
+@Test func discardingAnUnfinishedUpdateRestoresTheStorage() throws {
+    let fm = FileManager.default
+    let dir = fm.temporaryDirectory.appendingPathComponent("waypoint-casc-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: dir) }
+    let first = try CASCStorageWriter(directory: dir)
+    for i in 0..<10 { try first.append(encodedKey: storageKey(i), blob: storageBlob(i), fullKey: false) }
+    try first.finish()
+    let archive0 = dir.appendingPathComponent("data.000")
+    let before = try Data(contentsOf: archive0)
+    let indexesBefore = try fm.contentsOfDirectory(atPath: dir.path).filter { $0.hasSuffix(".idx") }.sorted()
+
+    var update: CASCStorageWriter? = try CASCStorageWriter(directory: dir, allowExisting: true, verifying: nil, owner: "wow_classic_era")
+    for i in 10..<15 { try update!.append(encodedKey: storageKey(i), blob: storageBlob(i), fullKey: false) }
+    update = nil // paused
+    #expect(CASCStorageWriter.unfinishedOwners(dir) == ["wow_classic_era"])
+    // Archives it had started (a real one starts past 1 GB), one already
+    // removed by a rollback that was interrupted.
+    try Data(repeating: 0xAB, count: 4096).write(to: dir.appendingPathComponent("data.002"))
+    let added = (10..<15).reduce(UInt64(0)) { $0 + 30 + UInt64(storageBlob($1).count) } + 4096
+    #expect(CASCStorageWriter.unfinishedUpdateBytes(dir) == added)
+
+    let lock = try StorageLock(dir)
+    #expect(throws: TACTError.self, "only its own download") {
+        try CASCStorageWriter.discardUnfinishedUpdate(in: dir, owner: "wow", holding: lock)
+    }
+    try CASCStorageWriter.discardUnfinishedUpdate(in: dir, owner: "wow_classic_era", holding: lock)
+    lock.release()
+    #expect(try Data(contentsOf: archive0) == before)
+    #expect(!fm.fileExists(atPath: dir.appendingPathComponent("data.002").path))
+    #expect(!fm.fileExists(atPath: dir.appendingPathComponent(".waypoint-journal").path))
+    #expect(!fm.fileExists(atPath: dir.appendingPathComponent(".waypoint-journal-owners").path))
+    #expect(try fm.contentsOfDirectory(atPath: dir.path).filter { $0.hasSuffix(".idx") }.sorted() == indexesBefore)
+    #expect(CASCStorageWriter.unfinishedUpdateBytes(dir) == 0)
+    try expectStored(0..<10, in: dir, version: 1)
+
+    // Nothing unfinished left: refused rather than cutting anything.
+    let again = try StorageLock(dir)
+    #expect(throws: TACTError.self) { try CASCStorageWriter.discardUnfinishedUpdate(in: dir, owner: "wow_classic_era", holding: again) }
+    again.release()
+
+    // The storage takes the next update as usual.
+    let next = try CASCStorageWriter(directory: dir, allowExisting: true)
+    for i in 10..<12 { try next.append(encodedKey: storageKey(i), blob: storageBlob(i), fullKey: false) }
+    try next.finish()
+    try expectStored(0..<12, in: dir, version: 2)
+}
+
+/// A journal outlives a cancelled download, and the next writer carries
+/// on with it: whose data it holds is kept beside it.
+@Test func aJournalKnowsWhoseDownloadsItHolds() throws {
+    let fm = FileManager.default
+    let dir = fm.temporaryDirectory.appendingPathComponent("waypoint-casc-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: dir) }
+    let first = try CASCStorageWriter(directory: dir, allowExisting: false, verifying: nil, owner: "wow")
+    for i in 0..<3 { try first.append(encodedKey: storageKey(i), blob: storageBlob(i), fullKey: false) }
+    try first.finish()
+    #expect(CASCStorageWriter.unfinishedOwners(dir) == nil, "finished: no journal, no owners")
+
+    // Retail's update, cancelled keeping its data; then Classic's install.
+    var retail: CASCStorageWriter? = try CASCStorageWriter(directory: dir, allowExisting: true, verifying: nil, owner: "wow")
+    try retail!.append(encodedKey: storageKey(3), blob: storageBlob(3), fullKey: false)
+    retail = nil
+    var classic: CASCStorageWriter? = try CASCStorageWriter(directory: dir, allowExisting: true, verifying: nil, owner: "wow_classic")
+    try classic!.append(encodedKey: storageKey(4), blob: storageBlob(4), fullKey: false)
+    classic = nil
+    #expect(CASCStorageWriter.unfinishedOwners(dir) == ["wow", "wow_classic"])
+    let lock = try StorageLock(dir)
+    #expect(throws: TACTError.self, "Retail's patch stays") {
+        try CASCStorageWriter.discardUnfinishedUpdate(in: dir, owner: "wow_classic", holding: lock)
+    }
+    lock.release()
+
+    // A writer that doesn't say whose it is (an older Waypoint): unknown.
+    let unnamed = try CASCStorageWriter(directory: dir, allowExisting: true)
+    try unnamed.append(encodedKey: storageKey(5), blob: storageBlob(5), fullKey: false)
+    #expect(CASCStorageWriter.unfinishedOwners(dir) == nil)
+}
+
+/// An update whose `finish()` published its indexes but was interrupted
+/// before dropping the journal: the indexes use the new bytes, so they stay.
+@Test func anUpdateAlreadyInTheIndexesIsNotDiscarded() throws {
+    let fm = FileManager.default
+    let dir = fm.temporaryDirectory.appendingPathComponent("waypoint-casc-\(UUID().uuidString)")
+    defer { try? fm.removeItem(at: dir) }
+    let first = try CASCStorageWriter(directory: dir)
+    for i in 0..<5 { try first.append(encodedKey: storageKey(i), blob: storageBlob(i), fullKey: false) }
+    try first.finish()
+    let update = try CASCStorageWriter(directory: dir, allowExisting: true, verifying: nil, owner: "wow")
+    for i in 5..<8 { try update.append(encodedKey: storageKey(i), blob: storageBlob(i), fullKey: false) }
+    let journal = dir.appendingPathComponent(".waypoint-journal"), owners = dir.appendingPathComponent(".waypoint-journal-owners")
+    let saved = try Data(contentsOf: journal), savedOwners = try Data(contentsOf: owners)
+    try update.finish()
+    try saved.write(to: journal)
+    try savedOwners.write(to: owners)
+    let archive = try Data(contentsOf: dir.appendingPathComponent("data.000"))
+
+    let lock = try StorageLock(dir)
+    #expect(throws: UpdateError.self) { try CASCStorageWriter.discardUnfinishedUpdate(in: dir, owner: "wow", holding: lock) }
+    lock.release()
+    #expect(try Data(contentsOf: dir.appendingPathComponent("data.000")) == archive)
+    #expect(fm.fileExists(atPath: journal.path))
+}
+
 /// A first install stopped before `finish()`: archives and a journal, no
 /// index files. Planning the resumed install sees no storage yet (it threw
 /// "has 0 of 16 index files", so Resume and Try Again failed). Without the

@@ -501,9 +501,11 @@ final class GameCell: NSView {
                 guard let window = self?.window else { return }
                 UninstallAlert.present(game, model: model, in: window)
             }
-            if !uninstall.isEnabled {
-                let folder = URL(fileURLWithPath: game.install.installPath).lastPathComponent
-                uninstall.toolTip = "Another game in “\(folder)” is running or has a download in progress."
+            if !uninstall.isEnabled, let help = Self.uninstallHelp(for: state, model: model) {
+                // Said under the item, not only on hover: a dimmed item
+                // with its reason in a tooltip still reads as broken.
+                if #available(macOS 14.4, *) { uninstall.subtitle = help.reason }
+                uninstall.toolTip = ([help.reason + "."] + [help.more].compactMap { $0 }).joined(separator: " ")
             }
             menu.addItem(uninstall)
         }
@@ -514,6 +516,25 @@ final class GameCell: NSView {
             menu.addItem(ActionItem("Remove from Library", enabled: model.canRemoveFromLibrary(game)) { model.removeFromLibrary(game) })
         }
         return menu.items.isEmpty ? nil : menu
+    }
+
+    /// Why Uninstall… is dimmed, as what to do about it: the game in the
+    /// same folder that's in the way, by name, or this game's own download.
+    /// `reason` goes under the item (no period), `more` only in its tooltip.
+    private static func uninstallHelp(for state: GameRowState, model: AppModel) -> (reason: String, more: String?)? {
+        if let blocker = model.uninstallBlocker(state.game) {
+            return (blocker.isRunning ? "Quit \(blocker.name) first" : "Finish or cancel \(blocker.name)’s download first",
+                    "They share files.")
+        }
+        switch state.phase {
+        case .updating, .pausing, .paused: return ("Finish or cancel this game’s download first", nil)
+        // The row says what the game is doing, and it won't be for long.
+        case .signingIn, .preparingWindows, .launching, .uninstalling: return nil
+        case .idle, .failed: break
+        }
+        // Space being freed after another game in the folder was uninstalled.
+        let folder = URL(fileURLWithPath: state.game.install.installPath).lastPathComponent
+        return ("Waypoint is still working in “\(folder)”", "Try again when it’s done.")
     }
 
     /// "36.6.3 · EU", plus the chosen WoW license, "Intel" for games that

@@ -1366,17 +1366,18 @@ final class AppModel {
     /// An install that never finished, which cancelling can also clear away.
     struct UnfinishedInstall {
         var name: String
-        /// What would go to the Trash.
+        /// What would go to the Trash, or (`unfinishedStorage`) be deleted.
         var plan: UninstallPlan
         fileprivate var uninstaller: GameUninstaller
     }
 
-    /// The install behind `uid`, when cancelling it can offer to move what
-    /// it downloaded to the Trash: a paused or failed install of a game
-    /// that isn't on disk, into a folder nothing else uses. Nil for updates
-    /// and language changes, whose data is the installed game's own, for a
-    /// folder other games or downloads share, and when nothing in the
-    /// folder is plainly this install's (see `GameUninstaller.unfinishedPlan`).
+    /// The install behind `uid`, when cancelling it can offer to clear away
+    /// what it downloaded: a paused or failed install of a game that isn't
+    /// on disk. Into a folder other WoW versions share, what it added to
+    /// their storage is deleted rather than trashed. Nil for updates and
+    /// language changes, whose data is the installed game's own, while
+    /// another download uses the folder, and when nothing in the folder is
+    /// plainly this install's (see `GameUninstaller.unfinishedPlan`).
     func unfinishedInstall(uid: String) -> UnfinishedInstall? {
         guard canCancelDownload(uid: uid), let request = downloads[uid]?.request, request.kind == .install else { return nil }
         let folder = Self.folderKey(request.install.installPath)
@@ -1394,14 +1395,21 @@ final class AppModel {
     /// Cancels an install that never finished and moves what it downloaded
     /// to the Trash. Checks again that it is one: if anything changed since
     /// the question was asked, nothing happens and the download stays.
-    func cancelDownloadMovingToTrash(uid: String) async {
-        guard let install = unfinishedInstall(uid: uid) else { return }
+    func cancelDownloadMovingToTrash(uid: String, in window: NSWindow?) async {
+        guard let install = unfinishedInstall(uid: uid), let request = downloads[uid]?.request else { return }
         let folder = Self.folderKey(install.plan.root.path)
         uninstallingFolders.insert(folder)
-        phases[uid] = .uninstalling("Moving to the Trash…")
-        Log.notice(.cdn, "cancel_requested", "moving downloaded data to the Trash", ["uid": uid, "path": folder])
+        // Inside a storage other games share, it's deleted rather than trashed.
+        let deletes = install.plan.unfinishedStorage != nil
+        phases[uid] = .uninstalling(deletes ? "Deleting…" : "Moving to the Trash…")
+        Log.notice(.cdn, "cancel_requested", deletes ? "deleting downloaded data" : "moving downloaded data to the Trash",
+                   ["uid": uid, "path": folder])
         var failure: Error?
         do {
+            // Only on the drive the download started on: another one by the
+            // same name holds someone else's files. Reads the disk.
+            let path = request.install.installPath, volumeUUID = request.volumeUUID
+            try await Task.detached { try InstallVolume.ensureConnected(path, volumeUUID: volumeUUID) }.value
             try await install.uninstaller.removeUnfinished()
         } catch {
             failure = error
@@ -1412,17 +1420,28 @@ final class AppModel {
         phases.removeValue(forKey: uid)
         if let failure {
             Log.error(.cdn, "cancel_failed", "downloaded data stays", ["uid": uid, "error": failure])
-            // Said in full: the errors that stop this (Battle.net running,
-            // another writer) have no text of their own for an alert.
+            // What to do first, then that nothing changed.
             let alert = NSAlert()
-            alert.messageText = "Waypoint couldn’t move \(install.name)’s download to the Trash"
-            alert.informativeText = "Nothing was moved, and the download is still there to resume or cancel.\n\n\(errorMessage(failure))"
-            alert.runModal()
+            alert.messageText = "Waypoint couldn’t remove \(install.name)’s download"
+            alert.informativeText = "\(cancelFailureReason(failure, folder: folder))\n\nNothing was removed, and the download is still there to resume or cancel."
+            // Not on a window closed meanwhile: a sheet would bring it back.
+            if let window, window.isVisible { alert.beginSheetModal(for: window, completionHandler: nil) } else { alert.runModal() }
             return
         }
         discardDownload(uid: uid)
         reload()
-        Log.notice(.cdn, "cancelled", "moved downloaded data to the Trash", ["uid": uid])
+        Log.notice(.cdn, "cancelled", deletes ? "deleted downloaded data" : "moved downloaded data to the Trash", ["uid": uid])
+    }
+
+    /// Why removing a download failed, as what to do: the running game in
+    /// its folder by name, when that's what stopped it.
+    private func cancelFailureReason(_ error: Error, folder: String) -> String {
+        if case UninstallError.gameRunning = error,
+           let running = discoveredGames.first(where: { Self.folderKey($0.install.installPath) == folder && isRunning($0) }) {
+            return "Quit \(running.displayName) first. They share files."
+        }
+        let text = errorMessage(error)
+        return text.last.map { ".!?".contains($0) } == true ? text : text + "."
     }
 
     func canResumeDownload(uid: String) -> Bool {
@@ -1475,6 +1494,22 @@ final class AppModel {
         return game.isInstalled && !isBusy(game) && !isRunning(game) && !cleaningFolders.contains(folder) &&
             !neighbours.contains { isRunning($0) || isBusy(uid: $0.id) } &&
             !downloads.keys.contains { $0 != game.id && jobFolders[$0] == folder }
+    }
+
+    /// The other game in `game`'s folder that keeps it from being
+    /// uninstalled now, by name, for saying so: one that's running, or has
+    /// a download in progress or paused. Nil when there's none, or when
+    /// something passing is in the way (a launch, an uninstall, space being
+    /// freed).
+    func uninstallBlocker(_ game: Game) -> (name: String, isRunning: Bool)? {
+        let folder = Self.folderKey(game.install.installPath)
+        if let running = discoveredGames.first(where: { $0.id != game.id && Self.folderKey($0.install.installPath) == folder && isRunning($0) }) {
+            return (running.displayName, true)
+        }
+        // A download's phase, not an uninstall's shown over a failed one.
+        guard let uid = downloads.keys.sorted().first(where: { $0 != game.id && jobFolders[$0] == folder && !isUninstalling(uid: $0) }),
+              let request = downloads[uid]?.request else { return nil }
+        return (request.product?.displayName ?? GameCatalog.displayName(for: request.install), false)
     }
 
     private func isUninstalling(uid: String) -> Bool {
@@ -1556,10 +1591,11 @@ final class AppModel {
         reload()
         // What else a remembered location there holds is read again.
         if library.located.locations.contains(where: { $0.contains(game.install.installPath) }) { scanOffMainThreadOnce() }
-        if let cleanupError {
+        if cleanupError != nil {
             let alert = NSAlert()
             alert.messageText = "\(game.displayName) is uninstalled, but the space it used in “\(plan.root.lastPathComponent)” isn’t free yet"
-            alert.informativeText = "It’s freed the next time another game in that folder updates.\n\n\(errorMessage(cleanupError))"
+            // The cause stays in the log: none of them is the user's to fix here.
+            alert.informativeText = "It’s freed the next time another game in that folder updates."
             alert.runModal()
         }
     }

@@ -403,7 +403,7 @@ private let claim = ".waypoint-platform"
     #expect(try box.uninstaller(wow(listed), name: "World of Warcraft").unfinishedPlan() == nil)
 }
 
-@Test func anUnfinishedInstallIntoASharedFolderStays() throws {
+@Test func anUnfinishedInstallIntoASharedFolderWithNothingUnfinishedInItsStorageStays() throws {
     let box = try Sandbox()
     defer { box.cleanUp() }
     // Classic Era is installed; retail was being added to its folder, so
@@ -416,6 +416,70 @@ private let claim = ".waypoint-platform"
     let fresh = try box.make("Fresh", [claim, "Data/data/data.000"])
     #expect(try box.uninstaller(wow(fresh), name: "World of Warcraft", others: [wow(fresh, "wow_classic_era")]).unfinishedPlan() == nil)
     #expect(try box.uninstaller(wow(fresh), name: "World of Warcraft").unfinishedPlan()?.removesFolder == true)
+}
+
+@Test func anUnfinishedInstallIntoASharedFolderGivesBackWhatItAdded() async throws {
+    let box = try Sandbox()
+    defer { box.cleanUp() }
+    // Retail is installed; Classic Era was uninstalled earlier keeping its
+    // add-ons, then installed again and stopped partway.
+    let root = try box.make("World of Warcraft", [claim, wowApp, "_classic_era_/Interface/AddOns/Questie/Questie.toc", "_classic_era_/Logs/old.log"])
+    try Data("\(buildInfoHeader)\neu|1|aaaa|12.1.5|wow\n".utf8).write(to: root.appendingPathComponent(".build.info"))
+    let storage = root.appendingPathComponent("Data/data", isDirectory: true)
+    func key(_ i: Int) -> Data { Data((0..<16).map { UInt8(truncatingIfNeeded: $0 &* 13 &+ i &* 29 &+ 1) }) }
+    let retail = try CASCStorageWriter(directory: storage, allowExisting: false, verifying: nil, owner: "wow")
+    for i in 0..<5 { try retail.append(encodedKey: key(i), blob: Data(repeating: 1, count: 300), fullKey: false) }
+    try retail.finish()
+    let archive = try Data(contentsOf: storage.appendingPathComponent("data.000"))
+    var era: CASCStorageWriter? = try CASCStorageWriter(directory: storage, allowExisting: true, verifying: nil, owner: "wow_classic_era")
+    for i in 5..<9 { try era!.append(encodedKey: key(i), blob: Data(repeating: 2, count: 300), fullKey: false) }
+    era = nil
+    // Something the user put in the version folder meanwhile.
+    try box.make("World of Warcraft", ["_classic_era_/Screenshots/new.jpg", "_classic_era_/notes.txt"])
+
+    let install = wow(root, "wow_classic_era")
+    let uninstaller = box.uninstaller(install, name: "World of Warcraft Classic", keeping: false, others: [wow(root)])
+    let plan = try #require(try uninstaller.unfinishedPlan())
+    #expect(plan.sharesStorage)
+    #expect(plan.unfinishedStorage == storage.standardizedFileURL)
+    #expect(plan.items.isEmpty, "the version folder isn't touched")
+    #expect(GameUninstaller.unfinishedSize(of: plan) == 4 * 330)
+    // Retail's own cancel isn't offered this: the journal isn't its.
+    #expect(try box.uninstaller(wow(root), name: "World of Warcraft").unfinishedPlan() == nil)
+
+    let removed = try await uninstaller.removeUnfinished()
+    #expect(removed.unfinishedStorage != nil)
+    #expect(try Data(contentsOf: storage.appendingPathComponent("data.000")) == archive, "retail's storage as it was")
+    #expect(!FileManager.default.fileExists(atPath: storage.appendingPathComponent(".waypoint-journal").path))
+    #expect(box.exists("World of Warcraft/\(wowApp)"))
+    for kept in ["Interface/AddOns/Questie/Questie.toc", "Logs/old.log", "Screenshots/new.jpg", "notes.txt"] {
+        #expect(box.exists("World of Warcraft/_classic_era_/\(kept)"))
+    }
+    #expect(try String(contentsOf: root.appendingPathComponent(".build.info"), encoding: .utf8) == "\(buildInfoHeader)\neu|1|aaaa|12.1.5|wow\n")
+    // Asked again, there's nothing unfinished left.
+    #expect(try uninstaller.unfinishedPlan() == nil)
+}
+
+@Test func anUnfinishedInstallSharingAJournalWithAnotherDownloadStays() throws {
+    let box = try Sandbox()
+    defer { box.cleanUp() }
+    let root = try box.make("World of Warcraft", [claim, wowApp])
+    try Data("\(buildInfoHeader)\neu|1|aaaa|12.1.5|wow\n".utf8).write(to: root.appendingPathComponent(".build.info"))
+    let storage = root.appendingPathComponent("Data/data", isDirectory: true)
+    func key(_ i: Int) -> Data { Data((0..<16).map { UInt8(truncatingIfNeeded: $0 &* 13 &+ i &* 29 &+ 1) }) }
+    let retail = try CASCStorageWriter(directory: storage, allowExisting: false, verifying: nil, owner: "wow")
+    try retail.append(encodedKey: key(0), blob: Data(repeating: 1, count: 300), fullKey: false)
+    try retail.finish()
+    // Retail's update was cancelled keeping its data, before Classic Era started.
+    var update: CASCStorageWriter? = try CASCStorageWriter(directory: storage, allowExisting: true, verifying: nil, owner: "wow")
+    try update!.append(encodedKey: key(1), blob: Data(repeating: 2, count: 300), fullKey: false)
+    update = nil
+    let era = box.uninstaller(wow(root, "wow_classic_era"), name: "World of Warcraft Classic", others: [wow(root)])
+    #expect(try era.unfinishedPlan() == nil, "Retail's patch isn't Classic Era's to delete")
+    var both: CASCStorageWriter? = try CASCStorageWriter(directory: storage, allowExisting: true, verifying: nil, owner: "wow_classic_era")
+    try both!.append(encodedKey: key(2), blob: Data(repeating: 3, count: 300), fullKey: false)
+    both = nil
+    #expect(try era.unfinishedPlan() == nil)
 }
 
 @Test func anUnfinishedReinstallLeavesTheAddOnsOfTheInstallBeforeIt() throws {

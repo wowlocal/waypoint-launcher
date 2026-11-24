@@ -21,6 +21,10 @@ public struct UninstallPlan: Sendable, Equatable {
     /// Other products share the folder and its storage: only this product's
     /// `.build.info` row goes, and the storage is cleaned afterwards.
     public var sharesStorage: Bool
+    /// The storage an install that never finished was adding to, in a
+    /// folder it shares with other games: what it added is deleted, since
+    /// it sits inside archives the others use and can't go to the Trash.
+    public var unfinishedStorage: URL? = nil
 
     /// The user's own files: WoW add-ons, or a Windows game's saves.
     public var hasUserFiles: Bool { !userFiles.isEmpty || windowsHome != nil }
@@ -50,7 +54,7 @@ public enum UninstallError: Error, LocalizedError, Equatable {
         case .holdsOtherGames(let path): "Other games are installed inside “\(path)”, so Waypoint won’t move it to the Trash"
         case .sharedFolder(let path): "Other games share “\(path)” in a way Waypoint doesn’t know. Uninstall this one in Battle.net"
         case .protectedFolder(let path): "The game is installed right in “\(path)”, so Waypoint won’t move that folder to the Trash"
-        case .notUnfinished(let name): "\(name) is installed after all, or shares its folder with another game, so Waypoint left its files where they are"
+        case .notUnfinished(let name): "\(name) is installed after all, or its download moved on, so Waypoint left its files where they are"
         }
     }
 }
@@ -172,10 +176,8 @@ public struct GameUninstaller: Sendable {
 
     /// What clearing away an install that never finished would move to the
     /// Trash, or nil when it isn't plainly that: the game is on disk after
-    /// all, `.build.info` already lists it (or can't be read), or its folder
-    /// is shared with other games (what it downloaded is then inside the
-    /// archives they use, and stays for the next install or update to pick
-    /// up or clean).
+    /// all, or `.build.info` already lists it (or can't be read). In a
+    /// folder shared with other WoW versions, see `sharedUnfinishedPlan`.
     ///
     /// Only what the install itself put there goes: what appeared in the
     /// folder since the install claimed it (`.waypoint-platform`, written
@@ -189,10 +191,11 @@ public struct GameUninstaller: Sendable {
         let root = plan.root
         let mine: Set = [install.productCode, install.uid]
         let buildInfo = root.appendingPathComponent(".build.info")
-        guard !plan.sharesStorage, !GameCatalog.game(for: install).isInstalled,
+        guard !GameCatalog.game(for: install).isInstalled,
               !FileManager.default.fileExists(atPath: buildInfo.path) || (try? String(contentsOf: buildInfo, encoding: .utf8)) != nil,
-              !Self.buildInfoProducts(in: root).contains(where: mine.contains),
-              let claimed = Self.created(root.appendingPathComponent(InstallPlatform.claimFileName)) else { return nil }
+              !Self.buildInfoProducts(in: root).contains(where: mine.contains) else { return nil }
+        if plan.sharesStorage { return sharedUnfinishedPlan(plan) }
+        guard let claimed = Self.created(root.appendingPathComponent(InstallPlatform.claimFileName)) else { return nil }
         let candidates = plan.removesFolder ? Self.names(in: root) : plan.items
         let own = candidates.filter { name in Self.created(root.appendingPathComponent(name)).map { $0 >= claimed } == true }
         guard !own.isEmpty else { return nil }
@@ -201,6 +204,39 @@ public struct GameUninstaller: Sendable {
             plan.items = own
         }
         return plan
+    }
+
+    /// A WoW version installing into a folder other versions use first adds
+    /// to their shared storage, as an update would (its journal records
+    /// where it began); only after that's done does it write its own
+    /// version folder, and the journal is gone by then. So while the
+    /// journal is there and holds this install's data alone, rolling the
+    /// storage back is all there is to clear away: nothing in the version
+    /// folder is moved. Nil otherwise: no unfinished write, one another
+    /// product's download also added to (kept for next time), or one an
+    /// older Waypoint started.
+    private func sharedUnfinishedPlan(_ shared: UninstallPlan) -> UninstallPlan? {
+        // WoW's own storage, not a copy of one elsewhere in the folder.
+        let storage = shared.root.appendingPathComponent("Data/data", isDirectory: true)
+        guard isWoW, CASCStorageWriter.hasUnfinishedUpdate(storage),
+              CASCStorageWriter.unfinishedOwners(storage) == [install.productCode],
+              CASCStorageWriter.unfinishedUpdateBytes(storage) > 0 else { return nil }
+        var plan = shared
+        plan.items = []
+        plan.unfinishedStorage = storage
+        return plan
+    }
+
+    /// The local storages in `root`: `Data/data` for WoW.
+    static func storages(in root: URL) -> [URL] {
+        names(in: root).map { root.appendingPathComponent($0).appendingPathComponent("data", isDirectory: true) }
+            .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true }
+    }
+
+    /// Disk space clearing away an unfinished install gives back: what goes
+    /// to the Trash, and what it added to a shared storage.
+    public static func unfinishedSize(of plan: UninstallPlan) -> UInt64 {
+        allocatedSize(of: plan.trashed) + (plan.unfinishedStorage.map(CASCStorageWriter.unfinishedUpdateBytes) ?? 0)
     }
 
     private static func created(_ url: URL) -> Date? {
@@ -243,10 +279,23 @@ public struct GameUninstaller: Sendable {
             // An unfinished install may still be written by another process
             // (the command-line tool, a second copy of Waypoint), which this
             // one's downloads don't show: it then holds the storage's lock.
-            let storages = unfinished ? Self.names(in: plan.root)
-                .map { plan.root.appendingPathComponent($0).appendingPathComponent("data", isDirectory: true) }
-                .filter { (try? $0.resourceValues(forKeys: [.isDirectoryKey]).isDirectory) == true } : []
-            try withExtendedLifetime(try storages.map(StorageLock.init)) {
+            let storages = unfinished ? Self.storages(in: plan.root) : []
+            let locks = try storages.map(StorageLock.init)
+            try withExtendedLifetime(locks) {
+                // First: it can't be undone, but if it fails nothing has changed.
+                if let storage = plan.unfinishedStorage {
+                    guard let i = storages.firstIndex(where: { $0.standardizedFileURL.path == storage.standardizedFileURL.path }) else {
+                        throw UninstallError.notUnfinished(displayName)
+                    }
+                    // Again, right before cutting: a game or Battle.net
+                    // started meanwhile would be using these archives.
+                    try CASCStorageWriter.discardUnfinishedUpdate(in: storage, owner: install.productCode, holding: locks[i]) {
+                        guard RunningProcesses.inside(plan.root).isEmpty else {
+                            throw UninstallError.gameRunning(sharedFolder: plan.root.lastPathComponent)
+                        }
+                        try BattleNet.ensureNotRunning()
+                    }
+                }
                 try carryOut(plan)
             }
             return plan
@@ -278,8 +327,11 @@ public struct GameUninstaller: Sendable {
     private func trashItems(_ plan: UninstallPlan) throws {
         let fm = FileManager.default
         let buildInfo = plan.root.appendingPathComponent(".build.info")
+        let mine: Set = [install.productCode, install.uid]
+        // An install that never finished has no row to drop.
+        let listed = plan.sharesStorage && Self.buildInfoProducts(in: plan.root).contains(where: mine.contains)
         guard !plan.items.isEmpty else {
-            if plan.sharesStorage { _ = try Self.dropBuildInfoRows(buildInfo, products: [install.productCode, install.uid]) }
+            if listed { _ = try Self.dropBuildInfoRows(buildInfo, products: mine) }
             return
         }
         let bin = Self.unusedURL(in: plan.root, named: displayName)
@@ -293,8 +345,8 @@ public struct GameUninstaller: Sendable {
                 try fm.moveItem(at: from, to: to)
                 moved.append((from, to))
             }
-            if plan.sharesStorage {
-                originalBuildInfo = try Self.dropBuildInfoRows(buildInfo, products: [install.productCode, install.uid])
+            if listed {
+                originalBuildInfo = try Self.dropBuildInfoRows(buildInfo, products: mine)
             }
             try trash(bin)
         } catch {

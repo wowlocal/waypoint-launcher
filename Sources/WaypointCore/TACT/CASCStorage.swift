@@ -254,15 +254,19 @@ public final class CASCStorageWriter {
 
     /// Repair only the selected files. Replacements use the normal append
     /// journal; its keys supersede stale indexed locations when published.
-    init(directory: URL, allowExisting: Bool, verifying items: [StorageItem]?) throws {
+    init(directory: URL, allowExisting: Bool, verifying items: [StorageItem]?, owner: String? = nil) throws {
         self.directory = directory
         let fm = FileManager.default
+        var startsJournal = false
         try fm.createDirectory(at: directory, withIntermediateDirectories: true)
         lock = try StorageLock(directory)
         if items != nil { try CASC.restoreMissingArchiveHeaders(directory) }
         replacing = Set((items ?? []).map { $0.key.prefix9 })
         journalURL = directory.appendingPathComponent(Self.journalName)
         var saved = (try? Data(contentsOf: journalURL, options: .alwaysMapped)) ?? Data()
+        // No journal to carry on with: whatever owners file is left (the
+        // journal went some other way) isn't the next one's.
+        if saved.count < 16 { try? fm.removeItem(at: directory.appendingPathComponent(Self.ownersName)) }
 
         // All 16 published indexes are authoritative, even if an old fresh
         // install's journal survived beside them (or Battle.net completed the
@@ -278,6 +282,7 @@ public final class CASCStorageWriter {
             let header = key + Self.record(key: Self.markerKey, archive: last, offset: state.archiveSizes[last], size: 0, flag: 2)
             try header.write(to: journalURL, options: .atomic)
             saved = header
+            startsJournal = true // the old one's records are gone, and so are its owners
             Log.notice(.install, "stale_new_storage_journal_rebased", nil, ["path": directory.path])
         }
 
@@ -292,11 +297,13 @@ public final class CASCStorageWriter {
             baseKey = state.baseKey ?? Self.randomKey()
             start = (last, state.archiveSizes[last])
             let header = baseKey + Self.record(key: Self.markerKey, archive: last, offset: state.archiveSizes[last], size: 0, flag: 2)
+            startsJournal = true
             guard fm.createFile(atPath: journalURL.path, contents: header) else {
                 throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: journalURL.path])
             }
         } else {
             baseKey = Self.randomKey()
+            startsJournal = true
             guard fm.createFile(atPath: journalURL.path, contents: baseKey) else {
                 throw CocoaError(.fileWriteUnknown, userInfo: [NSFilePathErrorKey: journalURL.path])
             }
@@ -328,6 +335,7 @@ public final class CASCStorageWriter {
             archiveEnd = start.offset
         }
         journal = try FileHandle(forWritingTo: journalURL)
+        try Self.recordOwner(owner, in: directory, startsJournal: startsJournal)
         try replay(saved.count > 16 ? saved.dropFirst(16) : Data(), skipping: isUpdate ? 1 : 0,
                    verifying: items, preserving: publishedArchiveSizes)
     }
@@ -435,6 +443,7 @@ public final class CASCStorageWriter {
         if !fm.fileExists(atPath: lock.path) { fm.createFile(atPath: lock.path, contents: Data()) }
         try journal.close()
         try fm.removeItem(at: journalURL)
+        try? fm.removeItem(at: directory.appendingPathComponent(Self.ownersName))
         versions = newVersions
         finished = true
         self.lock.release()
@@ -465,6 +474,108 @@ public final class CASCStorageWriter {
         // Without its base key the writer ignores a journal and starts over.
         guard let head = try? handle.read(upToCount: 16 + journalRecordSize), head.count >= 16 else { return false }
         return marker(in: head.dropFirst(16)) == nil
+    }
+
+    /// Beside the journal: the products whose downloads wrote what it
+    /// records, one per line. A journal outlives a cancelled download (its
+    /// data kept for next time), and the next writer carries on with it,
+    /// whichever product that is.
+    static let ownersName = ".waypoint-journal-owners"
+
+    /// A new journal starts the list; a resumed one adds to it, unless a
+    /// writer that kept no list has written to it (its owners are unknown).
+    private static func recordOwner(_ owner: String?, in directory: URL, startsJournal: Bool) throws {
+        let url = directory.appendingPathComponent(ownersName)
+        // A writer that doesn't say whose it is makes the owners unknown.
+        guard let owner, !owner.isEmpty else { try? FileManager.default.removeItem(at: url); return }
+        var owners: [String]
+        if startsJournal {
+            owners = []
+        } else {
+            guard let text = try? String(contentsOf: url, encoding: .utf8) else { return }
+            owners = text.split(whereSeparator: \.isNewline).map(String.init)
+        }
+        guard !owners.contains(owner) else { return }
+        owners.append(owner)
+        try Data((owners.joined(separator: "\n") + "\n").utf8).write(to: url, options: .atomic)
+    }
+
+    /// The products an unfinished write belongs to; nil when not known (no
+    /// journal, or one an older Waypoint started).
+    public static func unfinishedOwners(_ directory: URL) -> [String]? {
+        guard FileManager.default.fileExists(atPath: directory.appendingPathComponent(journalName).path),
+              let text = try? String(contentsOf: directory.appendingPathComponent(ownersName), encoding: .utf8) else { return nil }
+        return text.split(whereSeparator: \.isNewline).map(String.init)
+    }
+
+    /// Where an unfinished update began appending, from its journal's marker.
+    private static func unfinishedUpdateStart(_ directory: URL) -> (archive: Int, offset: UInt64)? {
+        guard let handle = try? FileHandle(forReadingFrom: directory.appendingPathComponent(journalName)) else { return nil }
+        defer { try? handle.close() }
+        guard let head = try? handle.read(upToCount: 16 + journalRecordSize), head.count >= 16 else { return nil }
+        return marker(in: head.dropFirst(16))
+    }
+
+    /// The bytes an unfinished update has added to the storage so far: its
+    /// share of the archive it began in, and every archive it started.
+    public static func unfinishedUpdateBytes(_ directory: URL) -> UInt64 {
+        guard let start = unfinishedUpdateStart(directory) else { return 0 }
+        return archives(in: directory).filter { $0 >= start.archive }.reduce(UInt64(0)) { total, archive in
+            let size = (try? FileManager.default.attributesOfItem(atPath: archiveURL(archive, in: directory).path)[.size] as? UInt64) ?? 0
+            return total + (archive == start.archive ? size - min(size, start.offset) : size)
+        }
+    }
+
+    /// The archive numbers on disk (`data.NNN`), gaps and all.
+    private static func archives(in directory: URL) -> [Int] {
+        ((try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? [])
+            .compactMap { $0.wholeMatch(of: /data\.(\d{3})/).flatMap { Int($0.1) } }.sorted()
+    }
+
+    /// Undoes an unfinished update (an install joining a shared storage, or
+    /// an update): cuts the archive it began in back to where it began,
+    /// removes the archives it started, and drops its journal. None of it
+    /// was in the indexes yet, so the storage is as it was before, for the
+    /// games already using it. Refuses when a published index already uses
+    /// bytes past that point (an interrupted `finish()`, or an older index
+    /// version still on disk), and unless the journal is `owner`'s alone:
+    /// another product's download kept for next time stays. The caller
+    /// holds the storage's lock; `beforeChanging` runs once everything is
+    /// checked, right before the first change (to check again that no game
+    /// or Battle.net has started, which don't take the lock).
+    static func discardUnfinishedUpdate(in directory: URL, owner: String, holding lock: StorageLock,
+                                        beforeChanging: () throws -> Void = {}) throws {
+        withExtendedLifetime(lock) {}
+        guard let start = unfinishedUpdateStart(directory), unfinishedOwners(directory) == [owner] else {
+            throw TACTError.unsupported("discarding a download that isn't \(owner)'s alone in \(directory.path)")
+        }
+        let fm = FileManager.default
+        guard fm.fileExists(atPath: archiveURL(start.archive, in: directory).path) else {
+            throw TACTError.malformed("storage in \(directory.path): data.\(start.archive) is missing")
+        }
+        // Every index version on disk, not just the latest: the game may
+        // still be reading an older one if publishing was interrupted.
+        for name in try fm.contentsOfDirectory(atPath: directory.path) where name.count == 14 && name.hasSuffix(".idx") {
+            guard let bucket = Int(name.prefix(2), radix: 16), bucket < 16,
+                  let version = UInt32(name.dropFirst(2).prefix(8), radix: 16) else { continue }
+            let entries = try CASC.loadBucket(directory, bucket: bucket, version: version)
+            if entries.contains(where: { $0.archive > start.archive || ($0.archive == start.archive && $0.offset + UInt64($0.size) > start.offset) }) {
+                throw UpdateError.unfinishedStorage(directory.path)
+            }
+        }
+        // Opened first: if it can't be written, nothing has changed yet.
+        let handle = try FileHandle(forWritingTo: archiveURL(start.archive, in: directory))
+        defer { try? handle.close() }
+        try beforeChanging()
+        for archive in archives(in: directory) where archive > start.archive {
+            try fm.removeItem(at: archiveURL(archive, in: directory))
+        }
+        try handle.truncate(atOffset: start.offset)
+        try handle.synchronize()
+        // Last: until it goes, a resumed writer still finds where to start.
+        try fm.removeItem(at: directory.appendingPathComponent(journalName))
+        try? fm.removeItem(at: directory.appendingPathComponent(ownersName))
+        Log.notice(.install, "unfinished_update_discarded", nil, ["path": directory.path, "archive": start.archive, "offset": start.offset])
     }
 
     /// An update's journal starts with a marker: where appending began.

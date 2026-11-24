@@ -5,6 +5,9 @@ import WaypointCore
 /// space that is, and whether the player's own files go too: a WoW
 /// version's add-ons, settings and screenshots, or a Windows game's saved
 /// games and settings. They stay unless asked, as Battle.net leaves them.
+///
+/// Every text is a sentence or two in the player's words: games by name,
+/// and no folder the player never opened (`_classic_era_`, `Data`).
 @MainActor
 final class UninstallAlert: NSObject {
     private let game: Game
@@ -63,8 +66,15 @@ final class UninstallAlert: NSObject {
         let others = model.games.filter {
             $0.id != game.id && URL(fileURLWithPath: $0.install.installPath).standardizedFileURL == plan.root
         }
-        let names = ListFormatter.localizedString(byJoining: others.map(\.displayName))
-        return "Its own files will be moved to the Trash. Data it shares with \(names.isEmpty ? "the other games in “\(folder)”" : names) stays; the rest is deleted to free up space."
+        // Named while that stays short: a folder can hold many WoW versions.
+        let unaffected = switch others.count {
+        case 1: "\(others[0].displayName) isn’t affected."
+        case 2: "\(ListFormatter.localizedString(byJoining: others.map(\.displayName))) aren’t affected."
+        default: "Other games in “\(folder)” aren’t affected."
+        }
+        // What only this game used of the data they share is deleted
+        // (`GameUninstaller.cleanSharedStorage`): it can't go to the Trash.
+        return "Its game data will be deleted and the rest moved to the Trash. \(unaffected)"
     }
 
     private func accessory() -> NSView {
@@ -89,12 +99,12 @@ final class UninstallAlert: NSObject {
         // The checkbox is only arranged when this game has user files.
         if plan.hasUserFiles { stack.setCustomSpacing(4, after: removesUserFiles) }
         stack.widthAnchor.constraint(equalToConstant: width).isActive = true
-        // The alert doesn't grow later: sized for the longest texts.
+        // The alert doesn't grow later: sized for the largest size. The
+        // note is one line whichever way the checkbox is.
         sizeText.stringValue = sizeDescription(999_900_000_000)
-        keptNote.stringValue = keptDescription
+        renderKeptNote()
         stack.layoutSubtreeIfNeeded()
         stack.frame = NSRect(x: 0, y: 0, width: width, height: stack.fittingSize.height)
-        renderKeptNote()
         return stack
     }
 
@@ -106,16 +116,9 @@ final class UninstallAlert: NSObject {
         refreshSize()
     }
 
-    /// "Interface, WTF and Screenshots stay in “_retail_”, so…"
-    private var keptDescription: String {
-        guard plan.windowsHome == nil else { return "Saved games and settings stay, so reinstalling picks them up." }
-        let names = plan.userFiles.map { URL(fileURLWithPath: $0).lastPathComponent }
-        let folder = plan.userFiles.first.map { String($0.prefix { $0 != "/" }) } ?? ""
-        return "\(ListFormatter.localizedString(byJoining: names)) stay in “\(folder)”, so reinstalling picks them up."
-    }
-
+    /// What the checkbox does, either way. The checkbox names the files.
     private func renderKeptNote() {
-        keptNote.stringValue = plan.keepsUserFiles ? keptDescription : "They go to the Trash with the game."
+        keptNote.stringValue = plan.keepsUserFiles ? "They stay for when you reinstall." : "They go to the Trash too."
     }
 
     private func renderButton() {
@@ -141,8 +144,14 @@ final class UninstallAlert: NSObject {
         sizeText.stringValue = sizeDescription(bytes)
     }
 
+    /// "Frees 5.2 GB once you empty the Trash." In a folder shared with
+    /// other games it's "Also frees": the game data deleted there is
+    /// freed too, and how much that is isn't known until it's done. Nothing
+    /// when nothing goes to the Trash.
     private func sizeDescription(_ bytes: UInt64) -> String {
-        "Moves \(ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)) to the Trash. Empty the Trash to get the space back."
+        guard bytes > 0 else { return "" }
+        let size = ByteCountFormatter.string(fromByteCount: Int64(bytes), countStyle: .file)
+        return "\(plan.sharesStorage ? "Also frees" : "Frees") \(size) once you empty the Trash."
     }
 
     /// The icon the game's row shows.

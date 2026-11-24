@@ -593,7 +593,8 @@ public struct CASCInstaller: Sendable {
 
     private func writeStorage(_ plan: CASCInstallPlan, to storageDir: URL, counter: ByteCounter,
                               progress: @escaping @Sendable (UpdateProgress) -> Void) async throws {
-        let writer = try CASCStorageWriter(directory: storageDir, allowExisting: true, verifying: plan.verifiesStorage ? plan.storage : nil)
+        let writer = try CASCStorageWriter(directory: storageDir, allowExisting: true, verifying: plan.verifiesStorage ? plan.storage : nil,
+                                           owner: install.productCode)
         let storage = plan.storage
         var stored: UInt64 = 0
         let batches = Self.batches(storage, maxBytes: maxBatchBytes, maxGap: maxGapBytes) { item in
