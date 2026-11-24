@@ -22,6 +22,9 @@ final class UninstallAlert: NSObject {
     private var sharedTask: Task<Void, Never>?
     /// What goes to the Trash; nil while it's being measured.
     private var trashBytes: UInt64?
+    /// Measuring it again after the checkbox changed: the last size stays
+    /// on screen meanwhile, with the spinner.
+    private var measuringTrash = false
     /// In a folder shared with other games, what deleting this one's game
     /// data frees: measured once, while the sheet is open.
     private var shared: SharedSize = .none
@@ -95,14 +98,15 @@ final class UninstallAlert: NSObject {
             : "Also remove add-ons, settings and screenshots"
         let width = max(320, removesUserFiles.fittingSize.width)
         for label in [sizeText, keptNote] {
-            label.preferredMaxLayoutWidth = width - 24
+            label.preferredMaxLayoutWidth = width - 30
             label.textColor = .secondaryLabelColor
             label.font = .systemFont(ofSize: NSFont.smallSystemFontSize)
         }
         // The spinner after the text: the text stays put when it goes.
         let sizeRow = NSStackView(views: [sizeText, sizeSpinner])
-        sizeRow.alignment = .firstBaseline
-        sizeRow.detachesHiddenViews = true
+        // Centered on the text, and as tall with the spinner hidden.
+        sizeRow.alignment = .centerY
+        sizeRow.detachesHiddenViews = false
         var views: [NSView] = [sizeRow]
         if plan.hasUserFiles {
             removesUserFiles.target = self
@@ -110,18 +114,20 @@ final class UninstallAlert: NSObject {
             views += [removesUserFiles, keptNote]
         }
         let stack = NSStackView.column(views, spacing: 8)
+        // In line with the alert's text above.
+        stack.edgeInsets = NSEdgeInsets(top: 0, left: 6, bottom: 0, right: 0)
         // The checkbox is only arranged when this game has user files.
         if plan.hasUserFiles { stack.setCustomSpacing(4, after: removesUserFiles) }
         stack.widthAnchor.constraint(equalToConstant: width).isActive = true
         // Nothing moves once sizes come in: the line is as tall as the
         // tallest text it can show, at the largest sizes. The note is one
         // line whichever way the checkbox is.
-        let largest: UInt64 = 999_900_000_000
+        let largest: UInt64 = 999_990_000_000 // "999.99 GB", the widest
         let texts = [sizeDescription(trash: largest, shared: .none), sizeDescription(trash: largest, shared: .measuring),
                      sizeDescription(trash: largest, shared: .measured(largest)), sizeDescription(trash: largest, shared: .unknown)]
         let height = texts.map { text -> CGFloat in
             sizeText.stringValue = text
-            return sizeText.cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: width - 24, height: 10_000)).height ?? 0
+            return sizeText.cell?.cellSize(forBounds: NSRect(x: 0, y: 0, width: width - 30, height: 10_000)).height ?? 0
         }.max() ?? 0
         sizeText.heightAnchor.constraint(equalToConstant: height).isActive = true
         renderKeptNote()
@@ -151,7 +157,7 @@ final class UninstallAlert: NSObject {
     /// changes it. Under a second; the game data's share takes longer.
     private func refreshSize() {
         sizeTask?.cancel()
-        trashBytes = nil
+        measuringTrash = true
         renderSize()
         let items = plan.trashed
         sizeTask = Task.detached(priority: .userInitiated) { [weak self] in
@@ -184,6 +190,7 @@ final class UninstallAlert: NSObject {
 
     private func showTrash(_ bytes: UInt64) {
         trashBytes = bytes
+        measuringTrash = false
         renderSize()
     }
 
@@ -194,7 +201,7 @@ final class UninstallAlert: NSObject {
 
     private func renderSize() {
         let measuring = if case .measuring = shared { true } else { false }
-        let busy = trashBytes == nil || measuring
+        let busy = trashBytes == nil || measuringTrash || measuring
         sizeSpinner.isHidden = !busy
         if busy { sizeSpinner.startAnimation(nil) } else { sizeSpinner.stopAnimation(nil) }
         sizeText.stringValue = trashBytes.map { sizeDescription(trash: $0, shared: shared) } ?? "Calculating size…"
