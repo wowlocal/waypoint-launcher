@@ -802,7 +802,9 @@ final class StorageLock {
             // A filesystem without locks still gets written, as before.
             guard errno == EWOULDBLOCK else { return }
             guard ContinuousClock.now < deadline else {
-                close(fd)
+                // deinit runs even though init throws: closing again there
+                // would close whatever another thread opened under this number.
+                release()
                 throw UpdateError.storageBusy(directory.path)
             }
             usleep(10_000)
