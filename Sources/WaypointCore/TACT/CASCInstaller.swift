@@ -350,7 +350,20 @@ public struct CASCInstaller: Sendable {
         // build records. A pending writer will rewrite the indexes itself.
         if plan.storage.isEmpty, storageExisted,
            !fm.fileExists(atPath: storageDir.appendingPathComponent(CASCStorageWriter.journalName).path) {
-            try repairIndexes(in: storageDir)
+            try repairIndexes(in: storageDir, structure: plan.verifiesStorage)
+        }
+        // An update stops before writing anything if the storage is damaged
+        // where new files would go (issue #19); Verify Files repairs it.
+        if !plan.storage.isEmpty, storageExisted, !plan.verifiesStorage,
+           !fm.fileExists(atPath: storageDir.appendingPathComponent(CASCStorageWriter.journalName).path) {
+            let structure = try CASC.inspectStructure(storageDir, checkOverlaps: false)
+            if structure.blocksWriting {
+                var fields = structure.logFields
+                fields["uid"] = install.uid
+                fields["path"] = storageDir.path
+                Log.warning(.install, "storage_damaged", nil, fields)
+                throw UpdateError.storageDamaged(storageDir.path)
+            }
         }
         try install.platform.claim(install: install)
         Log.notice(.install, "casc_apply_started", nil, ["uid": install.uid, "bytes": needed, "resumed_bytes": plan.storedBytes,
@@ -407,6 +420,9 @@ public struct CASCInstaller: Sendable {
         let resuming = fm.fileExists(atPath: storageDir.appendingPathComponent(CASCStorageWriter.journalName).path)
         if !plan.storage.isEmpty || resuming {
             try await writeStorage(plan, to: storageDir, counter: counter, progress: progress)
+            // Verifying ends with the storage the game will accept, or says
+            // it can't: a resumed download skipped the repair at its start.
+            if plan.verifiesStorage, resuming { try repairIndexes(in: storageDir, structure: true) }
         }
 
         // Loose files (the game's .app and friends), verified like updates.
@@ -451,7 +467,7 @@ public struct CASCInstaller: Sendable {
         // A shared storage's journal can belong to a paused sibling product.
         // Its new build is not recorded yet, so cleanup would discard its
         // downloaded files. Keep them when finishing any interrupted write.
-        if storageExisted && !resuming {
+        if storageExisted && !resuming && CASCStorageCleaner.reclaimsSpace {
             // Best effort: the update itself is done either way.
             do {
                 _ = try await cleanStorage()
@@ -469,18 +485,24 @@ public struct CASCInstaller: Sendable {
     /// was there (issue #3). Verifying files and an update with nothing to
     /// download both go through here; see `CASC.repairIndexReserve` for what
     /// it does and does not touch.
+    /// With `structure` (Verify Files), first repairs what the game checks
+    /// before reading anything: see `CASC.repairStructure` (issue #19).
     @discardableResult
-    public func repairIndexes() throws -> CASC.IndexRepair {
+    public func repairIndexes(structure: Bool = false) throws -> CASC.IndexRepair {
         guard config.platform == install.platform else { throw TACTError.malformed("Product configuration platform does not match the installation") }
         try install.platform.validate(install: install)
         guard RunningProcesses.inside(root).isEmpty else { throw UpdateError.gameRunning }
         try BattleNet.ensureNotRunning()
         if install.platform == .macOS { try BattleNetInstallMetadata.prepareDataDirectory(dataRoot) }
-        return try repairIndexes(in: dataRoot.appendingPathComponent("data", isDirectory: true))
+        return try repairIndexes(in: dataRoot.appendingPathComponent("data", isDirectory: true), structure: structure)
     }
 
     @discardableResult
-    private func repairIndexes(in storageDir: URL) throws -> CASC.IndexRepair {
+    private func repairIndexes(in storageDir: URL, structure: Bool) throws -> CASC.IndexRepair {
+        if structure, (try CASC.scanStorage(storageDir)) != nil {
+            let repaired = try CASC.repairStructure(storageDir)
+            if repaired.after.isDamaged { throw UpdateError.storageUnrepairable(storageDir.path) }
+        }
         let repair = try CASC.repairIndexReserve(storageDir)
         if !repair.isEmpty {
             Log.notice(.install, "storage_indexes_repaired", nil, ["uid": install.uid, "path": storageDir.path,
@@ -500,6 +522,11 @@ public struct CASCInstaller: Sendable {
     public func cleanStorage(dryRun: Bool = false, without: Set<String> = [],
                              log: @Sendable (String) -> Void = { _ in }) async throws -> CASCStorageCleaner.Result {
         guard dryRun || without.isEmpty else { throw TACTError.unsupported("cleaning a storage as if products were gone") }
+        // Suspended (issue #19): see `CASCStorageCleaner.reclaimsSpace`.
+        guard dryRun || CASCStorageCleaner.reclaimsSpace else {
+            Log.notice(.install, "storage_clean_suspended", nil, ["path": root.path])
+            return .init()
+        }
         // A dry run changes nothing, so a running game or Battle.net is no reason to stop it.
         if !dryRun {
             guard RunningProcesses.inside(root).isEmpty else { throw UpdateError.gameRunning }

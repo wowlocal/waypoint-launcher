@@ -552,7 +552,7 @@ private func expectStored(_ keys: Range<Int>, in dir: URL, version: UInt32) thro
     var writer: CASCStorageWriter? = try CASCStorageWriter(directory: dir)
     try writer!.append(encodedKey: storageKey(0), blob: storageBlob(0), fullKey: false)
     #expect(throws: UpdateError.self) { _ = try CASCStorageWriter(directory: dir) }
-    #expect(throws: UpdateError.self) { _ = try CASCStorageCleaner.clean(dir) { _ in true } }
+    #expect(throws: UpdateError.self) { _ = try CASCStorageCleaner.clean(dir, reclaiming: true) { _ in true } }
     writer = nil // paused: the journal stays, the folder is free again
 
     let resumed = try CASCStorageWriter(directory: dir)
@@ -718,6 +718,14 @@ private func shortIndexStorage(_ dir: URL, entries: [CASC.IndexEntry], version: 
     }
     try CASC.segmentHeaders(baseKey: Data(repeating: 7, count: 16), archive: 0).data
         .write(to: dir.appendingPathComponent("data.000"))
+    // As long as its index says: entries past an archive's end are damage
+    // that stops updates (issue #19).
+    let end = entries.map { $0.offset + UInt64($0.size) }.max() ?? 0
+    if end > UInt64(CASC.segmentHeadersSize) {
+        let handle = try FileHandle(forWritingTo: dir.appendingPathComponent("data.000"))
+        try handle.truncate(atOffset: end)
+        try handle.close()
+    }
     return (url, Data(file))
 }
 
@@ -1064,7 +1072,7 @@ private func allocated(_ url: URL) -> UInt64 {
     #expect(preview.removedFiles == 15 && preview.reclaimedBytes == 0)
     #expect(try fm.contentsOfDirectory(atPath: dir.path).filter { $0.hasSuffix(".idx") }.allSatisfy { $0.hasSuffix("00000001.idx") })
 
-    let result = try CASCStorageCleaner.clean(dir, isLive: isLive)
+    let result = try CASCStorageCleaner.clean(dir, reclaiming: true, isLive: isLive)
     #expect(result.removedFiles == 15)
     #expect(result.removedBytes == (0..<30).filter { $0 % 2 == 1 }.reduce(UInt64(0)) { $0 + 30 + UInt64(blob($1).count) })
     #expect(result.reclaimedBytes >= 15 * 60 * 1024) // the whole 4 KB blocks inside each hole
@@ -1093,7 +1101,7 @@ private func allocated(_ url: URL) -> UInt64 {
     #expect(spans == 0x3FF + 15) // data.000's tail and 1,022 unused archives, plus the 15 holes
 
     // Cleaning again finds nothing; a later update still appends fine.
-    #expect(try CASCStorageCleaner.clean(dir, isLive: isLive).removedFiles == 0)
+    #expect(try CASCStorageCleaner.clean(dir, reclaiming: true, isLive: isLive).removedFiles == 0)
     let update = try CASCStorageWriter(directory: dir, allowExisting: true)
     try update.append(encodedKey: storageKey(100), blob: blob(100), fullKey: false)
     try update.finish()
@@ -1108,7 +1116,7 @@ private func allocated(_ url: URL) -> UInt64 {
     for i in 0..<10 { try writer.append(encodedKey: storageKey(i), blob: Data(repeating: 1, count: 100_000), fullKey: false) }
     try writer.finish()
     let live = Set((0..<4).map { storageKey($0).prefix(9) })
-    let result = try CASCStorageCleaner.clean(dir) { live.contains($0.data) }
+    let result = try CASCStorageCleaner.clean(dir, reclaiming: true) { live.contains($0.data) }
     #expect(result.removedFiles == 6)
     let size = try fm.attributesOfItem(atPath: dir.appendingPathComponent("data.000").path)[.size] as! UInt64
     #expect(size == UInt64(CASC.segmentHeadersSize + 4 * (30 + 100_000)))
@@ -1233,12 +1241,12 @@ func archiveGroupMatchesAgentBuiltOnes() throws {
     let update = try CASCStorageWriter(directory: dir, allowExisting: true)
     try update.append(encodedKey: storageKey(100), blob: Data(repeating: 2, count: 10_000), fullKey: false)
     try update.finish()
-    #expect(throws: UpdateError.self) { try CASCStorageCleaner.clean(dir, unchangedSince: snapshot, isLive: isLive) }
+    #expect(throws: UpdateError.self) { try CASCStorageCleaner.clean(dir, reclaiming: true, unchangedSince: snapshot, isLive: isLive) }
     #expect(try StoredKeys.load(dir)!.contains(Key16(storageKey(100))!), "the update's file stays")
     #expect(try StoredKeys.load(dir)!.contains(Key16(storageKey(1))!), "nothing is removed")
 
     // Nor when only .build.info changed (another version recorded a new build).
     let fresh = try #require(try StoredKeys.load(dir))
-    #expect(throws: UpdateError.self) { try CASCStorageCleaner.clean(dir, unchangedSince: fresh, isCurrent: { false }, isLive: isLive) }
-    #expect(try CASCStorageCleaner.clean(dir, unchangedSince: fresh, isLive: isLive).removedFiles == 4)
+    #expect(throws: UpdateError.self) { try CASCStorageCleaner.clean(dir, reclaiming: true, unchangedSince: fresh, isCurrent: { false }, isLive: isLive) }
+    #expect(try CASCStorageCleaner.clean(dir, reclaiming: true, unchangedSince: fresh, isLive: isLive).removedFiles == 4)
 }

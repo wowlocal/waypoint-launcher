@@ -83,6 +83,9 @@ func cleanup(_ args: [String]) async {
         without.insert(args[i + 1])
     }
     guard let product = InstallableProduct.forProduct(install.productCode) else { fail("\(install.productCode) has no local storage Waypoint knows") }
+    guard args.contains("--dry-run") || CASCStorageCleaner.reclaimsSpace else {
+        fail("cleanup is turned off in this version (issue #19); --dry-run still counts what it would remove")
+    }
     let region = install.region.flatMap(Region.init(rawValue:)) ?? .us
     do {
         let config = try await VersionService().productConfig(product: install.productCode, region: region, platform: install.platform)

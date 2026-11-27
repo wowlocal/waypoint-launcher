@@ -37,14 +37,16 @@ public enum BLTE {
         var r = ByteReader(blob)
         guard blob.count >= 8, try r.bytes(4) == Data("BLTE".utf8) else { throw TACTError.malformed("BLTE magic") }
         let headerSize = Int(try r.uintBE(4))
+        // The full 16-byte key, or the 9 bytes a storage index keeps.
         let key = encodedKey.prefix(16)
+        guard key.count >= 9 else { throw TACTError.malformed("encoded key \(key.hex)") }
         guard headerSize > 0 else {
-            guard Data(Insecure.MD5.hash(data: blob)) == key else { throw TACTError.checksumMismatch(key.hex) }
+            guard Data(Insecure.MD5.hash(data: blob)).prefix(key.count) == key else { throw TACTError.checksumMismatch(key.hex) }
             return
         }
         // Slices, not copies: blobs can be large and memory-mapped.
         guard headerSize <= blob.count,
-              Data(Insecure.MD5.hash(data: blob[blob.startIndex..<blob.startIndex + headerSize])) == key
+              Data(Insecure.MD5.hash(data: blob[blob.startIndex..<blob.startIndex + headerSize])).prefix(key.count) == key
         else { throw TACTError.checksumMismatch(key.hex) }
         _ = try r.u8() // flags
         let chunkCount = Int(try r.uintBE(3))

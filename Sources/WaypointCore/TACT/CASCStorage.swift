@@ -167,10 +167,10 @@ public enum CASC {
         for (i, value) in [1, 0, 0, 0, 1, 0, 0x40, 0x0C, 0x40, 0x104].enumerated() { put32LE(&d, 0x4000 + 4 * i, UInt32(value)) }
 
         var spans: [(size: UInt64, offset: UInt64)] = []
-        for (archive, size) in archiveSizes.enumerated() where archiveSize - size > 0x40 {
+        for (archive, size) in archiveSizes.prefix(maxArchives).enumerated() where size < archiveSize && archiveSize - size > 0x40 {
             spans.append((archiveSize - size, UInt64(archive) << UInt64(offsetBits) | size))
         }
-        for archive in archiveSizes.count..<maxArchives {
+        for archive in min(archiveSizes.count, maxArchives)..<maxArchives {
             spans.append((archiveSize, UInt64(archive) << UInt64(offsetBits)))
         }
         // The table holds 1,090 spans: archive tails and unused archives
@@ -260,6 +260,30 @@ public final class CASCStorageWriter {
         var startsJournal = false
         try fm.createDirectory(at: directory, withIntermediateDirectories: true)
         lock = try StorageLock(directory)
+        let hasJournal = fm.fileExists(atPath: directory.appendingPathComponent(Self.journalName).path)
+        // Verifying first repairs what the game checks before reading
+        // anything (issue #19). A resumed run finishes its journal first:
+        // repairing needs the index the journal is about to replace, and
+        // a paused download must stay resumable (or discardable).
+        var verified = false
+        if items != nil, !hasJournal, try CASC.scanStorage(directory) != nil {
+            let repair = try CASC.repairStructure(directory, locked: true)
+            if repair.after.isDamaged { throw UpdateError.storageUnrepairable(directory.path) }
+            verified = true
+        } else if hasJournal, try CASC.scanStorage(directory) != nil {
+            let structure = try CASC.inspectStructure(directory, checkOverlaps: false)
+            if structure.isDamaged {
+                // Carrying on destroys nothing: an entry past an archive's end
+                // has no bytes, and what's written there turns it into an
+                // overlap that Verify Files settles by which file checks out.
+                // Stopping instead would strand the paused download, which
+                // repairing can't touch while its journal is open.
+                var fields = structure.logFields
+                fields["path"] = directory.path
+                if let owner { fields["uid"] = owner }
+                Log.warning(.install, "storage_damaged_resuming", "Verify Files repairs it once this download finishes", fields)
+            }
+        }
         if items != nil { try CASC.restoreMissingArchiveHeaders(directory) }
         replacing = Set((items ?? []).map { $0.key.prefix9 })
         journalURL = directory.appendingPathComponent(Self.journalName)
@@ -294,7 +318,22 @@ public final class CASCStorageWriter {
         } else if let state = try CASC.scanStorage(directory) {
             guard allowExisting else { throw TACTError.unsupported("writing over the existing storage in \(directory.path)") }
             guard let last = state.archiveSizes.indices.last else { throw TACTError.malformed("storage without archives in \(directory.path)") }
-            baseKey = state.baseKey ?? Self.randomKey()
+            // New files go after the last archive's end. If the index already
+            // points past it, or a header is gone, writing would bury the
+            // damage under new files (issue #19): stop until Verify repairs it.
+            if !verified {
+                let structure = try CASC.inspectStructure(directory, checkOverlaps: false)
+                if structure.blocksWriting {
+                    var fields = structure.logFields
+                    fields["path"] = directory.path
+                    if let owner { fields["uid"] = owner }
+                    Log.warning(.install, "storage_damaged", nil, fields)
+                    throw items == nil ? UpdateError.storageDamaged(directory.path) : UpdateError.storageUnrepairable(directory.path)
+                }
+            }
+            // New archives' headers derive from it: the one the intact
+            // archives agree on, not whatever data.000 starts with.
+            baseKey = try CASC.corroboratedBaseKey(directory, archives: state.archiveSizes.count) ?? state.baseKey ?? Self.randomKey()
             start = (last, state.archiveSizes[last])
             let header = baseKey + Self.record(key: Self.markerKey, archive: last, offset: state.archiveSizes[last], size: 0, flag: 2)
             startsJournal = true
@@ -529,7 +568,7 @@ public final class CASCStorageWriter {
     /// The archive numbers on disk (`data.NNN`), gaps and all.
     private static func archives(in directory: URL) -> [Int] {
         ((try? FileManager.default.contentsOfDirectory(atPath: directory.path)) ?? [])
-            .compactMap { $0.wholeMatch(of: /data\.(\d{3})/).flatMap { Int($0.1) } }.sorted()
+            .compactMap { $0.wholeMatch(of: /data\.(\d{3,4})/).flatMap { Int($0.1) } }.sorted()
     }
 
     /// Undoes an unfinished update (an install joining a shared storage, or
@@ -914,8 +953,9 @@ extension CASC {
         }
         for (archive, entries) in headers {
             let url = directory.appendingPathComponent(String(format: "data.%03d", archive))
-            let size = (try? url.resourceValues(forKeys: [.fileSizeKey]).fileSize) ?? 0
-            guard size < segmentHeadersSize else { continue }
+            // Only an archive that's empty or gone (known for certain: a failed
+            // read throws): surviving bytes are never replaced.
+            guard try (archiveSize(archive, in: directory) ?? 0) == 0 else { continue }
             let offsets = Set(entries.map(\.offset))
             guard offsets == Set((0..<16).map { UInt64($0 * headerSize) }) else {
                 throw TACTError.malformed("missing archive segment headers in \(url.path)")
@@ -1116,7 +1156,7 @@ extension CASC {
                   let version = UInt32(name.dropFirst(2).prefix(8), radix: 16) else { continue }
             latest[bucket] = max(latest[bucket] ?? 0, version)
         }
-        let archiveNumbers = files.compactMap { name in name.wholeMatch(of: /data\.(\d{3})/).flatMap { Int($0.1) } }
+        let archiveNumbers = files.compactMap { name in name.wholeMatch(of: /data\.(\d{3,4})/).flatMap { Int($0.1) } }
         guard !latest.isEmpty || !archiveNumbers.isEmpty else { return nil }
         guard latest.count == 16 else {
             // A first install that stopped before `finish()` wrote the index
@@ -1150,6 +1190,15 @@ extension CASC {
 /// size). No data is moved, so it's quick and an interruption is harmless:
 /// running it again finishes the job.
 public enum CASCStorageCleaner {
+    /// Off since issue #19. The cleaner frees every byte the index doesn't
+    /// cover, not just what it removed, and advertises the gaps as free
+    /// space. On storage another program (the game itself, Battle.net) had
+    /// changed in ways Waypoint misread, that destroyed other files' data and
+    /// segment headers. Until it frees only proven-unused ranges, nothing
+    /// reclaims space: updates leave old builds' files in place, and
+    /// uninstalling a WoW version that shares a folder leaves its game data.
+    public static let reclaimsSpace = false
+
     public struct Result: Sendable, Equatable {
         public var removedFiles = 0
         /// Bytes the removed entries took in the archives.
@@ -1169,8 +1218,20 @@ public enum CASCStorageCleaner {
     /// dead. Nothing is removed then; that update cleans up after itself.
     public static func clean(_ directory: URL, dryRun: Bool = false, unchangedSince snapshot: StoredKeys? = nil,
                              isCurrent: () -> Bool = { true }, isLive: (Key9) -> Bool) throws -> Result {
+        try clean(directory, dryRun: dryRun, reclaiming: reclaimsSpace, unchangedSince: snapshot, isCurrent: isCurrent, isLive: isLive)
+    }
+
+    /// The cleaner itself, for its tests while `reclaimsSpace` is off.
+    static func clean(_ directory: URL, dryRun: Bool = false, reclaiming: Bool,
+                      unchangedSince snapshot: StoredKeys? = nil,
+                      isCurrent: () -> Bool = { true }, isLive: (Key9) -> Bool) throws -> Result {
         let fm = FileManager.default
         guard fm.fileExists(atPath: directory.path) else { return Result() }
+        // Suspended (issue #19): see `reclaimsSpace`. Counting still works.
+        guard dryRun || reclaiming else {
+            Log.notice(.install, "storage_clean_suspended", nil, ["path": directory.path])
+            return Result()
+        }
         // Counting only reads: it mustn't keep a real clean (or a writer)
         // waiting, as when the Uninstall sheet measures while it's open.
         let lock = dryRun ? nil : try StorageLock(directory)

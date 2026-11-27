@@ -165,7 +165,7 @@ public enum BattleNetInstallMetadata {
             if info.st_mode & S_IFMT == S_IFREG {
                 guard next.deletingLastPathComponent().standardizedFileURL == storage else { continue }
                 let name = next.lastPathComponent
-                let archive = name.wholeMatch(of: /data\.\d{3}/) != nil
+                let archive = name.wholeMatch(of: /data\.\d{3,4}/) != nil
                 let index = name.count == 14 && name.hasSuffix(".idx") && name.prefix(10).allSatisfy(\.isHexDigit)
                 // Atomic index/shmem writes use 0600; archive creation uses
                 // 0644. Preserve restrictive archive modes and unrelated files.

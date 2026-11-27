@@ -1561,7 +1561,7 @@ final class AppModel {
         discardDownload(uid: game.id)
         uninstallingFolders.remove(folder)
         var cleanupError: Error?
-        if plan.sharesStorage {
+        if plan.sharesStorage && CASCStorageCleaner.reclaimsSpace {
             // Network fetches can make this take minutes: the other versions
             // stay playable (not updatable), and only this row waits.
             cleaningFolders.insert(folder)

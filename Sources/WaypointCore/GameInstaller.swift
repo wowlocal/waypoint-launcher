@@ -199,7 +199,7 @@ public struct GameUpdate: Sendable {
         try install.platform.validate(install: install)
         guard case .casc(let p) = plan else { return CASC.IndexRepair() }
         return try CASCInstaller(product: p.product, install: p.install, config: p.config, versions: versions, store: store)
-            .repairIndexes()
+            .repairIndexes(structure: p.verifiesStorage)
     }
 
     public func apply(_ plan: GameUpdatePlan, progress: @escaping @Sendable (UpdateProgress) -> Void = { _ in }) async throws {

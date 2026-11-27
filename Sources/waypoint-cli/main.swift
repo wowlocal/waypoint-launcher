@@ -92,8 +92,36 @@ case "repair-install-metadata":
 case "diagnose":
     diagnose()
 
+case "storage-check":
+    // `storage-check <Data/data> [--repair]`: what the game checks before
+    // reading a local storage (issue #19); `--repair` fixes what it can prove.
+    let rest = Array(args.dropFirst())
+    guard let path = rest.first(where: { !$0.hasPrefix("--") }) else { fail("usage: waypoint-cli storage-check <Data/data> [--repair]") }
+    let dir = URL(fileURLWithPath: path)
+    do {
+        func show(_ r: CASC.StructureReport) {
+            for (k, v) in r.logFields.sorted(by: { $0.key < $1.key }) { print("  \(k): \(v)") }
+            for e in (r.outOfBounds + r.displaced).prefix(20) {
+                print("  entry \(e.key.hex) archive \(e.archive) offset \(e.offset) size \(e.size)")
+            }
+        }
+        if rest.contains("--repair") {
+            // Like the app: never while the game or Battle.net may be writing.
+            let root = dir.standardizedFileURL.deletingLastPathComponent().deletingLastPathComponent()
+            guard RunningProcesses.inside(root).isEmpty else { fail("\(UpdateError.gameRunning)") }
+            try BattleNet.ensureNotRunning()
+            let repair = try CASC.repairStructure(dir)
+            print("before:"); show(repair.before)
+            print("rebuilt header slots \(repair.rebuiltHeaderSlots), indexed header slots \(repair.indexedHeaderSlots), dropped entries \(repair.droppedEntries)")
+            print("after:"); show(repair.after)
+        } else {
+            let report = try CASC.inspectStructure(dir, checkOverlaps: true)
+            print(report.isDamaged ? "DAMAGED" : (report.isEmpty ? "sound" : "sound (with notes)")); show(report)
+        }
+    } catch { fail("\(error)") }
+
 default:
-    fail("usage: waypoint-cli [list | catalog [--refresh] | plan <uid> | check-tokens [GAMEKEY…] | check-updates | update <uid> [--path root] [--state file] [--verify] [--language xxXX [--speech xxXX]] [--dry-run] | cleanup <uid> [--path root] [--state file] [--dry-run [--without product]] | fetch <uid> <regex> <dir> | install <uid> <dir> [options] | launch <uid> [--state file] [--dry-run] | logs [options] | repair-install-metadata | diagnose]")
+    fail("usage: waypoint-cli [list | catalog [--refresh] | plan <uid> | check-tokens [GAMEKEY…] | check-updates | update <uid> [--path root] [--state file] [--verify] [--language xxXX [--speech xxXX]] [--dry-run] | cleanup <uid> [--path root] [--state file] [--dry-run [--without product]] | fetch <uid> <regex> <dir> | install <uid> <dir> [options] | launch <uid> [--state file] [--dry-run] | logs [options] | repair-install-metadata | diagnose | storage-check <Data/data> [--repair]]")
 }
 
 Diagnostics.shared.flush()

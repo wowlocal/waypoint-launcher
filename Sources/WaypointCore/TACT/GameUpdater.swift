@@ -94,6 +94,10 @@ public enum UpdateError: Error, CustomStringConvertible {
     case unfinishedStorage(String)
     /// Some indexes were deliberately left untouched because they could not be repaired safely.
     case indexRepairIncomplete(String, [String])
+    /// The storage breaks what the game checks on startup; Verify Files repairs it.
+    case storageDamaged(String)
+    /// Verify Files found damage it can't prove how to repair.
+    case storageUnrepairable(String)
 
     public var description: String {
         switch self {
@@ -114,6 +118,9 @@ public enum UpdateError: Error, CustomStringConvertible {
         case .unfinishedStorage(let path): "An unfinished install or update needs to finish in \(path). Resume it or try Verify Files again"
         case .indexRepairIncomplete(let path, let files):
             "Could not repair \(files.count) storage index file(s) in \(path). Use Battle.net's Scan and Repair"
+        case .storageDamaged(let path): "The game data in \(path) is damaged. Choose Verify Files to repair it"
+        case .storageUnrepairable(let path):
+            "The game data in \(path) is damaged in a way Waypoint can't repair safely. Use Battle.net's Scan and Repair, or reinstall"
         }
     }
 }

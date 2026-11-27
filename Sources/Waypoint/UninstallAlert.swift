@@ -62,7 +62,7 @@ final class UninstallAlert: NSObject {
         alert.addButton(withTitle: "Uninstall").hasDestructiveAction = true
         alert.addButton(withTitle: "Cancel")
         alert.accessoryView = accessory()
-        if plan.sharesStorage { measureShared() }
+        if plan.sharesStorage && CASCStorageCleaner.reclaimsSpace { measureShared() }
         refreshSize()
         // The game starting (or an update) meanwhile disables Uninstall.
         observeChanges { [weak self] in self?.renderButton() }
@@ -90,6 +90,8 @@ final class UninstallAlert: NSObject {
         }
         // What only this game used of the data they share is deleted
         // (`GameUninstaller.cleanSharedStorage`): it can't go to the Trash.
+        // While that's suspended (issue #19), the shared data stays as it is.
+        guard CASCStorageCleaner.reclaimsSpace else { return "Its files in “\(folder)” will be moved to the Trash. \(unaffected)" }
         return "Its game data will be deleted and the rest moved to the Trash. \(unaffected)"
     }
 
