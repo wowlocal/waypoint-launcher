@@ -188,7 +188,9 @@ extension CASC {
                     continue
                 }
                 referenced.insert(entry.archive)
-                if checkOverlaps { ranges[entry.archive].append((UInt32(entry.offset), UInt32(truncatingIfNeeded: end))) }
+                // An empty entry (Battle.net lists some, several at offset 0)
+                // takes up no bytes, so it can't overlap anything.
+                if checkOverlaps, entry.size > 0 { ranges[entry.archive].append((UInt32(entry.offset), UInt32(truncatingIfNeeded: end))) }
             }
         }
 

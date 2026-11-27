@@ -637,3 +637,20 @@ private func freeSpans(_ dir: URL) throws -> [(archive: Int, offset: UInt64, siz
     let checking = UpdateProgress(completedBytes: 1, totalBytes: 4, completedFiles: 0, totalFiles: 9, stage: .checking)
     #expect(try JSONDecoder().decode(UpdateProgress.self, from: JSONEncoder().encode(checking)) == checking)
 }
+
+/// The reporter's storage also lists two different keys as empty entries
+/// at archive 0, offset 0 (as Battle.net writes them): no bytes, no overlap.
+@Test func emptyEntriesOverlapNothing() throws {
+    let dir = temporaryStorage()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    try makeStorage(dir)
+    let inside = try #require(try entries(dir).first { $0.key == blte(6).key.prefix(9) })
+    let empty = [CASC.IndexEntry(key: Data(hex: "53cdbd51d46de07e35")!, archive: 0, offset: 0, size: 0),
+                 CASC.IndexEntry(key: Data(hex: "20f336185a8bbdb56d")!, archive: 0, offset: 0, size: 0),
+                 CASC.IndexEntry(key: Data(repeating: 0xE0, count: 9), archive: 0, offset: inside.offset + 40, size: 0)]
+    try rewriteIndexes(dir) { bucket, entries in entries += empty.filter { CASC.bucket(of: $0.key) == bucket } }
+    let report = try CASC.inspectStructure(dir, checkOverlaps: true)
+    #expect(report.ambiguousOverlaps == 0)
+    #expect(report.isEmpty)
+    #expect(try CASC.repairStructure(dir).isEmpty, "left exactly as they are")
+}
