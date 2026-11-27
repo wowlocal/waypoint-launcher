@@ -922,10 +922,12 @@ extension CASC {
     /// Returns one flag per selected item (which must be sorted by key),
     /// checking one mapped archive at a time. Normal update planning keeps
     /// its fast index-membership path.
-    static func verifiedStorage(_ directory: URL, items: [StorageItem]) throws -> [Bool] {
+    /// `checked` hears the bytes read so far (their index sizes), now and then.
+    static func verifiedStorage(_ directory: URL, items: [StorageItem], checked: ((UInt64) -> Void)? = nil) throws -> [Bool] {
         var valid = [Bool](repeating: false, count: items.count)
         guard let state = try scanStorage(directory) else { return valid }
         let verifier = StoredBlobVerifier(directory: directory, items: items, sortedByKey: true)
+        var bytes: UInt64 = 0, sinceReport = 0
         for bucket in 0..<16 {
             try Task.checkCancellation()
             let entries = try loadBucket(directory, bucket: bucket, version: state.versions[bucket])
@@ -934,8 +936,12 @@ extension CASC {
                 if n % 256 == 0 { try Task.checkCancellation() }
                 guard let key = Key9(entry.key), let i = verifier.index(of: key), !valid[i] else { continue }
                 valid[i] = verifier.valid(entry, item: verifier.items[i], requireCanonicalHeader: false)
+                bytes += UInt64(entry.size)
+                sinceReport += 1
+                if sinceReport == 2048 { checked?(bytes); sinceReport = 0 }
             }
         }
+        checked?(bytes)
         return valid
     }
 

@@ -95,3 +95,35 @@ private func sleepAssertions(for uid: String) throws -> [String] {
     prevention = nil
     #expect(try sleepAssertions(for: uid).isEmpty)
 }
+
+/// Verify Files' checking starts over on resume: the row mustn't jump back
+/// to where checking was, and only downloading counts as progress kept.
+@Test @MainActor func checkingProgressIsNotKeptAcrossAPause() async throws {
+    let (started, start) = AsyncStream<Void>.makeStream()
+    var starts = started.makeAsyncIterator()
+    let runs = Counter()
+    let job = DownloadJob(uid: "checking-\(UUID().uuidString)", category: .gameUpdate) { progress in
+        // Only the first run gets as far as reporting.
+        if runs.next() == 1 { progress(UpdateProgress(completedBytes: 45, totalBytes: 100, completedFiles: 0, totalFiles: 9, stage: .checking)) }
+        start.yield()
+        try await Task.sleep(for: .seconds(3600))
+    }
+    let run = Task { await job.run() }
+    await starts.next()
+    while job.progress == nil { await Task.yield() }
+    #expect(job.progress?.isChecking == true)
+    job.pause()
+    #expect(await run.value == .paused)
+
+    let resumed = Task { await job.run() }
+    await starts.next()
+    #expect(job.progress == nil, "back to waiting, not 45%")
+    job.pause()
+    _ = await resumed.value
+}
+
+private final class Counter: @unchecked Sendable {
+    private let lock = NSLock()
+    private var value = 0
+    func next() -> Int { lock.withLock { value += 1; return value } }
+}

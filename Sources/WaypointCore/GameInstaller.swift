@@ -172,21 +172,24 @@ public struct GameUpdate: Sendable {
     /// With `verify`, loose files are hashed and stored CASC blobs are checked
     /// against their encoded keys. With `languages`, the game switches to them.
     public func plan(target requested: ProductVersion? = nil, verify: Bool = false, languages: GameLanguages? = nil,
-                     log: @Sendable (String) -> Void = { _ in }) async throws -> GameUpdatePlan {
+                     log: @Sendable (String) -> Void = { _ in },
+                     checking: (@Sendable (UpdateProgress) -> Void)? = nil) async throws -> GameUpdatePlan {
         guard Self.canUpdate(install) else { throw UpdateError.unsupported(install.productCode) }
         try InstallVolume.ensureConnected(install.installPath)
         let loose = GameUpdater(install: install, versions: versions, store: store)
         if GameCatalog.family(for: install.productCode) == .hearthstone {
-            return .loose(try await loose.plan(target: requested, verify: verify, languages: languages, log: log))
+            return .loose(try await loose.plan(target: requested, verify: verify, languages: languages, log: log, checking: checking))
         }
         guard let product = InstallableProduct.forProduct(install.productCode) else { throw UpdateError.unsupported(install.productCode) }
         let target: ProductVersion
         if let requested { target = requested } else { target = try await versions.latest(product: install.productCode, region: region) }
         try install.platform.validate(install: install)
         let config = try await versions.productConfig(product: install.productCode, region: region, version: target, platform: install.platform)
-        if config.isContainerless { return .loose(try await loose.plan(target: target, verify: verify, languages: languages, log: log)) }
+        if config.isContainerless {
+            return .loose(try await loose.plan(target: target, verify: verify, languages: languages, log: log, checking: checking))
+        }
         return .casc(try await CASCInstaller(product: product, install: install, config: config, versions: versions, store: store)
-            .plan(target: target, verify: verify, languages: languages, log: log))
+            .plan(target: target, verify: verify, languages: languages, log: log, checking: checking))
     }
 
     /// Repairs what a plan with nothing to download still can: the local

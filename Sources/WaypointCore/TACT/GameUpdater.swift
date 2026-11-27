@@ -47,6 +47,24 @@ public struct UpdateProgress: Sendable, Equatable, Codable {
     public var totalBytes: UInt64
     public var completedFiles: Int
     public var totalFiles: Int
+    /// What's in progress when it isn't downloading. Nil (the default, and
+    /// what older saved downloads decode to) means downloading.
+    public var stage: Stage?
+
+    public enum Stage: String, Sendable, Codable {
+        /// Verify Files reading what's on disk, before any download.
+        case checking
+    }
+
+    public init(completedBytes: UInt64, totalBytes: UInt64, completedFiles: Int, totalFiles: Int, stage: Stage? = nil) {
+        self.completedBytes = completedBytes
+        self.totalBytes = totalBytes
+        self.completedFiles = completedFiles
+        self.totalFiles = totalFiles
+        self.stage = stage
+    }
+
+    public var isChecking: Bool { stage == .checking }
 
     public var fraction: Double { totalBytes == 0 ? 1 : Double(completedBytes) / Double(totalBytes) }
 
@@ -165,7 +183,8 @@ public struct GameUpdater: Sendable {
     /// downloads and tests).
     public func plan(target requested: ProductVersion? = nil, verify: Bool = false, languages: GameLanguages? = nil,
                      only: (@Sendable (String) -> Bool)? = nil,
-                     log: @Sendable (String) -> Void = { _ in }) async throws -> UpdatePlan {
+                     log: @Sendable (String) -> Void = { _ in },
+                     checking: (@Sendable (UpdateProgress) -> Void)? = nil) async throws -> UpdatePlan {
         guard GameUpdater.canUpdate(GameCatalog.family(for: install.productCode)) else {
             throw UpdateError.unsupported(install.productCode)
         }
@@ -222,8 +241,15 @@ public struct GameUpdater: Sendable {
             },
             localHash: { path, index in
                 if index % 250 == 0 { log("Checking files: \(index)/\(wanted.count)") }
+                if index % 25 == 0 {
+                    checking?(UpdateProgress(completedBytes: UInt64(index), totalBytes: UInt64(max(wanted.count, 1)),
+                                             completedFiles: index, totalFiles: wanted.count, stage: .checking))
+                }
                 return try Self.md5(of: try safeURL(path))
             })
+        // Hashed what needed hashing (by files, not bytes): the bar ends full.
+        checking?(UpdateProgress(completedBytes: UInt64(max(wanted.count, 1)), totalBytes: UInt64(max(wanted.count, 1)),
+                                 completedFiles: wanted.count, totalFiles: wanted.count, stage: .checking))
 
         guard !changed.isEmpty else {
             Log.info(.gameUpdate, "plan_ready", "nothing to download", ["uid": install.uid, "to": target.name, "deletions": deletions.count,

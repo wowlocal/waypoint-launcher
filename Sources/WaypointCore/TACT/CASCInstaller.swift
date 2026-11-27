@@ -153,8 +153,10 @@ public struct CASCInstaller: Sendable {
     /// With `languages`, the install switches to them: storage gets their
     /// files (the old ones' stay, as for any other build data), and loose
     /// files change over.
+    /// `checking` hears how far verifying has read, while it does.
     public func plan(target requested: ProductVersion? = nil, verify: Bool = false, languages: GameLanguages? = nil,
-                     log: @Sendable (String) -> Void = { _ in }) async throws -> CASCInstallPlan {
+                     log: @Sendable (String) -> Void = { _ in },
+                     checking: (@Sendable (UpdateProgress) -> Void)? = nil) async throws -> CASCInstallPlan {
         guard config.platform == install.platform else { throw TACTError.malformed("Product configuration platform does not match the installation") }
         try install.platform.validate(install: install)
         let started = Date()
@@ -257,7 +259,13 @@ public struct CASCInstaller: Sendable {
         if verify, present != nil {
             let total = storage.count
             log("Verifying \(total) storage files")
-            let verified = try CASC.verifiedStorage(storageDir, items: storage)
+            let toCheck = max(storage.reduce(UInt64(0)) { $0 + $1.size }, 1)
+            let verified = try CASC.verifiedStorage(storageDir, items: storage) { done in
+                checking?(UpdateProgress(completedBytes: min(done, toCheck), totalBytes: toCheck,
+                                         completedFiles: 0, totalFiles: total, stage: .checking))
+            }
+            // Done reading, whatever was missing: the bar ends full, not short.
+            checking?(UpdateProgress(completedBytes: toCheck, totalBytes: toCheck, completedFiles: total, totalFiles: total, stage: .checking))
             var remaining = 0
             for i in storage.indices where !verified[i] {
                 storage[remaining] = storage[i]

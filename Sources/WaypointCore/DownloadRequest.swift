@@ -61,7 +61,9 @@ public struct DownloadRequest: Codable, Sendable, Equatable {
             Log.notice(.install, "finished", nil, ["uid": install.uid, "version": plan.version, "path": install.installPath])
         case .update, .languages:
             let updater = GameUpdate(install: install)
-            let plan = try await updater.plan(target: target, verify: verify, languages: languages)
+            // Verifying reads every file first: the row shows how far it got.
+            let plan = try await updater.plan(target: target, verify: verify, languages: languages,
+                                              checking: verify ? progress : nil)
             if kind == .languages || !plan.isEmpty || plan.target.buildConfig != install.buildConfig {
                 try await updater.apply(plan, progress: progress)
             } else {

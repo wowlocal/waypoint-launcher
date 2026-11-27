@@ -82,6 +82,8 @@ public final class DownloadJob {
         let generation = generation
         let speed = DownloadSpeed()
         self.speed = speed
+        // Checking starts over: the row goes back to waiting, not to where it was.
+        if progress?.isChecking == true { progress = nil }
         state = .running
         do { try saveCheckpoint() }
         catch {
@@ -99,7 +101,8 @@ public final class DownloadJob {
                             guard let self, self.generation == generation,
                                   self.state == .running || self.state == .pausing else { return }
                             self.progress = progress
-                            self.checkpointIfNeeded(force: false)
+                            // Checking isn't kept (`savedProgress`): nothing to save while it runs.
+                            if !progress.isChecking { self.checkpointIfNeeded(force: false) }
                         }
                     }
                 }
@@ -158,7 +161,7 @@ public final class DownloadJob {
     }
 
     public func saveCheckpoint() throws {
-        try checkpoint?.save(progress: progress, keepsMacAwake: keepsMacAwake,
+        try checkpoint?.save(progress: savedProgress, keepsMacAwake: keepsMacAwake,
                              failure: failureMessage, force: true)
     }
 
@@ -168,6 +171,10 @@ public final class DownloadJob {
         checkpoint = nil
     }
 
+    /// What a resumed download starts from: checking files isn't progress
+    /// it keeps (verifying begins again), so only downloading is saved.
+    private var savedProgress: UpdateProgress? { progress?.isChecking == true ? nil : progress }
+
     private var failureMessage: String? {
         if case .failed(let message) = state { return message }
         return nil
@@ -175,7 +182,7 @@ public final class DownloadJob {
 
     private func checkpointIfNeeded(force: Bool) {
         do {
-            try checkpoint?.save(progress: progress, keepsMacAwake: keepsMacAwake,
+            try checkpoint?.save(progress: savedProgress, keepsMacAwake: keepsMacAwake,
                                  failure: failureMessage, force: force)
         } catch {
             Log.error(category, "checkpoint_failed", nil, ["uid": uid, "error": error])

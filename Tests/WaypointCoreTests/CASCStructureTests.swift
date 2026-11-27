@@ -614,3 +614,26 @@ private func freeSpans(_ dir: URL) throws -> [(archive: Int, offset: UInt64, siz
     #expect(repair.republishedShmem)
     #expect(try freeSpans(dir).filter { $0.archive == 1 }.allSatisfy { $0.offset >= UInt64(CASC.segmentHeadersSize) })
 }
+
+@Test func verifyingReportsHowFarItHasRead() throws {
+    let dir = temporaryStorage()
+    defer { try? FileManager.default.removeItem(at: dir) }
+    try makeStorage(dir, files: 0..<5000)
+    let items = (0..<5000).map { StorageItem(key: Key16(blte($0).key)!, size: UInt64(blte($0).blob.count), fullKey: false) }
+        .sorted { $0.key < $1.key }
+    var reports: [UInt64] = []
+    let valid = try CASC.verifiedStorage(dir, items: items) { reports.append($0) }
+    #expect(valid.allSatisfy { $0 })
+    #expect(reports.count > 1, "progress along the way, not only at the end")
+    #expect(reports == reports.sorted())
+    let total = try entries(dir).filter { !CASC.isHeaderSlotEntry($0) }.reduce(UInt64(0)) { $0 + UInt64($1.size) }
+    #expect(reports.last == total)
+}
+
+@Test func savedProgressFromOlderVersionsStillLoads() throws {
+    let old = Data(#"{"completedBytes":5,"totalBytes":10,"completedFiles":1,"totalFiles":2}"#.utf8)
+    let progress = try JSONDecoder().decode(UpdateProgress.self, from: old)
+    #expect(progress.stage == nil && !progress.isChecking && progress.fraction == 0.5)
+    let checking = UpdateProgress(completedBytes: 1, totalBytes: 4, completedFiles: 0, totalFiles: 9, stage: .checking)
+    #expect(try JSONDecoder().decode(UpdateProgress.self, from: JSONEncoder().encode(checking)) == checking)
+}

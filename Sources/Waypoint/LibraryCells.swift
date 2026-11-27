@@ -192,12 +192,14 @@ final class GameCell: NSView {
                 downloadDetails(update, bytesPerSecond: model?.downloadBytesPerSecond(uid: game.id), status: "Downloading…")
             }
         case .pausing(let update), .paused(let update):
-            fraction = update?.fraction ?? 0
+            // Checking starts over on resume: nothing of it is kept.
+            let kept = update.flatMap { $0.isChecking ? nil : $0 }
+            fraction = kept?.fraction ?? 0
             let pausing = if case .pausing = state.phase { true } else { false }
             // A download the schedule paused says when it continues.
             let label = pausing ? "Pausing…" : state.automaticStatus ?? "Paused"
-            detail.stringValue = downloadStatus(update, label: label)
-            downloadTooltip = { downloadDetails(update, bytesPerSecond: nil, status: label) }
+            detail.stringValue = downloadStatus(kept, label: label)
+            downloadTooltip = { downloadDetails(kept, bytesPerSecond: nil, status: label) }
         case .uninstalling(let step):
             detail.stringValue = step
         case .failed(let message) where !game.isOffline:
@@ -616,9 +618,11 @@ final class InstallableCell: NSView {
             showsButton = true
         case .pausing(let update), .paused(let update):
             let pausing = if case .pausing = state.phase { true } else { false }
-            fraction = update?.fraction ?? 0
-            detail.stringValue = downloadStatus(update, label: pausing ? "Pausing…" : "Paused")
-            downloadTooltip = { downloadDetails(update, bytesPerSecond: nil, status: pausing ? "Pausing…" : "Paused") }
+            // Checking starts over on resume: nothing of it is kept.
+            let kept = update.flatMap { $0.isChecking ? nil : $0 }
+            fraction = kept?.fraction ?? 0
+            detail.stringValue = downloadStatus(kept, label: pausing ? "Pausing…" : "Paused")
+            downloadTooltip = { downloadDetails(kept, bytesPerSecond: nil, status: pausing ? "Pausing…" : "Paused") }
         case .updating(let update):
             fraction = update?.fraction ?? 0
             detail.stringValue = progressDescription(update, waiting: "Preparing…")
@@ -1019,12 +1023,14 @@ private func layOutRow(_ row: NSStackView, in cell: NSView, icon: NSView, text: 
 /// "42% · 1.2 GB of 3 GB", or `waiting` before the first progress report.
 private func progressDescription(_ progress: UpdateProgress?, waiting: String) -> String {
     guard let progress else { return waiting }
+    // Verify Files reading what's there: how far, not how much downloaded.
+    if progress.isChecking { return "Checking files… \(Int(progress.fraction * 100))%" }
     let done = ByteCountFormatter.string(fromByteCount: Int64(progress.completedBytes), countStyle: .file)
     let total = ByteCountFormatter.string(fromByteCount: Int64(progress.totalBytes), countStyle: .file)
     return "\(Int(progress.fraction * 100))% · \(done) of \(total)"
 }
 
 private func downloadStatus(_ progress: UpdateProgress?, label: String) -> String {
-    guard let progress else { return label }
+    guard let progress, !progress.isChecking else { return label }
     return "\(label) · \(progressDescription(progress, waiting: label))"
 }

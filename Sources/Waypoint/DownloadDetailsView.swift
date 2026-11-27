@@ -116,6 +116,7 @@ final class DownloadDetailsView: NSStackView {
 
 func downloadDetails(_ progress: UpdateProgress?, bytesPerSecond: Double?, status: String) -> String {
     guard let progress else { return status }
+    if progress.isChecking { return "Checking files… \(Int(progress.fraction * 100))%" }
     // A fixed unit makes small advances visible even in a large download.
     let done = (Double(progress.completedBytes) / 1_000_000).formatted(.number.precision(.fractionLength(2)))
     let total = (Double(progress.totalBytes) / 1_000_000).formatted(.number.precision(.fractionLength(2)))
